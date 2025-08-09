@@ -34,7 +34,7 @@ def func(ds: xr.Dataset) -> xr.Dataset:
     return ds.operation1().operation2()...
 ```
 
-and reorders the operations (hopefully safely :fingers_crossed:) to optimize the performance of the expression.
+and reorders the operations (hopefully safely 🤞) to optimize the performance of the expression.
 
 ```python
 
