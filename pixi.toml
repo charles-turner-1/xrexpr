@@ -1,0 +1,12 @@
+[workspace]
+channels = ["conda-forge", "main", "r", "msys2"]
+name = "xrexpr"
+platforms = ["osx-arm64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+python = ">=3.10"
+xarray = "*"
+libcst = "*"

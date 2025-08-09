@@ -1,0 +1,136 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = [
+  "setuptools >= 61.0.0",
+  "versioneer[toml]==0.29",
+]
+
+[project]
+name = "xrexpr"
+description = "Rewrite chained expressions on xarray datasets to improve performance"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Charle Turner" },
+]
+maintainers = [
+  { name = "Charles Turner" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+license = {text = "Apache Software License 2.0"}
+dependencies = [
+   "libcst",
+   "xarray"
+]
+
+dynamic = ["version"]
+
+[project.optional-dependencies]
+dev = [
+    "coverage",  # testing
+    "mypy",  # linting
+    "pytest",  # testing
+    "ruff",  # linting
+    "xarray",
+]
+
+[project.scripts]
+
+[project.urls]
+
+bugs = "https://github.com/charles-turner-1/xrexpr/issues"
+changelog = "https://github.com/charles-turner-1/xrexpr/blob/main/CHANGELOG.md"
+homepage = "https://github.com/charles-turner-1/xrexpr"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.package-data]
+"*" = ["*.*"]
+
+
+# Mypy
+# ----
+
+[tool.mypy]
+files = "src"
+exclude = [
+  "src/xrexpr/_version.py",
+]
+
+# Use strict defaults
+strict = true
+warn_unreachable = true
+# warn_unused_ignores = true
+warn_no_return = true
+
+allow_subclassing_any = true
+
+[tool.versioneer]
+VCS = "git"
+style = "pep440"
+versionfile_source = "src/xrexpr/_version.py"
+versionfile_build = "xrexpr/_version.py"
+tag_prefix = "v"
+parentdir_prefix = "xrexpr-"
+
+[tool.coverage.run]
+omit = [
+    "*/_version.py",
+    "*/data/__init__.py",
+]
+
+[tool.ruff]
+target-version = "py310"
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "venv",
+]
+# E402: module level import not at top of file
+# E501: line too long - let black worry about that
+ignore = [
+    "E402",
+    "E501",
+]
+select = [
+    # Pyflakes
+    "F",
+    # Pycodestyle
+    "E",
+    "W",
+    # isort
+    "I",
+    # Pyupgrade
+    "UP",
+]
+
+[tool.ruff.mccabe]
+max-complexity = 18
+
+[tool.ruff.isort]
+known-first-party = ["xrexpr"]
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
