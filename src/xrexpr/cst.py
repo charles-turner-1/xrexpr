@@ -1,7 +1,5 @@
 import libcst as cst
 
-w
-
 
 class SelectionPushdown(cst.CSTTransformer):
     """
