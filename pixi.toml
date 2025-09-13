@@ -11,3 +11,7 @@ python = ">=3.10"
 xarray = "*"
 libcst = "*"
 versioneer = ">=0.29,<0.30"
+pytest = ">=8.4.2,<9"
+
+[pypi-dependencies]
+xrexpr = {editable = true, path = "."}

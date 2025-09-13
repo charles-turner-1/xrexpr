@@ -1,4 +1,5 @@
 import inspect
+import textwrap
 from collections.abc import Callable
 from typing import Any
 
@@ -19,6 +20,7 @@ def rewrite_expr(
     position in a chain of mean calls.
     """
     func_source = inspect.getsource(func)
+    func_source = textwrap.dedent(func_source)
     cst_for_mods = cst.parse_module(func_source)
     transformer = SelectionPushdown()
     transformed_cst = cst_for_mods.visit(transformer)
@@ -37,6 +39,7 @@ def peek_rewritten_expr(
     Dataset, without executing it.
     """
     func_source = inspect.getsource(func)
+    func_source = textwrap.dedent(func_source)
     cst_for_mods = cst.parse_module(func_source)
     transformer = SelectionPushdown()
     transformed_func: str = cst_for_mods.visit(transformer).code
