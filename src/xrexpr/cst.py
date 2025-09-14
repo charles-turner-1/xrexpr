@@ -2,14 +2,15 @@ from collections.abc import Sequence
 
 import libcst as cst
 
+from .exceptions import InvalidExpressionError
+from .operations import AGGREGATIONS, SELECTIONS
 
-class InvalidExpressionError(Exception):
-    pass
+_ = AGGREGATIONS
 
 
 class SelectionPushdown(cst.CSTTransformer):
     """
-    Pushes isel calls down to the first position in a chain of mean calls, by
+    Pushes isel calls down to the first position in a chain of mean, std, etc calls, by
     matching on node and exchanging pairs
     """
 
@@ -31,7 +32,7 @@ class SelectionPushdown(cst.CSTTransformer):
                     ),
                 ),
                 args=isel_args,
-            ) if selector in ["isel", "sel"]:
+            ) if selector in SELECTIONS:
                 # Check for any overlap in mean kwarg values, and selector kwarg names
                 self._check_valid_ordering(mean_args, isel_args)
 
