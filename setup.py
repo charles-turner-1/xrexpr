@@ -1,5 +1,7 @@
-import versioneer
+# type: ignore
 from setuptools import setup
+
+import versioneer
 
 setup(
     version=versioneer.get_version(),

@@ -8,8 +8,6 @@ import xarray as xr
 
 from .cst import SelectionPushdown
 
-# TODO: Make tehse actually work nicely as decorators
-
 
 def rewrite_expr(
     func: Callable[[xr.Dataset], xr.Dataset],

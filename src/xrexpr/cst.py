@@ -32,7 +32,9 @@ class SelectionPushdown(cst.CSTTransformer):
                     ),
                 ),
                 args=isel_args,
-            ) if selector in SELECTIONS:
+            ) if (
+                selector in SELECTIONS
+            ):
                 # Check for any overlap in mean kwarg values, and selector kwarg names
                 self._check_valid_ordering(mean_args, isel_args)
 
@@ -53,7 +55,7 @@ class SelectionPushdown(cst.CSTTransformer):
                     ),
                     args=mean_args,
                 )
-                return swapped_node.visit(self)  # type: ignore[return-value]
+                return swapped_node.visit(self)
 
         return updated_node
 

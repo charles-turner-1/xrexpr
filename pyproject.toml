@@ -107,6 +107,9 @@ exclude = [
     "dist",
     "node_modules",
     "venv",
+    "versioneer.py",
+    "_version.py",
+    "tests"
 ]
 # E402: module level import not at top of file
 # E501: line too long - let black worry about that
