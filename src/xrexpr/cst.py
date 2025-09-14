@@ -1,3 +1,5 @@
+from collections.abc import Sequence
+
 import libcst as cst
 
 
@@ -31,8 +33,7 @@ class SelectionPushdown(cst.CSTTransformer):
                 args=isel_args,
             ) if selector in ["isel", "sel"]:
                 # Check for any overlap in mean kwarg values, and selector kwarg names
-                # if self._not_reorderable(mean_args, isel_args):
-                #     return updated_node
+                self._check_valid_ordering(mean_args, isel_args)
 
                 swapped_node = cst.Call(
                     func=cst.Attribute(
@@ -55,26 +56,25 @@ class SelectionPushdown(cst.CSTTransformer):
 
         return updated_node
 
-    def _not_reorderable(
-        self, mean_args: list[cst.Arg], isel_args: list[cst.Arg]
-    ) -> bool:
+    def _check_valid_ordering(
+        self, mean_args: Sequence[cst.Arg], isel_args: Sequence[cst.Arg]
+    ) -> None:
         """
         This is absolutely gross and needs refactoring, to extract the simplestring value.
 
         If we cannot reorder, then we actually want to raise - the selection will
-        be invalid
+        be invalid. This is because expressions like ds.mean(dim="lon").isel(lon=0)
+        are invalid as the lon dim will be dropped by the mean operation.
         """
 
         mean_dims = {key.value.value.strip("'").strip('"') for key in mean_args}
         isel_dims = {key.keyword.value for key in isel_args if key.keyword}
 
-        not_reorderable = not bool(mean_dims & isel_dims)
+        reorderable = not bool(mean_dims & isel_dims)
 
-        return not_reorderable
-
-        if not_reorderable:
-            return True
+        if reorderable:
+            return None
 
         raise InvalidExpressionError(
-            "Expression not valid: selection on dropped dimensions"
+            f"Expression not valid: selection on dropped dimensions {isel_dims}"
         )
