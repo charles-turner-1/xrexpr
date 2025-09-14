@@ -7,3 +7,4 @@ dependencies:
   - xarray
   - libcst
   - pytest
+  - pre-commit
