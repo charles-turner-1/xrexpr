@@ -1,7 +1,8 @@
 # Byte-compiled / optimized / DLL files
-__pycache__/
+*/__pycache__/
 *.py[cod]
 *$py.class
+
 
 # C extensions
 *.so
@@ -137,3 +138,5 @@ bin/build_all.sh.o*
 
 # User-made files
 bin/build_all_test.sh
+
+*.pyc

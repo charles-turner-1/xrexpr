@@ -150,7 +150,32 @@ python = ">=3.10"
 xarray = "*"
 libcst = "*"
 versioneer = ">=0.29,<0.30"
+
+[tool.pixi.feature.dev.pypi-dependencies]
+xrexpr = {editable = true, path = "."}
+
+[tool.pixi.environments]
+dev = { features = ["dev"], solve-group = "default" }
+test-py310 = { features = ["py310", "dev"] }
+test-py311 = { features = ["py311", "dev"] }
+test-py312 = { features = ["py312", "dev"] }
+test-py313 = { features = ["py313", "dev"] }
+
+[tool.pixi.feature.dev.dependencies]
 pytest = ">=8.4.2,<9"
 
-[tool.pixi.pypi-dependencies]
-xrexpr = {editable = true, path = "."}
+[tool.pixi.feature.dev.tasks]
+test = {cmd = "pytest tests", description = "Run tests"}
+test-cov = {cmd = "coverage run -m --source=ecgtools pytest tests && coverage xml", description = "Run tests with coverage and generate xml report"}
+
+[tool.pixi.feature.py310.dependencies]
+python = "3.10.*"
+
+[tool.pixi.feature.py311.dependencies]
+python = "3.11.*"
+
+[tool.pixi.feature.py312.dependencies]
+python = "3.12.*"
+
+[tool.pixi.feature.py313.dependencies]
+python = "3.13.*"
