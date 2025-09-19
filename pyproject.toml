@@ -163,10 +163,11 @@ test-py313 = { features = ["py313", "dev"] }
 
 [tool.pixi.feature.dev.dependencies]
 pytest = ">=8.4.2,<9"
+coverage = ">=7.10.6,<8"
 
 [tool.pixi.feature.dev.tasks]
 test = {cmd = "pytest tests", description = "Run tests"}
-test-cov = {cmd = "coverage run -m --source=ecgtools pytest tests && coverage xml", description = "Run tests with coverage and generate xml report"}
+test-cov = {cmd = "coverage run -m --source=xrexpr pytest tests && coverage xml", description = "Run tests with coverage and generate xml report"}
 
 [tool.pixi.feature.py310.dependencies]
 python = "3.10.*"
