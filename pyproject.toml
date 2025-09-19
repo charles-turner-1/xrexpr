@@ -11,10 +11,10 @@ description = "Rewrite chained expressions on xarray datasets to improve perform
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
-  { name = "Charle Turner" },
+  { name = "Charle Turner", email = "charles.turner@anu.edu.au"},
 ]
 maintainers = [
-  { name = "Charles Turner" },
+  { name = "Charle Turner", email = "charles.turner@anu.edu.au"},
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -137,3 +137,20 @@ known-first-party = ["xrexpr"]
 
 [tool.pytest.ini_options]
 asyncio_default_fixture_loop_scope = "function"
+
+[tool.pixi.workspace]
+channels = ["conda-forge", "main", "r", "msys2"]
+name = "xrexpr"
+platforms = ["osx-arm64", "linux-64", "win-64"]
+
+[tool.pixi.tasks]
+
+[tool.pixi.dependencies]
+python = ">=3.10"
+xarray = "*"
+libcst = "*"
+versioneer = ">=0.29,<0.30"
+pytest = ">=8.4.2,<9"
+
+[tool.pixi.pypi-dependencies]
+xrexpr = {editable = true, path = "."}

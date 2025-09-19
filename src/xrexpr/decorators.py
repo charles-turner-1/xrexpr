@@ -24,7 +24,8 @@ def rewrite_expr(
     transformed_cst = cst_for_mods.visit(transformer)
 
     namespace: dict[str, Any] = {}
-    exec(transformed_cst.code, func.__globals__, namespace)
+    compiled = compile(transformed_cst.code, "<magic>", "exec")
+    exec(compiled, func.__globals__, namespace)
 
     return namespace[func.__name__]  # type: ignore[no-any-return]
 
