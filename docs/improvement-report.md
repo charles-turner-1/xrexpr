@@ -18,9 +18,9 @@ do the cheap data-shrinking operations before the expensive ones. The idea is so
 worth generalizing. The current *mechanism* — rewriting syntax — is what limits it.
 
 The goal of this report: explain **why the mechanism should change**, what to change it
-to, and how to build it incrementally without breaking the current API. It is written to
-be read top-to-bottom: **Part A** is the design argument (why), **Part B** is the concrete
-implementation plan (how).
+to, and how to build it incrementally while replacing the current function-rewriting API.
+It is written to be read top-to-bottom: **Part A** is the design argument (why), **Part B**
+is the concrete implementation plan (how).
 
 ---
 
@@ -145,10 +145,10 @@ an op list, and returns a new proxy; a terminal `.compute()` optimizes and repla
 the user *calls them on the proxy*, so lambdas, intermediate variables, and loops are all
 irrelevant. It is explicit and opt-in (`ds.opt.…`), which reads naturally and sidesteps
 the entire class of limitations #2 and #4 at once.
-- *A function-wrapper frontend (`rewrite_expr(func)`) is possible over the same IR* — call
-  `func(proxy)` instead of `func(ds)` — but it is strictly messier (you must trust the
-  function to touch the dataset only through the proxy) and is **not** the recommended path.
-  Keep it, if at all, as a thin secondary shim; the accessor is the primary API.
+- *Do not keep a function-wrapper frontend (`rewrite_expr(func)`).* It is possible to call
+  `func(proxy)` instead of `func(ds)`, but that preserves the same janky, JIT-ish shape as
+  the current implementation: user code is treated as something to intercept, transform,
+  and replay. The accessor should be the only public execution model.
 - *Inherent limit (document, don't fight):* control flow that branches on **data values**
   (`if ds.opt.max() > 0: ...`) forces materialization at that point — the recorded chain
   simply ends there and a new one begins. That's fine and expected.
@@ -220,7 +220,8 @@ this). No `getsource`, no `exec`. Public surface is the accessor plus:
 Build on the **`add-accessor` branch** as the skeleton (accessor + proxy + replay loop
 already work). The plan lifts its optimizer out of the proxy, gives it real metadata, and
 makes it a fixpoint. The source-rewriting path (`cst.py` + `decorators.py` `getsource`/
-`exec`) is **retired**, not extended — the accessor replaces it wholesale.
+`exec`) is **deleted**, not extended. The current `rewrite_expr`/`peek_rewritten_expr`
+API is retired with it.
 
 ## B1. Modules (under `src/xrexpr/`)
 
@@ -256,16 +257,17 @@ makes it a fixpoint. The source-rewriting path (`cst.py` + `decorators.py` `gets
 - Enrich `operations.py`: replace the bare `AGGREGATIONS`/`SELECTIONS` sets with a metadata
   table (op name → `kind`, whether it consumes its dim), so `reduce` (`mean`/`sum`/`std`/…)
   and `scan` (`cumsum`/`cumprod`/`diff`) are distinguished. This table drives `to_opnode`.
-- Delete `cst.py`; reduce `decorators.py` to (optionally) a thin deprecated shim (B2).
+- Delete `cst.py` and `decorators.py`; remove the function-rewriting exports from the
+  package surface.
 
 ## B2. Public API
 
-- **Primary:** the accessor — `ds.opt.mean("lat").mean("lon").isel(time=0).compute()`
-  (rename `lazier` → a keeper name, e.g. `opt`). `.explain()` prints the optimised op list.
-- **Secondary / optional:** a `rewrite_expr(func)` shim that calls `func(proxy)` and returns
-  the optimised result, only for back-compat with the current function-based API. Mark it
-  deprecated in the docstring; do not invest in it. `peek_rewritten_expr` becomes
-  `explain`-over-the-shim, or is dropped.
+- **Primary and only execution API:** the accessor —
+  `ds.opt.mean("lat").mean("lon").isel(time=0).compute()` (rename `lazier` → a keeper
+  name, e.g. `opt`). `.explain()` prints the optimised op list.
+- **Removed:** `rewrite_expr(func)` and `peek_rewritten_expr(func)`. The project should not
+  carry a compatibility shim for source rewriting; examples and tests should move to the
+  accessor API.
 
 ## B3. Testing — the highest-value robustness upgrade
 
@@ -302,10 +304,10 @@ if nothing changed). Replace/augment:
 2. Make `optimize` a **fixpoint**; add the metadata table and the `reduce`/`scan`/validity
    trichotomy; generalise pushdown to all `AGGREGATIONS`. Fixes mean-only, single-pass, the
    `mean()` empty-dim bug, and the `cumsum` conflation.
-3. Add Hypothesis + golden op-list tests + the two demo regression cases; delete `cst.py`
-   and the `getsource`/`exec` path.
-4. Rename the accessor to its keeper name; add `explain()`; leave `rewrite_expr` as a
-   deprecated shim (or drop it).
+3. Add Hypothesis + golden op-list tests + the two demo regression cases; delete `cst.py`,
+   `decorators.py`, and the `getsource`/`exec` path.
+4. Rename the accessor to its keeper name; add `explain()`; update README/tests to remove
+   `rewrite_expr` and `peek_rewritten_expr`.
 5. (Optional) cost model + dask extra: annotate `OpNode` sizes, and for dask inputs hand the
    replayed graph to dask's physical optimizer afterward (A3.1 layering).
 
