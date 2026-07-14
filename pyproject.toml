@@ -139,18 +139,51 @@ known-first-party = ["xrexpr"]
 asyncio_default_fixture_loop_scope = "function"
 
 [tool.pixi.workspace]
-channels = ["conda-forge", "main", "r", "msys2"]
+channels = ["conda-forge"]
 name = "xrexpr"
 platforms = ["osx-arm64", "linux-64", "win-64"]
-
-[tool.pixi.tasks]
 
 [tool.pixi.dependencies]
 python = ">=3.10"
 xarray = "*"
 libcst = "*"
 versioneer = ">=0.29,<0.30"
-pytest = ">=8.4.2,<9"
 
 [tool.pixi.pypi-dependencies]
 xrexpr = {editable = true, path = "."}
+
+[tool.pixi.environments]
+default = { features = ["dev", "test"], solve-group = "default" }
+test-py310 = { features = ["py310", "test"] }
+test-py311 = { features = ["py311", "test"] }
+test-py312 = { features = ["py312", "test"] }
+test-py313 = { features = ["py313", "test"] }
+
+[tool.pixi.feature.test.dependencies]
+pytest = ">=8.4.2,<9"
+coverage = "*"
+
+[tool.pixi.feature.test.tasks]
+test = { cmd = "pytest tests", description = "Run tests" }
+test-cov = { cmd = "coverage run -m --source=xrexpr pytest tests && coverage xml", description = "Run tests with coverage and generate xml report" }
+
+[tool.pixi.feature.dev.dependencies]
+pre-commit = ">=4.2.0,<5"
+ruff = "*"
+
+[tool.pixi.feature.dev.tasks]
+ruff = { cmd = "ruff check src", description = "Run ruff checks" }
+pre-commit = { cmd = "pre-commit run --all-files && pixi lock", description = "Run pre-commit hooks" }
+pre-commit-install = { cmd = "pre-commit install", description = "Install pre-commit hooks" }
+
+[tool.pixi.feature.py310.dependencies]
+python = "3.10.*"
+
+[tool.pixi.feature.py311.dependencies]
+python = "3.11.*"
+
+[tool.pixi.feature.py312.dependencies]
+python = "3.12.*"
+
+[tool.pixi.feature.py313.dependencies]
+python = "3.13.*"
