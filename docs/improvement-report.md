@@ -44,14 +44,10 @@ hard-codes `attr=cst.Name(value="mean")` on the inner node. `AGGREGATIONS` is im
 bound to `_` — unused. So `ds.sum("lat").isel(time=0)` is **not** optimized. The README
 promises generality the code doesn't deliver.
 
-**2. It reasons about text, not computation.** Because it parses source, it breaks on
-everything that isn't a single flat method chain in an importable function:
-- locally-defined functions → the repo's own `test_local_func_pushdown...` is `xfail`
-  ("CST fails on locally defined functions, indentation error");
-- lambdas, REPL/Jupyter-defined functions, `functools.partial`, decorated functions,
-  C-defined callables (no source);
-- intermediate variables (`a = ds.mean("lat"); return a.isel(time=0)`), loops, and
-  comprehensions that build the chain — invisible to a single-Call pattern.
+**2. It reasons about text, not computation.** Because it parses source, it only sees
+syntax shapes that happen to match the CST pattern. Any expression built through ordinary
+Python control flow or intermediate values is either invisible to the optimizer or requires
+more source-rewriting machinery. That is the wrong abstraction layer for this project.
 
 **3. The correctness check is fragile and conflates two different things.**
 `_check_valid_ordering` assumes every dim is a simple `dim="name"` **keyword** with a
@@ -136,19 +132,14 @@ optimizer is a **fixpoint rewrite** over that list. A working skeleton of this a
 exists on the `add-accessor` branch (`ds.lazier` → `LazyDatasetProxy`); this section
 describes what it is and the three deltas that turn it from demo into the plan.
 
-**Record (frontend): an xarray accessor, not a function.** Register an accessor
+**Record (frontend): an xarray accessor.** Register an accessor
 (`@xr.register_dataset_accessor("opt")`) that returns a lazy proxy. Every method
 (`.mean`, `.isel`, `.sel`, `__getitem__`, …) is intercepted via `__getattr__`, appended to
 an op list, and returns a new proxy; a terminal `.compute()` optimizes and replays. This is
-**much cleaner than tracing a user function**: no `inspect.getsource`, no `exec`, no
-`func.__globals__`, no source-indentation failures — the operations are captured because
-the user *calls them on the proxy*, so lambdas, intermediate variables, and loops are all
-irrelevant. It is explicit and opt-in (`ds.opt.…`), which reads naturally and sidesteps
-the entire class of limitations #2 and #4 at once.
-- *Do not keep a function-wrapper frontend (`rewrite_expr(func)`).* It is possible to call
-  `func(proxy)` instead of `func(ds)`, but that preserves the same janky, JIT-ish shape as
-  the current implementation: user code is treated as something to intercept, transform,
-  and replay. The accessor should be the only public execution model.
+**much cleaner than tracing user code**: no `inspect.getsource`, no `exec`, no
+`func.__globals__`. The operations are captured because the user calls them on the proxy.
+It is explicit and opt-in (`ds.opt.…`), which reads naturally and sidesteps the entire
+class of limitations #2 and #4 at once.
 - *Inherent limit (document, don't fight):* control flow that branches on **data values**
   (`if ds.opt.max() > 0: ...`) forces materialization at that point — the recorded chain
   simply ends there and a new one begins. That's fine and expected.
@@ -208,7 +199,7 @@ this). No `getsource`, no `exec`. Public surface is the accessor plus:
 | Limitation | Fixed by |
 | --- | --- |
 | Only `mean` | Generalized pushdown over `AGGREGATIONS` + `OpNode` metadata (A4 optimize) |
-| Breaks on non-trivial source (lambdas, locals, vars, loops) | Accessor records real calls — no source parsing at all (A4 record); the `xfail` case ceases to exist |
+| Source-shape/source-availability failures | Accessor records real calls — no source parsing at all (A4 record) |
 | Fragile / wrong validity check | Record-time metadata resolution + validity trichotomy (A4) |
 | `exec` in caller globals | Accessor `.compute()` replays real method calls; no recompilation |
 | Perf claims unverifiable in tests | Property-based + golden op-list tests (Part B) |
@@ -285,8 +276,7 @@ if nothing changed). Replace/augment:
 - **Regression cases from the demo:** (1) `mean("lat").mean("lon").isel(time=0)` optimises
   fully to selection-first (proves the fixpoint, not single-pass); (2) `ds.mean().isel(time=0)`
   raises `InvalidExpressionError` rather than silently swapping (proves record-time
-  resolution). Also add lambda / intermediate-variable / loop chains — trivially fine under
-  the accessor, impossible under the old CST path.
+  resolution).
 - **Move timing out of correctness.** Keep the perf claims in an optional `pytest-benchmark`
   / `asv` suite, not in `assert`-based tests.
 
@@ -339,8 +329,7 @@ if nothing changed). Replace/augment:
   the optional extra before exercising the dask path).
 - New Hypothesis suite: `pixi run pytest tests/test_properties.py` — random pipelines prove
   `optimized == original` and cost-monotonicity.
-- Manual end-to-end smoke: run the three README pipelines via `ds.opt.….compute()` plus a
-  lambda and an intermediate-variable version; confirm equal results and that `.explain()`
-  shows selections pushed to the front.
+- Manual end-to-end smoke: run the README pipelines via `ds.opt.….compute()`; confirm equal
+  results and that `.explain()` shows selections pushed to the front.
 - Perf claims: an optional `pytest-benchmark` run comparing original vs optimized on a
   representative dataset (kept out of correctness tests).
