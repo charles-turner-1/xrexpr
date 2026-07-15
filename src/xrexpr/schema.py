@@ -96,9 +96,9 @@ def _indexer_size(indexer: Any, current: int) -> int:
 
     if isinstance(indexer, np.ndarray):
         return int(indexer.sum()) if indexer.dtype == bool else int(indexer.size)
-    if isinstance(indexer, (list, tuple)):
+    if isinstance(indexer, list | tuple):
         seq = list(indexer)
-        if seq and all(isinstance(x, (bool, np.bool_)) for x in seq):
+        if seq and all(isinstance(x, bool | np.bool_) for x in seq):
             return int(sum(bool(x) for x in seq))
         return len(seq)
     return current
