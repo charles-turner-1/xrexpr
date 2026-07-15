@@ -1,10 +1,29 @@
-"""
-This is just going to hold a set of all the operations in xarray that we might
-want to optimise. Honestly seems like a bit of a janky idea but maybe it'll
-gradually lead to a better understanding of how to handle the problem
+"""Static metadata about the xarray operations the optimiser reasons about.
+
+Each tabulated op maps to an :class:`OpSpec` recording its *kind* and, for
+reductions, whether it consumes (removes) the dim it is given. This replaces the
+two bare ``AGGREGATIONS``/``SELECTIONS`` sets and, crucially, distinguishes:
+
+- ``reduce`` ops (``mean``/``sum``/``std``/...), which **destroy** their dim, from
+- ``scan`` ops (``cumsum``/``cumprod``/``diff``), which **keep** it.
+
+The old ``AGGREGATIONS`` set conflated the two (``cumsum`` sat alongside ``mean``),
+which is the root of the ``cumsum`` reordering bug called out in the report. This
+table is the single source of truth that later drives ``to_opnode``.
 """
 
-AGGREGATIONS = {
+from typing import NamedTuple
+
+
+class OpSpec(NamedTuple):
+    #: op family; one of ``"reduce"``/``"scan"``/``"select"`` (canonical set: ``ir.KINDS``)
+    kind: str
+    #: reduce: the given dim is removed. scan/select: dim kept — selects resolve
+    #: their actual dim removal from the *indexer* at record time, not from here.
+    consumes_dim: bool
+
+
+_REDUCTIONS = (
     "reduce",
     "count",
     "all",
@@ -17,11 +36,25 @@ AGGREGATIONS = {
     "std",
     "var",
     "median",
-    "cumsum",
-    "cumprod",
+)
+_SCANS = ("cumsum", "cumprod", "diff")
+_SELECTS = ("sel", "isel")
+
+OP_TABLE: dict[str, OpSpec] = {
+    **{name: OpSpec("reduce", True) for name in _REDUCTIONS},
+    **{name: OpSpec("scan", False) for name in _SCANS},
+    **{name: OpSpec("select", False) for name in _SELECTS},
 }
 
-SELECTIONS = {
-    "sel",
-    "isel",
-}
+
+def spec(name: str) -> OpSpec | None:
+    """Return the :class:`OpSpec` for ``name``, or ``None`` if it isn't tabulated."""
+    return OP_TABLE.get(name)
+
+
+# --- back-compat -------------------------------------------------------------
+# The (soon-to-be-removed) cst.py path still imports these; derive them from the
+# table so there is one source of truth. ``SELECTIONS`` is unchanged; ``AGGREGATIONS``
+# now also groups the scans (incl. ``diff``) — harmless, as it is otherwise unused.
+AGGREGATIONS = frozenset(n for n, s in OP_TABLE.items() if s.kind in ("reduce", "scan"))
+SELECTIONS = frozenset(n for n, s in OP_TABLE.items() if s.kind == "select")
