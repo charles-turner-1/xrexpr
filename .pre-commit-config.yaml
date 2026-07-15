@@ -10,15 +10,19 @@ repos:
     hooks:
     - id: black
       language_version: python3
-  - repo: local
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: 'v1.17.1'
     hooks:
     - id: mypy
       name: mypy
-      # Run the project's mypy in the pixi env (so xarray/numpy/frozendict resolve)
-      # against the [tool.mypy] config, i.e. exactly `mypy src`. pass_filenames is
-      # off so pre-commit does not override files="src" with the changed paths.
-      entry: pixi run -e default mypy
-      language: system
-      types: [python]
+      # Run `mypy src` in pre-commit's own isolated venv (no pixi needed, so this
+      # works in the CI pre-commit job too). pass_filenames is off + args=[src] so
+      # it always type-checks the whole package via [tool.mypy], not per-file.
+      # additional_dependencies must carry the runtime imports mypy needs to follow.
+      args: [src]
       pass_filenames: false
-      require_serial: true
+      additional_dependencies:
+        - xarray
+        - numpy
+        - frozendict
+        - libcst
