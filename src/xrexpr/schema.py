@@ -84,7 +84,9 @@ def _indexer_size(indexer: Any, current: int) -> int:
 
     Handles the cheap, unambiguous cases (slices, integer/boolean sequences and
     arrays). For anything that would need data to size — e.g. a ``sel`` label slice
-    needing coordinate values — it conservatively returns the current size.
+    needing coordinate values — it conservatively returns the current size. Being
+    conservative is always *safe*: an imprecise size never changes the result of a
+    replayed plan, it only leaves a potential size-driven optimisation on the table.
     """
     if isinstance(indexer, slice):
         bounds = (indexer.start, indexer.stop, indexer.step)
