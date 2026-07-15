@@ -34,7 +34,6 @@ class LazyDatasetProxy:
         self._base_ds = base_ds
         self._ops = list(ops) if ops else []
 
-    # --- internals -------------------------------------------------------
     def _record(
         self, method_name: str, *args: Any, **kwargs: Any
     ) -> "LazyDatasetProxy":
@@ -51,7 +50,6 @@ class LazyDatasetProxy:
         )
         return f"<LazyDatasetProxy base={type(self._base_ds).__name__} ops=[{ops_preview}]>"
 
-    # --- generic attr/method interception --------------------------------
     def __getattr__(self, name: str) -> Any:
         """Record callable methods; eagerly resolve non-callable attributes.
 
@@ -78,7 +76,6 @@ class LazyDatasetProxy:
     def __getitem__(self, key: Any) -> "LazyDatasetProxy":
         return self._record("__getitem__", key)
 
-    # --- compute + optimization ------------------------------------------
     def compute(self) -> xr.Dataset | xr.DataArray:
         """Optimise the recorded ops, replay them on the base dataset, return the result.
 
