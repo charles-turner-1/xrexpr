@@ -31,8 +31,6 @@ def ds() -> xr.Dataset:
     )
 
 
-
-
 def test_plan_accessor_returns_proxy(ds):
     assert isinstance(ds.plan, LazyDatasetProxy)
     assert ds.plan._ops == []
@@ -60,8 +58,6 @@ def test_getitem_records_and_computes(ds):
     assert_equal(ds.plan["temperature"].compute(), ds["temperature"])
 
 
-
-
 def test_readme_pipeline_positional_equal(ds):
     got = ds.plan.mean("lat").mean("lon").isel(time=0).compute()
     assert_equal(got, ds.mean("lat").mean("lon").isel(time=0))
@@ -85,8 +81,6 @@ def test_sum_pushdown_equal(ds):
 def test_sel_merge_equal(ds):
     got = ds.plan.sel(lat=1).sel(lon=2).compute()
     assert_equal(got, ds.sel(lat=1).sel(lon=2))
-
-
 
 
 def _optimized(proxy: LazyDatasetProxy):
