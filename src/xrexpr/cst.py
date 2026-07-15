@@ -55,7 +55,7 @@ class SelectionPushdown(cst.CSTTransformer):
                     ),
                     args=mean_args,
                 )
-                return swapped_node.visit(self)
+                return swapped_node.visit(self)  # type: ignore[return-value]
 
         return updated_node
 
@@ -70,7 +70,7 @@ class SelectionPushdown(cst.CSTTransformer):
         are invalid as the lon dim will be dropped by the mean operation.
         """
 
-        mean_dims = {key.value.value.strip("'").strip('"') for key in mean_args}
+        mean_dims = {key.value.value.strip("'").strip('"') for key in mean_args}  # type: ignore[attr-defined]
         isel_dims = {key.keyword.value for key in isel_args if key.keyword}
 
         reorderable = not bool(mean_dims & isel_dims)

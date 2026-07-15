@@ -10,10 +10,19 @@ repos:
     hooks:
     - id: black
       language_version: python3
-# Mypy - disable for now
-#   - repo: https://github.com/pre-commit/mirrors-mypy
-#     rev: 'v1.17.1'  
-#     hooks:
-#     - id: mypy 
-#       name: mypy 
-#       additional_dependencies: [types-PyYAML==6.0.12.20240808]
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: 'v1.17.1'
+    hooks:
+    - id: mypy
+      name: mypy
+      # Run `mypy src` in pre-commit's own isolated venv (no pixi needed, so this
+      # works in the CI pre-commit job too). pass_filenames is off + args=[src] so
+      # it always type-checks the whole package via [tool.mypy], not per-file.
+      # additional_dependencies must carry the runtime imports mypy needs to follow.
+      args: [src]
+      pass_filenames: false
+      additional_dependencies:
+        - xarray
+        - numpy
+        - frozendict
+        - libcst
