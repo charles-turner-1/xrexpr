@@ -25,7 +25,6 @@ def schema() -> SchemaState:
     return SchemaState.from_dataset(ds)
 
 
-# --- reductions: every dim spelling collapses to the same ``consumes`` ----------
 
 
 def test_reduce_positional_dim(schema):
@@ -74,7 +73,6 @@ def test_reduce_keeps_non_dim_kwargs_verbatim(schema):
     assert node.kwargs == frozendict({"skipna": True})
 
 
-# --- selects: indexer + scalar-vs-kept ``consumes`` -----------------------------
 
 
 def test_isel_scalar_kwarg_drops_dim(schema):
@@ -125,7 +123,6 @@ def test_sel_option_kwarg_excluded(schema):
     assert node.consumes == frozenset({"lat"})
 
 
-# --- scans / untabulated --------------------------------------------------------
 
 
 def test_scan_has_kind_only(schema):
@@ -148,7 +145,6 @@ def test_unknown_method_is_opaque(schema):
     assert node.kind == "opaque"
 
 
-# --- composes with apply_schema -------------------------------------------------
 
 
 def test_to_opnode_then_apply_schema_threads(schema):
