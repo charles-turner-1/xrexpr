@@ -24,6 +24,7 @@ classifiers = [
 ]
 license = {text = "Apache Software License 2.0"}
 dependencies = [
+   "frozendict",
    "libcst",
    "xarray"
 ]
@@ -148,6 +149,7 @@ platforms = ["osx-arm64", "linux-64", "win-64"]
 python = ">=3.10"
 xarray = "*"
 libcst = "*"
+frozendict = "*"
 versioneer = ">=0.29,<0.30"
 
 [tool.pixi.pypi-dependencies]
