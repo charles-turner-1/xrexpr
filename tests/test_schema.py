@@ -104,6 +104,24 @@ def test_integer_array_isel_resizes_by_length(ds):
     assert after.dims["lon"] == 2
 
 
+def test_boolean_list_isel_resizes_by_true_count(ds):
+    schema = SchemaState.from_dataset(ds)
+    node = OpNode(
+        name="isel", kind="select", indexer={"time": [True, False, True, True]}
+    )
+    after = apply_schema(schema, node)
+    assert after.dims["time"] == 3
+
+
+def test_scalar_indexer_on_kept_dim_keeps_size(ds):
+    # defensive: a node that keeps a dim (empty consumes) but carries a scalar index
+    # must not crash apply_schema -- the size is conservatively left unchanged.
+    schema = SchemaState.from_dataset(ds)
+    node = OpNode(name="isel", kind="select", indexer={"time": 0})  # no consumes
+    after = apply_schema(schema, node)
+    assert after.dims["time"] == 4
+
+
 def test_unsizable_sel_slice_keeps_current_size(ds):
     # a label slice would need coord values to size -> conservatively unchanged
     schema = SchemaState.from_dataset(ds)
