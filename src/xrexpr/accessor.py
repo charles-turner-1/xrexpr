@@ -15,10 +15,10 @@ from typing import Any
 
 import xarray as xr
 
-Op = tuple[str, tuple, dict]  # (method_name, args, kwargs)
+Op = tuple[str, tuple[Any, ...], dict[str, Any]]  # (method_name, args, kwargs)
 
 
-@xr.register_dataset_accessor("plan")
+@xr.register_dataset_accessor("plan")  # type: ignore[no-untyped-call]
 class LazyDatasetProxy:
     """Record operations on an ``xr.Dataset`` and replay them on ``compute()``.
 
@@ -32,7 +32,9 @@ class LazyDatasetProxy:
         self._ops = list(ops) if ops else []
 
     # --- internals -------------------------------------------------------
-    def _record(self, method_name: str, *args, **kwargs) -> "LazyDatasetProxy":
+    def _record(
+        self, method_name: str, *args: Any, **kwargs: Any
+    ) -> "LazyDatasetProxy":
         return LazyDatasetProxy(
             self._base_ds, self._ops + [(method_name, args, kwargs)]
         )
@@ -62,7 +64,7 @@ class LazyDatasetProxy:
         if self._is_method_callable_on_dataset(name):
 
             @wraps(getattr(self._base_ds, name))
-            def _method(*args, **kwargs):
+            def _method(*args: Any, **kwargs: Any) -> "LazyDatasetProxy":
                 return self._record(name, *args, **kwargs)
 
             return _method
@@ -74,10 +76,14 @@ class LazyDatasetProxy:
         return self._record("__getitem__", key)
 
     # --- compute + optimization ------------------------------------------
-    def compute(self) -> xr.Dataset:
-        """Optimise the recorded ops, replay them on the base dataset, return the result."""
+    def compute(self) -> xr.Dataset | xr.DataArray:
+        """Optimise the recorded ops, replay them on the base dataset, return the result.
+
+        Returns a ``DataArray`` rather than a ``Dataset`` when the chain selects a
+        single variable (e.g. ``ds.plan["temperature"]``).
+        """
         ops = self._optimize_ops(list(self._ops))
-        ds = self._base_ds
+        ds: xr.Dataset | xr.DataArray = self._base_ds
         for method, args, kwargs in ops:
             if method == "__getitem__":
                 ds = ds[args[0]]
@@ -103,9 +109,11 @@ class LazyDatasetProxy:
 
             # Merge consecutive isel dicts: isel(dim=...) or isel(dict)
             if name == "isel":
-                merged: dict = {}
+                merged: dict[str, Any] = {}
 
-                def decode_isel_args(a, kw):
+                def decode_isel_args(
+                    a: tuple[Any, ...], kw: dict[str, Any]
+                ) -> dict[str, Any]:
                     if len(a) == 1 and isinstance(a[0], dict):
                         return dict(a[0], **kw)
                     return dict(kw)
@@ -124,7 +132,9 @@ class LazyDatasetProxy:
             if name == "sel":
                 merged = {}
 
-                def decode_sel_args(a, kw):
+                def decode_sel_args(
+                    a: tuple[Any, ...], kw: dict[str, Any]
+                ) -> dict[str, Any]:
                     if len(a) == 1 and isinstance(a[0], dict):
                         return dict(a[0], **kw)
                     return dict(kw)
