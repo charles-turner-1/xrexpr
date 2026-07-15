@@ -102,8 +102,11 @@ It doesn't cover xarray, and the reasons are exactly what pin down where `xrexpr
   xarray named dimensions**, and **no concept of coordinates** — so it cannot represent
   `.sel(time=...)` (label-based selection) at all. The naming that makes "`isel(time=0)`
   commutes with `mean(dim='lat')`" *obvious* lives in xarray, above dask.
-- **The eager/numpy path is entirely outside dask.** The README's headline 200x is
-  numpy-backed — no dask graph exists, so no dask optimizer (core or not) ever runs.
+- **The reorder win is a property of the xarray API layer, not of any backend.** For eager
+  numpy it's a pure win with no dask involved; for dask, the graph still materializes the
+  full reduction — dask's scheduler doesn't push the `isel` forward, which is exactly why an
+  xarray-semantic optimizer is needed above it. (The README benchmark calls `.compute()`, so
+  that `ds` is almost certainly dask-backed; the backing is never shown explicitly.)
 
 **Takeaway — layering, not rivalry.** `dask-expr` is the *proof the architecture works*,
 and the correct division of labour:
@@ -122,26 +125,29 @@ afterward).
 ## A4. Target architecture: record → optimize → replay
 
 ```
-ds.opt.mean(...).isel(...)  ──record──►  [OpNode]  ──optimize──►  [OpNode]'  ──replay──►  result
-        (accessor + proxy)   (flat list)   (rules,   (reordered            (.compute())
+ds.plan.mean(...).isel(...) ──record──►  [OpNode]  ──optimize──►  [OpNode]'  ──replay──►  result
+     (.plan accessor + proxy) (flat list)  (rules,   (reordered   (.collect() → xr .compute())
+                                            fixpoint)  op list)
                                             fixpoint)  op list)
 ```
 
 There are three pieces. The frontend is an **accessor**; the IR is a **flat op list**; the
 optimizer is a **fixpoint rewrite** over that list. A working skeleton of this already
-exists on the `add-accessor` branch (`ds.lazier` → `LazyDatasetProxy`); this section
+exists on the `add-accessor` branch (`ds.lazier` → `LazyDatasetProxy`, renamed `.plan` here);
+this section
 describes what it is and the three deltas that turn it from demo into the plan.
 
 **Record (frontend): an xarray accessor.** Register an accessor
-(`@xr.register_dataset_accessor("opt")`) that returns a lazy proxy. Every method
+(`@xr.register_dataset_accessor("plan")`) that returns a lazy proxy. Every method
 (`.mean`, `.isel`, `.sel`, `__getitem__`, …) is intercepted via `__getattr__`, appended to
-an op list, and returns a new proxy; a terminal `.compute()` optimizes and replays. This is
+an op list, and returns a new proxy; a terminal `.collect()` optimizes the plan, replays it,
+and calls xarray's own `.compute()` on the result. This is
 **much cleaner than tracing user code**: no `inspect.getsource`, no `exec`, no
 `func.__globals__`. The operations are captured because the user calls them on the proxy.
-It is explicit and opt-in (`ds.opt.…`), which reads naturally and sidesteps the entire
+It is explicit and opt-in (`ds.plan.…`), which reads naturally and sidesteps the entire
 class of limitations #2 and #4 at once.
 - *Inherent limit (document, don't fight):* control flow that branches on **data values**
-  (`if ds.opt.max() > 0: ...`) forces materialization at that point — the recorded chain
+  (`if ds.plan.max() > 0: ...`) forces materialization at that point — the recorded chain
   simply ends there and a new one begins. That's fine and expected.
 
 **Record-time metadata resolution — the key win the proxy unlocks.** Because the proxy
@@ -188,10 +194,10 @@ run to a **fixpoint**:
   "not reorderable" with "invalid").
 
 **Replay (backend): materialise onto real xarray.** Walk the optimised op list and call the
-*actual* xarray methods in the new order (the demo's `compute()` loop is already exactly
+*actual* xarray methods in the new order (the demo's replay loop is already exactly
 this). No `getsource`, no `exec`. Public surface is the accessor plus:
-- `ds.opt.…….compute()` / `.realize()` → the optimised result.
-- `ds.opt.…….explain()` → pretty-print the optimised op list for debugging. Deterministic,
+- `ds.plan.…….collect()` → optimise the plan, replay it, and `.compute()` the result.
+- `ds.plan.…….explain()` → pretty-print the optimised op list for debugging. Deterministic,
   unlike timing.
 
 ## A5. What this buys, mapped to the limitations
@@ -201,7 +207,7 @@ this). No `getsource`, no `exec`. Public surface is the accessor plus:
 | Only `mean` | Generalized pushdown over `AGGREGATIONS` + `OpNode` metadata (A4 optimize) |
 | Source-shape/source-availability failures | Accessor records real calls — no source parsing at all (A4 record) |
 | Fragile / wrong validity check | Record-time metadata resolution + validity trichotomy (A4) |
-| `exec` in caller globals | Accessor `.compute()` replays real method calls; no recompilation |
+| `exec` in caller globals | Accessor `.collect()` replays real method calls; no recompilation |
 | Perf claims unverifiable in tests | Golden op-list + accessor equality tests (Part B) |
 
 ---
@@ -257,9 +263,17 @@ API is retired with it.
 
 ## B2. Public API
 
-- **Primary and only execution API:** the accessor —
-  `ds.opt.mean("lat").mean("lon").isel(time=0).compute()` (rename `lazier` → a keeper
-  name, e.g. `opt`). `.explain()` prints the optimised op list.
+- **Primary and only execution API:** the `.plan` accessor —
+  `ds.plan.mean("lat").mean("lon").isel(time=0).collect()`. `ds.plan` returns a recording
+  proxy; `.collect()` rewrites the plan and then calls xarray's `.compute()` on the result
+  (Polars-flavoured: `.plan` ≈ `.lazy()`, `.collect()` ≈ `.collect()`). `.explain()` prints
+  the optimised op list without executing.
+  - *Naming:* the `add-accessor` branch registers this as `lazier` (a nod to dask arrays
+    already being lazy — this is lazy *done smarter*). Ship v1 as `.plan`, which reads as a
+    query plan and matches the `.collect()` terminal; `lazier` can return later as an alias.
+- **Deferred (next, more Polars-like):** a first-class `LazyDataset` type (rather than an
+  accessor-scoped proxy), ideally upstreamed into xarray core, with `.collect()` as the sole
+  boundary back to an eager `xr.Dataset`.
 - **Removed:** `rewrite_expr(func)` and `peek_rewritten_expr(func)`. The project should not
   carry a compatibility shim for source rewriting; examples and tests should move to the
   accessor API.
@@ -277,7 +291,7 @@ if nothing changed). Replace/augment:
   raises `InvalidExpressionError` rather than silently swapping (proves record-time
   resolution).
 - **Accessor equality tests.** For the current README-style pipelines, assert
-  `ds.opt.<chain>.compute()` equals the direct eager `ds.<chain>`.
+  `ds.plan.<chain>.collect()` equals the direct eager `ds.<chain>`.
 - **Move timing out of correctness.** Keep the perf claims in an optional `pytest-benchmark`
   / `asv` suite, not in `assert`-based tests.
 
@@ -296,7 +310,7 @@ if nothing changed). Replace/augment:
    `mean()` empty-dim bug, and the `cumsum` conflation.
 3. Add golden op-list tests + the two demo regression cases; delete `cst.py`, `decorators.py`,
    and the `getsource`/`exec` path.
-4. Rename the accessor to its keeper name; add `explain()`; update README/tests to remove
+4. Rename the accessor to `.plan` and the terminal to `.collect()`; add `explain()`; update README/tests to remove
    `rewrite_expr` and `peek_rewritten_expr`.
 5. Stop there for v1: accessor + linear IR + schema-aware select/reduce pushdown + golden
    tests. The next set of ideas belongs after that foundation is working.
@@ -305,12 +319,12 @@ if nothing changed). Replace/augment:
 <summary>After the linear IR is solid</summary>
 
 - **Property-based tests:** add Hypothesis-generated small datasets and legal accessor
-  chains; assert `ds.opt.<chain>.compute()` equals direct eager xarray and, once a cost
+  chains; assert `ds.plan.<chain>.collect()` equals direct eager xarray and, once a cost
   metric exists, that optimization is monotone.
 - **Cost model + dask extra:** annotate `OpNode`s with output-size estimates (dim sizes /
   chunk sizes), add `dask` as an optional extra, and for dask inputs hand the replayed graph
   to dask's physical optimizer afterward (A3.1 layering).
-- **Multi-input ops → DAG IR:** binary arithmetic (`ds.opt.mean("x") - ds.opt.mean("y")`),
+- **Multi-input ops → DAG IR:** binary arithmetic (`ds.plan.mean("x") - ds.plan.mean("y")`),
   `concat`, and `where(expr)` have more than one input. Until modelled, treat these as
   `opaque` barriers and do not reorder across them.
 - **Weighted reductions:** `ds.weighted(w).mean(...)` requires slicing weights alongside
@@ -331,7 +345,7 @@ if nothing changed). Replace/augment:
 ## Verification
 
 - `pixi run pytest` stays green after each B5 step.
-- Manual end-to-end smoke: run the README pipelines via `ds.opt.….compute()`; confirm equal
+- Manual end-to-end smoke: run the README pipelines via `ds.plan.….collect()`; confirm equal
   results and that `.explain()` shows selections pushed to the front.
 - Perf claims: an optional `pytest-benchmark` run comparing original vs optimized on a
   representative dataset (kept out of correctness tests).
