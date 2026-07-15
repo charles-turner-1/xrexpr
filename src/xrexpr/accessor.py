@@ -33,7 +33,9 @@ class LazyDatasetProxy:
 
     # --- internals -------------------------------------------------------
     def _record(self, method_name: str, *args, **kwargs) -> "LazyDatasetProxy":
-        return LazyDatasetProxy(self._base_ds, self._ops + [(method_name, args, kwargs)])
+        return LazyDatasetProxy(
+            self._base_ds, self._ops + [(method_name, args, kwargs)]
+        )
 
     def _is_method_callable_on_dataset(self, name: str) -> bool:
         return callable(getattr(self._base_ds, name, None))
