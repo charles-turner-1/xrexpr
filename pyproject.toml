@@ -33,6 +33,7 @@ dynamic = ["version"]
 
 [project.optional-dependencies]
 dev = [
+    "black",  # formatting
     "coverage",  # testing
     "mypy",  # linting
     "pytest",  # testing
@@ -172,9 +173,13 @@ test-cov = { cmd = "coverage run -m --source=xrexpr pytest tests && coverage xml
 [tool.pixi.feature.dev.dependencies]
 pre-commit = ">=4.2.0,<5"
 ruff = "*"
+black = "*"
+mypy = "*"
 
 [tool.pixi.feature.dev.tasks]
 ruff = { cmd = "ruff check src", description = "Run ruff checks" }
+black = { cmd = "black src tests", description = "Run the black formatter" }
+mypy = { cmd = "mypy", description = "Run mypy type checks (config: [tool.mypy])" }
 pre-commit = { cmd = "pre-commit run --all-files && pixi lock", description = "Run pre-commit hooks" }
 pre-commit-install = { cmd = "pre-commit install", description = "Install pre-commit hooks" }
 
