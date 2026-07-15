@@ -11,6 +11,7 @@ array data**. That is the record-time win the CST path could never have: it lets
 next snapshot after an :class:`~xrexpr.ir.OpNode` is applied.
 """
 
+from collections.abc import Hashable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -32,8 +33,8 @@ class SchemaState:
     construction, so a snapshot is hashable and safe to thread through the plan.
     """
 
-    dims: frozendict[str, int] = field(default_factory=frozendict)
-    coords: frozenset[str] = frozenset()
+    dims: frozendict[Hashable, int] = field(default_factory=frozendict)
+    coords: frozenset[Hashable] = frozenset()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "dims", frozendict(self.dims))
@@ -42,14 +43,10 @@ class SchemaState:
     @classmethod
     def from_dataset(cls, ds: xr.Dataset | xr.DataArray) -> "SchemaState":
         """Snapshot ``ds``'s logical schema, reading only ``.sizes``/``.coords``."""
-        # xarray types dim/coord names as ``Hashable``; they are strings in practice.
-        return cls(
-            dims=frozendict({str(k): v for k, v in ds.sizes.items()}),
-            coords=frozenset(str(c) for c in ds.coords),
-        )
+        return cls(dims=frozendict(ds.sizes), coords=frozenset(ds.coords))
 
     @property
-    def dim_names(self) -> frozenset[str]:
+    def dim_names(self) -> frozenset[Hashable]:
         """The set of current dimension names."""
         return frozenset(self.dims)
 
