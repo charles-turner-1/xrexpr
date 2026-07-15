@@ -15,6 +15,9 @@ from typing import Any
 
 import xarray as xr
 
+# TEMPORARY (PR 1): a recorded op is a bare (name, args, kwargs) tuple. This is
+# replaced by the ``ir.OpNode`` dataclass once ``_record`` builds nodes directly
+# (PR 6, #9); the alias and all tuple-poking below go away then.
 Op = tuple[str, tuple[Any, ...], dict[str, Any]]  # (method_name, args, kwargs)
 
 
@@ -99,8 +102,11 @@ class LazyDatasetProxy:
         - Push a following ``isel`` before a ``mean``/``sum``/``prod`` when their
           dims are disjoint (safe reorder).
 
-        Intentionally conservative; superseded by a schema-aware fixpoint
-        optimiser in a later PR.
+        TEMPORARY (PR 1): this whole method is a placeholder carried over verbatim
+        from the demo. It is deleted, not refactored — lifted into ``optimize.py``
+        as small rule functions run to a fixpoint (PR 7, #10), fed normalised
+        ``OpNode`` metadata so the arg-poking below (``decode_*_args``, ``red_dims``
+        guessing) disappears (``to_opnode``, PR 5, #8). Don't polish it here.
         """
         new_ops: list[Op] = []
         i = 0
