@@ -25,8 +25,6 @@ def schema() -> SchemaState:
     return SchemaState.from_dataset(ds)
 
 
-
-
 def test_reduce_positional_dim(schema):
     node = to_opnode(schema, "mean", ("lat",), {})
     assert node.kind == "reduce"
@@ -71,8 +69,6 @@ def test_reduce_keeps_non_dim_kwargs_verbatim(schema):
     node = to_opnode(schema, "mean", ("lat",), {"skipna": True})
     assert node.consumes == frozenset({"lat"})
     assert node.kwargs == frozendict({"skipna": True})
-
-
 
 
 def test_isel_scalar_kwarg_drops_dim(schema):
@@ -123,8 +119,6 @@ def test_sel_option_kwarg_excluded(schema):
     assert node.consumes == frozenset({"lat"})
 
 
-
-
 def test_scan_has_kind_only(schema):
     node = to_opnode(schema, "cumsum", ("time",), {})
     assert node.kind == "scan"
@@ -143,8 +137,6 @@ def test_untabulated_op_is_opaque(schema):
 def test_unknown_method_is_opaque(schema):
     node = to_opnode(schema, "where", ("cond",), {})
     assert node.kind == "opaque"
-
-
 
 
 def test_to_opnode_then_apply_schema_threads(schema):
