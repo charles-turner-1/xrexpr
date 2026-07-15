@@ -1,59 +1,20 @@
-"""Tests for the expression IR (PR 2): ``frozendict`` and ``OpNode``.
+"""Tests for the expression IR (PR 2): the ``OpNode`` record type.
 
-The type has no callers yet, so these cover it directly: the Mapping interface,
-immutability, hashing, and OpNode's construction/coercion/validation.
+``kwargs``/``indexer`` are backed by the third-party ``frozendict``, so we don't
+re-test that library's internals — only that ``OpNode`` coerces to it, validates
+its ``kind``, and stays frozen/hashable.
 """
 
 import dataclasses
 
 import pytest
+from frozendict import frozendict as _pkg_frozendict
 
 from xrexpr.ir import KINDS, OpNode, frozendict
 
 
-# --- frozendict --------------------------------------------------------------
-
-
-def test_frozendict_mapping_interface():
-    fd = frozendict(a=1, b=2)
-    assert fd["a"] == 1
-    assert len(fd) == 2
-    assert set(fd) == {"a", "b"}
-    assert "a" in fd and "z" not in fd
-    assert dict(fd.items()) == {"a": 1, "b": 2}
-    assert fd.get("z", 9) == 9
-
-
-def test_frozendict_constructs_from_mapping_and_pairs():
-    assert frozendict({"a": 1}) == frozendict([("a", 1)]) == frozendict(a=1)
-
-
-def test_frozendict_equals_plain_dict():
-    assert frozendict(a=1) == {"a": 1}
-    assert frozendict(a=1) != {"a": 2}
-
-
-def test_frozendict_is_immutable():
-    fd = frozendict(a=1)
-    with pytest.raises(TypeError):
-        fd["a"] = 2
-    with pytest.raises(TypeError):
-        del fd["a"]
-
-
-def test_frozendict_hashable_and_cached():
-    fd = frozendict(a=1, b=2)
-    first = hash(fd)
-    assert first == hash(fd)  # exercises the cached branch
-    assert first == hash(frozendict(b=2, a=1))  # order-independent
-    assert {fd, frozendict(a=1, b=2)} == {fd}  # usable as a set member
-
-
-def test_frozendict_repr_roundtrips_contents():
-    assert repr(frozendict(a=1)) == "frozendict({'a': 1})"
-
-
-# --- OpNode ------------------------------------------------------------------
+def test_ir_reexports_third_party_frozendict():
+    assert frozendict is _pkg_frozendict
 
 
 def test_opnode_minimal_defaults():
@@ -96,7 +57,9 @@ def test_opnode_is_frozen():
 
 
 def test_opnode_metadata_cannot_be_mutated_in_place():
-    node = OpNode(name="isel", kind="select", kwargs={"drop": True}, indexer={"time": 0})
+    node = OpNode(
+        name="isel", kind="select", kwargs={"drop": True}, indexer={"time": 0}
+    )
     with pytest.raises(TypeError):
         node.kwargs["drop"] = False
     with pytest.raises(TypeError):
