@@ -337,6 +337,12 @@ if nothing changed). Replace/augment:
   but never with selection on the reduced dim.
 - **Value-dependent control flow:** materialise at the branch; the recorded chain ends there
   and a fresh one starts after it.
+- **Schema-derived repr (not critical):** `print(ds.plan.<chain>)` currently shows the proxy,
+  not a Dataset-shaped repr. Give the proxy a `__repr__`/`_repr_html_` rendered from
+  `SchemaState` (dims/sizes/coords) — zero-cost, must *not* trigger compute — with an
+  "unrealized plan" header. Needs `SchemaState` extended to carry per-variable dims + dtype
+  to match xarray's `Data variables:` block. Show the as-written shape (identical to the
+  optimised one); `.explain()` remains the place to see the reordering.
 
 </details>
 
