@@ -52,7 +52,6 @@ def spec(name: str) -> OpSpec | None:
     return OP_TABLE.get(name)
 
 
-# --- back-compat -------------------------------------------------------------
 # The (soon-to-be-removed) cst.py path still imports these; derive them from the
 # table so there is one source of truth. ``SELECTIONS`` is unchanged; ``AGGREGATIONS``
 # now also groups the scans (incl. ``diff``) — harmless, as it is otherwise unused.
