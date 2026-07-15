@@ -81,6 +81,11 @@ class LazyDatasetProxy:
 
         Returns a ``DataArray`` rather than a ``Dataset`` when the chain selects a
         single variable (e.g. ``ds.plan["temperature"]``).
+
+        TEMPORARY (PR 1): the terminal is named ``compute`` and inherited verbatim
+        from the demo. It is renamed to ``.collect()`` (Polars-flavour) in PR 10
+        (#13), which also makes it call xarray's own ``.compute()`` on the replayed
+        result — this method only replays, it never materialises dask-backed data.
         """
         ops = self._optimize_ops(list(self._ops))
         ds: xr.Dataset | xr.DataArray = self._base_ds
