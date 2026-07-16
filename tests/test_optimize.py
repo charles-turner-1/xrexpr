@@ -125,7 +125,6 @@ def test_pushdown_sel_past_reduce(schema):
     assert [n.name for n in out] == ["sel", "mean"]
 
 
-# --- PR 9: the validity trichotomy (disjoint -> swap / consumed -> raise / scan -> leave)
 
 
 def test_select_on_reduced_dim_raises(schema):
