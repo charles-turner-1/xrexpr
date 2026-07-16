@@ -93,7 +93,7 @@ def _mergeable_select(node: OpNode) -> bool:
     ``missing_dims``, ``tolerance``) can't be folded into a bare indexer dict, so it
     acts as a merge barrier rather than being silently stripped of those options.
     """
-    return node.name in _SELECTS and not (set(node.kwargs) - set(node.indexer))
+    return node.name in _SELECTS and all(k in node.indexer for k in node.kwargs)
 
 
 _RULES: tuple[Rule, ...] = (merge_adjacent_selects,)
