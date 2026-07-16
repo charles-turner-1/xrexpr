@@ -10,6 +10,7 @@ PR 2 introduces the type only — nothing records or consumes ``OpNode`` yet.
 see ``docs/pr-plan.md``.
 """
 
+from collections.abc import Hashable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -35,8 +36,9 @@ class OpNode:
     kind: str  # one of KINDS
     args: tuple[Any, ...] = ()
     kwargs: frozendict[str, Any] = field(default_factory=frozendict)
-    consumes: frozenset[str] = frozenset()  # dims removed, vs the current schema
-    indexer: frozendict[str, Any] = field(
+    # dim names use xarray's ``Hashable`` (usually str); kwargs *names* are str.
+    consumes: frozenset[Hashable] = frozenset()  # dims removed, vs the current schema
+    indexer: frozendict[Hashable, Any] = field(
         default_factory=frozendict
     )  # selects: {dim: indexer}
 

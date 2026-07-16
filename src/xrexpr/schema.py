@@ -8,10 +8,11 @@ array data**. That is the record-time win the CST path could never have: it lets
 *right now*" rather than blindly against the original dataset.
 
 :class:`SchemaState` is an immutable snapshot; :func:`apply_schema` returns the
-next snapshot after an :class:`~xrexpr.ir.OpNode` is applied.
+next snapshot after an :class:`~xrexpr.ir.OpNode` is applied; :func:`to_opnode`
+normalises a raw recorded call into that ``OpNode`` against the current schema.
 """
 
-from collections.abc import Hashable
+from collections.abc import Hashable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,8 +21,9 @@ import xarray as xr
 from frozendict import frozendict
 
 from xrexpr.ir import OpNode
+from xrexpr.operations import spec as op_spec
 
-__all__ = ["SchemaState", "apply_schema"]
+__all__ = ["SchemaState", "apply_schema", "to_opnode"]
 
 
 @dataclass(frozen=True)
@@ -102,3 +104,101 @@ def _indexer_size(indexer: Any, current: int) -> int:
             return int(sum(bool(x) for x in seq))
         return len(seq)
     return current
+
+
+#: ``isel``/``sel`` keyword arguments that are *options*, not dim indexers.
+_SELECT_OPTION_KWARGS = frozenset({"drop", "missing_dims", "method", "tolerance"})
+
+
+def to_opnode(
+    schema: SchemaState,
+    name: str,
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+) -> OpNode:
+    """Normalise one recorded call into a resolved :class:`~xrexpr.ir.OpNode`.
+
+    Resolution is against the *current* ``schema`` (not the original dataset) — the
+    record-time win the proxy unlocks:
+
+    - **reduce** (``mean``/``sum``/...): the dim spec — positional (``mean("lat")``),
+      keyword (``mean(dim="lat")``) or tuple (``mean(("lat", "lon"))``) — collapses to
+      one ``consumes`` frozenset; a **no-dim ``mean()`` consumes every dim in the
+      schema right now**, fixing the demo's empty-dim bug (``ds.mean().isel(...)``).
+    - **select** (``isel``/``sel``): the indexer (a positional dict and/or kwargs,
+      minus option kwargs like ``drop``) becomes ``indexer``; a dim given a *scalar*
+      index is dropped and so also lands in ``consumes`` (a slice/list/array keeps it).
+    - **scan** / untabulated ops: ``kind`` only; no dims resolved.
+
+    ``args``/``kwargs`` are kept verbatim for faithful replay; ``consumes``/``indexer``
+    are the derived metadata the optimiser reasons about.
+    """
+    op = op_spec(name)
+    kind = op.kind if op is not None else "opaque"
+    kw = frozendict(kwargs)
+
+    if kind == "reduce":
+        return OpNode(
+            name=name,
+            kind=kind,
+            args=args,
+            kwargs=kw,
+            consumes=_reduce_dims(schema, args, kwargs),
+        )
+    if kind == "select":
+        indexer = _select_indexer(args, kwargs)
+        consumes = frozenset(d for d, v in indexer.items() if _is_scalar_index(v))
+        return OpNode(
+            name=name,
+            kind=kind,
+            args=args,
+            kwargs=kw,
+            consumes=consumes,
+            indexer=indexer,
+        )
+    return OpNode(name=name, kind=kind, args=args, kwargs=kw)
+
+
+def _reduce_dims(
+    schema: SchemaState, args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> frozenset[Hashable]:
+    """Dims a reduction removes: its ``dim`` spec, or *all* current dims if unspecified."""
+    if "dim" in kwargs:
+        dim = kwargs["dim"]
+    elif args:
+        dim = args[0]  # reductions take ``dim`` first (``.reduce(func, dim)`` aside)
+    else:
+        dim = None
+    if dim is None:  # bare ``mean()`` / ``mean(dim=None)`` → every current dim
+        return frozenset(schema.dim_names)
+    return _as_dim_set(dim)
+
+
+def _as_dim_set(dim: Any) -> frozenset[Hashable]:
+    """A single dim name or an iterable of them → a frozenset (xarray's dim convention)."""
+    if isinstance(dim, str) or not isinstance(dim, Iterable):
+        return frozenset({dim})
+    return frozenset(dim)
+
+
+def _select_indexer(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> frozendict[Hashable, Any]:
+    """The ``{dim: index}`` mapping of an ``isel``/``sel`` call (option kwargs dropped)."""
+    indexer: dict[Hashable, Any] = {}
+    if args and isinstance(args[0], dict):
+        indexer.update(args[0])
+    for key, value in kwargs.items():
+        if key not in _SELECT_OPTION_KWARGS:
+            indexer[key] = value
+    return frozendict(indexer)
+
+
+def _is_scalar_index(value: Any) -> bool:
+    """Whether an indexer drops its dim (a scalar) rather than keeping it.
+
+    A ``slice``/``list``/``tuple``/array keeps the dim (and resizes it); anything
+    else is treated as a scalar that removes it. (A tuple MultiIndex *label* is the
+    known exception — niche, and left for later.)
+    """
+    return not isinstance(value, slice | list | tuple | np.ndarray)
