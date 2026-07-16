@@ -113,7 +113,6 @@ def test_sel_merge_equal(ds):
     assert_equal(got, ds.sel(lat=1).sel(lon=2))
 
 
-# --- PR 9: validity trichotomy surfaced through compute() -----------------------
 
 
 def test_select_on_reduced_dim_raises(ds):
