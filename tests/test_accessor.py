@@ -57,7 +57,6 @@ def test_getitem_records_and_computes(ds):
     assert_equal(ds.plan["temperature"].collect(), ds["temperature"])
 
 
-# --- PR 6: recording now builds OpNodes and threads the schema ------------------
 
 
 def test_record_builds_opnodes(ds):
