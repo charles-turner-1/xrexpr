@@ -125,8 +125,6 @@ def test_pushdown_sel_past_reduce(schema):
     assert [n.name for n in out] == ["sel", "mean"]
 
 
-
-
 def test_select_on_reduced_dim_raises(schema):
     # isel indexes ``lat``, which mean("lat") already removed -> unreplayable
     plan = [_node(schema, "mean", "lat"), _node(schema, "isel", lat=0)]

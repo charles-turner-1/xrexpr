@@ -113,8 +113,6 @@ def test_sel_merge_equal(ds):
     assert_equal(got, ds.sel(lat=1).sel(lon=2))
 
 
-
-
 def test_select_on_reduced_dim_raises(ds):
     # mean removes lon; isel(lon=0) then references a dim that is gone -> invalid
     with pytest.raises(InvalidExpressionError):
