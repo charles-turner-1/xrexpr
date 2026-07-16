@@ -8,16 +8,10 @@ returns the optimised plan as text without running it).
 
 The recorded plan is a list of :class:`~xrexpr.ir.OpNode`: each call is normalised
 by :func:`~xrexpr.schema.to_opnode` against a :class:`SchemaState` threaded from
-<<<<<<< HEAD
 ``self._base_ds`` and evolved per op (no materialisation). ``collect`` runs the plan
 through :func:`~xrexpr.optimize.optimize` (a fixpoint of rewrite rules), replays the
 optimised ``OpNode``s onto the base dataset, and materialises the result. See
 ``docs/pr-plan.md``.
-=======
-``self._base_ds`` and evolved per op (no materialisation). ``compute`` runs the plan
-through :func:`~xrexpr.optimize.optimize` (a fixpoint of rewrite rules) and replays
-the optimised ``OpNode``s onto the base dataset. See ``docs/pr-plan.md``.
->>>>>>> main
 """
 
 from functools import wraps
@@ -110,7 +104,6 @@ class LazyDatasetProxy:
         Raises :class:`~xrexpr.exceptions.InvalidExpressionError` if the plan cannot be
         optimised (e.g. a select on a dim a preceding reduce removed).
         """
-<<<<<<< HEAD
         return self._replay(optimize(self._ops)).compute()
 
     def explain(self) -> str:
@@ -137,9 +130,6 @@ class LazyDatasetProxy:
         parts = [repr(a) for a in node.args]
         parts += [f"{k}={v!r}" for k, v in node.kwargs.items()]
         return f"{node.name}({', '.join(parts)})"
-=======
-        return self._replay(optimize(self._ops))
->>>>>>> main
 
     def _replay(self, nodes: list[OpNode]) -> xr.Dataset | xr.DataArray:
         """Walk the optimised ``OpNode`` plan, calling the real xarray methods."""
