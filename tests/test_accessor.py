@@ -126,7 +126,7 @@ def test_select_on_reduced_dim_raises(ds):
 
 
 def test_bare_mean_then_select_raises(ds):
-    # mean() reduces every dim; the demo's empty-dim bug is now an error, not a wrong swap
+    # mean() reduces every dim; the empty-dim reorder bug is now an error, not a wrong swap
     with pytest.raises(InvalidExpressionError):
         ds.plan.mean().isel(time=0).collect()
 
@@ -159,3 +159,10 @@ def test_explain_raises_on_invalid_plan(ds):
     # explain optimises too, so an invalid plan raises the same error collect() would
     with pytest.raises(InvalidExpressionError):
         ds.plan.mean(dim="lon").isel(lon=0).explain()
+
+
+def test_compute_is_alias_for_collect(ds):
+    # ``.compute()`` is a synonym for ``.collect()`` (xarray muscle memory), not a
+    # recorded op -- it returns the materialised result, not another proxy
+    chain = ds.plan.mean("lat").isel(time=0)
+    assert_equal(chain.compute(), chain.collect())

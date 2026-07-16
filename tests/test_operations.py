@@ -1,7 +1,7 @@
 """Tests for the op metadata table (PR 3).
 
-The headline behaviour is the reduce/scan split — the thing the old bare
-``AGGREGATIONS`` set could not express.
+The headline behaviour is the reduce/scan split — reductions destroy their dim,
+scans keep it — which a single flat "aggregations" set could not express.
 """
 
 import pytest

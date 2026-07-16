@@ -39,6 +39,8 @@ import xrexpr  # registers the ``.plan`` accessor
 result = ds.plan.mean(dim="lat").mean(dim="lon").isel(time=0).collect()
 ```
 
+(`.compute()` is a synonym for `.collect()`, if that's the terminal your fingers reach for.)
+
 `xrexpr` pushes the `isel` in front of the reductions for you, so `.collect()` runs the
 fast ordering while you keep writing the readable one. The result is exactly what the
 eager chain would have produced:

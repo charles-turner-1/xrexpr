@@ -3,8 +3,8 @@
 These are golden-``OpNode`` assertions: each recorded call, in every dim spelling,
 must resolve to the same normalised metadata (``kind`` / ``consumes`` / ``indexer``)
 while keeping ``args``/``kwargs`` verbatim for replay. The headline case is that a
-no-dim ``mean()`` consumes *every current dim*, which is what fixes the demo's
-empty-dim bug downstream.
+no-dim ``mean()`` consumes *every current dim*, which is what fixes the empty-dim
+reorder bug downstream.
 """
 
 import numpy as np

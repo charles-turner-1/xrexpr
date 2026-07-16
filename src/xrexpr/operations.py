@@ -1,15 +1,14 @@
 """Static metadata about the xarray operations the optimiser reasons about.
 
 Each tabulated op maps to an :class:`OpSpec` recording its *kind* and, for
-reductions, whether it consumes (removes) the dim it is given. This replaces the
-two bare ``AGGREGATIONS``/``SELECTIONS`` sets and, crucially, distinguishes:
+reductions, whether it consumes (removes) the dim it is given. The key distinction is:
 
 - ``reduce`` ops (``mean``/``sum``/``std``/...), which **destroy** their dim, from
 - ``scan`` ops (``cumsum``/``cumprod``/``diff``), which **keep** it.
 
-The old ``AGGREGATIONS`` set conflated the two (``cumsum`` sat alongside ``mean``),
-which is the root of the ``cumsum`` reordering bug called out in the report. This
-table is the single source of truth that later drives ``to_opnode``.
+Lumping the two together is the root of the ``cumsum`` reordering bug called out in
+the report (a scan must not be treated like a reduction). This table is the single
+source of truth that drives ``to_opnode``.
 """
 
 from typing import NamedTuple
