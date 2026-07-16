@@ -5,29 +5,21 @@ calls made on it (``.mean``, ``.isel``, ``.sel``, ``__getitem__``, ...) instead
 of executing them. Calling :meth:`~LazyDatasetProxy.compute` optimises the
 recorded plan and replays it onto the real dataset.
 
-As of PR 6 the recorded plan is a list of :class:`~xrexpr.ir.OpNode`: each call is
-normalised by :func:`~xrexpr.schema.to_opnode` against a :class:`SchemaState` that
-is threaded from ``self._base_ds`` and evolved per op (no materialisation). Replay
-walks those nodes. The *optimiser* is still the demo ``_optimize_ops`` from the
-``add-accessor`` branch — it is bridged to bare tuples for now and gets replaced by
-an ``OpNode``-native ``optimize()`` in PR 7 (#10). See ``docs/pr-plan.md``.
+The recorded plan is a list of :class:`~xrexpr.ir.OpNode`: each call is normalised
+by :func:`~xrexpr.schema.to_opnode` against a :class:`SchemaState` threaded from
+``self._base_ds`` and evolved per op (no materialisation). ``compute`` runs the plan
+through :func:`~xrexpr.optimize.optimize` (a fixpoint of rewrite rules) and replays
+the optimised ``OpNode``s onto the base dataset. See ``docs/pr-plan.md``.
 """
 
 from functools import wraps
 from typing import Any
 
 import xarray as xr
-from frozendict import frozendict
 
 from xrexpr.ir import OpNode
-from xrexpr.operations import spec as op_spec
+from xrexpr.optimize import optimize
 from xrexpr.schema import SchemaState, apply_schema, to_opnode
-
-# TEMPORARY (PR 6): the demo ``_optimize_ops`` still runs on bare
-# ``(name, args, kwargs)`` tuples, so the recorded ``OpNode``s are bridged to this
-# alias around it (``_legacy_ops`` / ``_legacy_to_node``). The alias, the bridge, and
-# ``_optimize_ops`` are all deleted in PR 7 (#10), which optimises ``OpNode``s directly.
-Op = tuple[str, tuple[Any, ...], dict[str, Any]]  # (method_name, args, kwargs)
 
 
 @xr.register_dataset_accessor("plan")  # type: ignore[no-untyped-call]
@@ -109,8 +101,7 @@ class LazyDatasetProxy:
         (#13), which also makes it call xarray's own ``.compute()`` on the replayed
         result — this method only replays, it never materialises dask-backed data.
         """
-        optimized = self._optimize_ops(self._legacy_ops())
-        return self._replay([self._legacy_to_node(op) for op in optimized])
+        return self._replay(optimize(self._ops))
 
     def _replay(self, nodes: list[OpNode]) -> xr.Dataset | xr.DataArray:
         """Walk the optimised ``OpNode`` plan, calling the real xarray methods."""
@@ -121,126 +112,3 @@ class LazyDatasetProxy:
             else:
                 ds = getattr(ds, node.name)(*node.args, **node.kwargs)
         return ds
-
-    def _legacy_ops(self) -> list[Op]:
-        """Bridge recorded ``OpNode``s to the ``(name, args, kwargs)`` tuples the demo
-        optimiser consumes.
-
-        TEMPORARY (PR 6): removed together with ``_optimize_ops`` in PR 7 (#10).
-        """
-        return [(n.name, n.args, dict(n.kwargs)) for n in self._ops]
-
-    @staticmethod
-    def _legacy_to_node(op: Op) -> OpNode:
-        """Rebuild an ``OpNode`` from a post-optimise tuple so replay walks nodes.
-
-        Only ``kind`` matters for replay; ``consumes``/``indexer`` are irrelevant once
-        optimisation is done. TEMPORARY (PR 6): gone with the bridge in PR 7 (#10).
-        """
-        name, args, kwargs = op
-        spec = op_spec(name)
-        return OpNode(
-            name=name,
-            kind=spec.kind if spec is not None else "opaque",
-            args=args,
-            kwargs=frozendict(kwargs),
-        )
-
-    def _optimize_ops(self, ops: list[Op]) -> list[Op]:
-        """Demo optimiser: merge consecutive selects and push ``isel`` past reductions.
-
-        - Merge consecutive ``isel`` calls into one indexer dict.
-        - Merge consecutive ``sel`` calls into one indexer dict.
-        - Push a following ``isel`` before a ``mean``/``sum``/``prod`` when their
-          dims are disjoint (safe reorder).
-
-        TEMPORARY (PR 1): this whole method is a placeholder carried over verbatim
-        from the demo. It is deleted, not refactored — lifted into ``optimize.py``
-        as small rule functions run to a fixpoint (PR 7, #10), fed normalised
-        ``OpNode`` metadata so the arg-poking below (``decode_*_args``, ``red_dims``
-        guessing) disappears (already resolved by ``to_opnode``). Don't polish it here.
-        """
-        new_ops: list[Op] = []
-        i = 0
-        while i < len(ops):
-            name, args, kwargs = ops[i]
-
-            # Merge consecutive isel dicts: isel(dim=...) or isel(dict)
-            if name == "isel":
-                merged: dict[str, Any] = {}
-
-                def decode_isel_args(
-                    a: tuple[Any, ...], kw: dict[str, Any]
-                ) -> dict[str, Any]:
-                    if len(a) == 1 and isinstance(a[0], dict):
-                        return dict(a[0], **kw)
-                    return dict(kw)
-
-                merged.update(decode_isel_args(args, kwargs))
-                j = i + 1
-                while j < len(ops) and ops[j][0] == "isel":
-                    _, aa, kk = ops[j]
-                    merged.update(decode_isel_args(aa, kk))
-                    j += 1
-                new_ops.append(("isel", (merged,), {}))
-                i = j
-                continue
-
-            # Merge consecutive sel dicts
-            if name == "sel":
-                merged = {}
-
-                def decode_sel_args(
-                    a: tuple[Any, ...], kw: dict[str, Any]
-                ) -> dict[str, Any]:
-                    if len(a) == 1 and isinstance(a[0], dict):
-                        return dict(a[0], **kw)
-                    return dict(kw)
-
-                merged.update(decode_sel_args(args, kwargs))
-                j = i + 1
-                while j < len(ops) and ops[j][0] == "sel":
-                    _, aa, kk = ops[j]
-                    merged.update(decode_sel_args(aa, kk))
-                    j += 1
-                new_ops.append(("sel", (merged,), {}))
-                i = j
-                continue
-
-            # Push a following isel before a reduction when dims are disjoint.
-            if (
-                name in ("mean", "sum", "prod")
-                and (i + 1) < len(ops)
-                and ops[i + 1][0] == "isel"
-            ):
-                reduce_name, r_args, r_kwargs = ops[i]
-                _, isel_args, isel_kwargs = ops[i + 1]
-
-                # dims removed by the reduction (dim kwarg, or first positional)
-                if "dim" in r_kwargs:
-                    red_dims = r_kwargs["dim"]
-                elif len(r_args) >= 1:
-                    red_dims = r_args[0]
-                else:
-                    red_dims = ()
-                if isinstance(red_dims, str):
-                    red_dims = (red_dims,)
-                else:
-                    red_dims = tuple(red_dims)
-
-                # dims touched by the isel indexer
-                if len(isel_args) == 1 and isinstance(isel_args[0], dict):
-                    indexer = dict(isel_args[0])
-                else:
-                    indexer = dict(isel_kwargs)
-
-                if set(indexer.keys()).isdisjoint(red_dims):
-                    new_ops.append(("isel", (indexer,), {}))
-                    new_ops.append((reduce_name, r_args, r_kwargs))
-                    i += 2
-                    continue
-
-            new_ops.append((name, args, kwargs))
-            i += 1
-
-        return new_ops
