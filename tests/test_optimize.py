@@ -134,7 +134,7 @@ def test_select_on_reduced_dim_raises(schema):
 
 def test_bare_mean_then_select_raises_empty_dim_bug(schema):
     # bare mean() consumes *every* dim (PR 5), so a following isel is invalid -- the
-    # demo's empty-dim bug, now caught instead of silently swapped
+    # empty-dim reorder bug, now caught instead of silently swapped
     plan = [_node(schema, "mean"), _node(schema, "isel", time=0)]
     with pytest.raises(InvalidExpressionError):
         optimize(plan)

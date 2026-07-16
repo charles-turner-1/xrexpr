@@ -5,9 +5,8 @@ dataset), so the IR is a **list** of ``OpNode``, not a tree. Each node carries
 enough normalised metadata for the optimiser to decide whether two ops commute,
 without re-inspecting raw call ``args``/``kwargs``.
 
-PR 2 introduces the type only — nothing records or consumes ``OpNode`` yet.
-``to_opnode`` (record-time resolution) and the optimiser land in later PRs;
-see ``docs/pr-plan.md``.
+``to_opnode`` (in ``schema.py``) builds these at record time; the optimiser
+(``optimize.py``) rewrites the list and the ``.plan`` accessor replays it.
 """
 
 from collections.abc import Hashable

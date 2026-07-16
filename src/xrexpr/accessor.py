@@ -106,6 +106,10 @@ class LazyDatasetProxy:
         """
         return self._replay(optimize(self._ops)).compute()
 
+    def compute(self) -> xr.Dataset | xr.DataArray:
+        """Alias for :meth:`collect`, for xarray users who reach for ``.compute()``."""
+        return self.collect()
+
     def explain(self) -> str:
         """Return the optimised plan as text, without running it (à la Polars ``explain``).
 

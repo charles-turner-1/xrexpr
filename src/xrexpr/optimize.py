@@ -114,11 +114,11 @@ def pushdown_selects(nodes: Plan) -> Plan:
     - **disjoint** — the select touches no reduced dim, so the swap is valid:
       ``ds.mean("lat").isel(time=0)`` → ``ds.isel(time=0).mean("lat")`` (select first, a
       smaller array to reduce). Keying off ``kind`` generalises this to *any* reduce
-      (``std``/``max``/...), not just the demo's ``mean``/``sum``/``prod`` (#1).
+      (``std``/``max``/...), not just a hard-coded ``mean``/``sum``/``prod`` list (#1).
     - **shares a consumed dim** — the select indexes a dim the reduce already removed, so
       the expression can never replay (``mean("lon").isel(lon=0)``, and the all-dims
       ``mean().isel(time=0)``): raise :class:`InvalidExpressionError` rather than emit a
-      silently-wrong reorder (the demo's empty-dim bug).
+      silently-wrong reorder (the empty-dim reorder bug).
 
     Scans are the third leg: a ``cumsum``/``diff`` is ``kind == "scan"``, not ``reduce``,
     so this rule never fires on it — ``cumsum("time").isel(time=5)`` is left untouched

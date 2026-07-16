@@ -124,7 +124,7 @@ def to_opnode(
     - **reduce** (``mean``/``sum``/...): the dim spec — positional (``mean("lat")``),
       keyword (``mean(dim="lat")``) or tuple (``mean(("lat", "lon"))``) — collapses to
       one ``consumes`` frozenset; a **no-dim ``mean()`` consumes every dim in the
-      schema right now**, fixing the demo's empty-dim bug (``ds.mean().isel(...)``).
+      schema right now**, fixing the empty-dim reorder bug (``ds.mean().isel(...)``).
     - **select** (``isel``/``sel``): the indexer (a positional dict and/or kwargs,
       minus option kwargs like ``drop``) becomes ``indexer``; a dim given a *scalar*
       index is dropped and so also lands in ``consumes`` (a slice/list/array keeps it).
