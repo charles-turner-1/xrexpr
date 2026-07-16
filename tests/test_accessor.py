@@ -81,7 +81,6 @@ def test_getitem_records_opaque_node(ds):
     assert node.name == "__getitem__" and node.kind == "opaque"
 
 
-# --- equality: record -> optimise -> replay matches the eager chain --------------
 
 
 def test_readme_pipeline_positional_equal(ds):
