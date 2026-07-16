@@ -13,6 +13,7 @@ import pytest
 import xarray as xr
 from frozendict import frozendict
 
+from xrexpr.exceptions import InvalidExpressionError
 from xrexpr.optimize import optimize
 from xrexpr.schema import SchemaState, to_opnode
 
@@ -127,12 +128,36 @@ def test_pushdown_sel_past_reduce(schema):
     assert [n.name for n in out] == ["sel", "mean"]
 
 
-def test_no_pushdown_when_select_touches_reduced_dim(schema):
-    # isel(time=0) shares no dim with mean("lat"), but here the isel IS on lat:
-    # not disjoint -> left in place (invalid/scan classification is PR 9)
+# --- PR 9: the validity trichotomy (disjoint -> swap / consumed -> raise / scan -> leave)
+
+
+def test_select_on_reduced_dim_raises(schema):
+    # isel indexes ``lat``, which mean("lat") already removed -> unreplayable
     plan = [_node(schema, "mean", "lat"), _node(schema, "isel", lat=0)]
+    with pytest.raises(InvalidExpressionError, match="lat"):
+        optimize(plan)
+
+
+def test_bare_mean_then_select_raises_empty_dim_bug(schema):
+    # bare mean() consumes *every* dim (PR 5), so a following isel is invalid -- the
+    # demo's empty-dim bug, now caught instead of silently swapped
+    plan = [_node(schema, "mean"), _node(schema, "isel", time=0)]
+    with pytest.raises(InvalidExpressionError):
+        optimize(plan)
+
+
+def test_scan_then_select_on_scan_dim_left_untouched(schema):
+    # cumsum is a scan, not a reduce: order matters, so leave it -- and never raise
+    plan = [_node(schema, "cumsum", "time"), _node(schema, "isel", time=5)]
     out = optimize(plan)
-    assert [n.name for n in out] == ["mean", "isel"]
+    assert [n.name for n in out] == ["cumsum", "isel"]
+
+
+def test_scan_then_disjoint_select_left_untouched(schema):
+    # even a disjoint select is left behind a scan (pushdown only fires on reduces)
+    plan = [_node(schema, "cumsum", "time"), _node(schema, "isel", lat=0)]
+    out = optimize(plan)
+    assert [n.name for n in out] == ["cumsum", "isel"]
 
 
 def test_pushdown_composes_past_two_reduces(schema):
