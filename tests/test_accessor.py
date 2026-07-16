@@ -1,12 +1,10 @@
-"""Tests for the ``.plan`` accessor (PR 1).
+"""Tests for the ``.plan`` accessor.
 
-Two flavours:
-- *equality* tests — ``ds.plan.<chain>.compute()`` matches the eager ``ds.<chain>``;
-- *op-list* tests — assert the exact optimised op list, which pins down the
-  optimiser's behaviour (including branches that are deliberately left for later
-  PRs to fix).
-
-Together they exercise every branch of ``accessor.py``.
+Covers recording behaviour and *equality* — ``ds.plan.<chain>.compute()`` matches
+the eager ``ds.<chain>`` for the README pipelines, exercising record → optimise →
+replay end to end. The golden op-list assertions that pin the optimiser itself live
+in ``tests/test_optimize.py`` (it owns ``optimize``); here we only care that the
+accessor records ``OpNode``s, threads the schema, and replays to the right result.
 """
 
 import numpy as np
@@ -83,6 +81,9 @@ def test_getitem_records_opaque_node(ds):
     assert node.name == "__getitem__" and node.kind == "opaque"
 
 
+# --- equality: record -> optimise -> replay matches the eager chain --------------
+
+
 def test_readme_pipeline_positional_equal(ds):
     got = ds.plan.mean("lat").mean("lon").isel(time=0).compute()
     assert_equal(got, ds.mean("lat").mean("lon").isel(time=0))
@@ -98,74 +99,17 @@ def test_reduce_tuple_dims_equal(ds):
     assert_equal(got, ds.mean(dim=("lat", "lon")).isel(time=0))
 
 
-def test_sum_pushdown_equal(ds):
+def test_reduce_then_select_equal(ds):
     got = ds.plan.sum("lat").isel(time=0).compute()
     assert_equal(got, ds.sum("lat").isel(time=0))
+
+
+def test_isel_merge_equal(ds):
+    # two isels fold into one indexer; the replayed result is unchanged
+    got = ds.plan.isel(time=0).isel(lat=1).compute()
+    assert_equal(got, ds.isel(time=0).isel(lat=1))
 
 
 def test_sel_merge_equal(ds):
     got = ds.plan.sel(lat=1).sel(lon=2).compute()
     assert_equal(got, ds.sel(lat=1).sel(lon=2))
-
-
-def _optimized(proxy: LazyDatasetProxy):
-    # the demo optimiser still runs on legacy tuples; bridge the recorded OpNodes
-    return proxy._optimize_ops(proxy._legacy_ops())
-
-
-def test_isel_merge_kwargs(ds):
-    assert _optimized(ds.plan.isel(time=0).isel(lat=1)) == [
-        ("isel", ({"time": 0, "lat": 1},), {}),
-    ]
-
-
-def test_isel_merge_positional_dict(ds):
-    assert _optimized(ds.plan.isel({"time": 0}).isel({"lat": 1})) == [
-        ("isel", ({"time": 0, "lat": 1},), {}),
-    ]
-
-
-def test_sel_merge_kwargs(ds):
-    assert _optimized(ds.plan.sel(lat=1).sel(lon=2)) == [
-        ("sel", ({"lat": 1, "lon": 2},), {}),
-    ]
-
-
-def test_sel_merge_positional_dict(ds):
-    assert _optimized(ds.plan.sel({"lat": 1}).sel({"lon": 2})) == [
-        ("sel", ({"lat": 1, "lon": 2},), {}),
-    ]
-
-
-def test_pushdown_indexer_positional_dict(ds):
-    # isel given a positional dict, disjoint from the reduced dim -> swap
-    assert _optimized(ds.plan.mean("lat").isel({"time": 0})) == [
-        ("isel", ({"time": 0},), {}),
-        ("mean", ("lat",), {}),
-    ]
-
-
-def test_no_swap_when_dims_overlap(ds):
-    # isel touches the reduced dim -> NOT reorderable, left in place
-    assert _optimized(ds.plan.mean("time").isel(time=0)) == [
-        ("mean", ("time",), {}),
-        ("isel", ({"time": 0},), {}),
-    ]
-
-
-def test_reduction_not_followed_by_isel_unchanged(ds):
-    # neither reduction is followed by an isel -> no pushdown attempted
-    assert _optimized(ds.plan.mean("lat").mean("lon")) == [
-        ("mean", ("lat",), {}),
-        ("mean", ("lon",), {}),
-    ]
-
-
-def test_empty_dim_reduction_swaps_known_bug(ds):
-    """``mean()`` (no dim) is treated as reducing *nothing*, so the isel is
-    wrongly pushed in front. This is the demo optimiser's known bug; PR 9's
-    schema-aware validity check fixes it. Pinned here so the fix is visible."""
-    assert _optimized(ds.plan.mean().isel(time=0)) == [
-        ("isel", ({"time": 0},), {}),
-        ("mean", (), {}),
-    ]
