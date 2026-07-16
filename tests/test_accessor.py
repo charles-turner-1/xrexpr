@@ -58,6 +58,31 @@ def test_getitem_records_and_computes(ds):
     assert_equal(ds.plan["temperature"].compute(), ds["temperature"])
 
 
+# --- PR 6: recording now builds OpNodes and threads the schema ------------------
+
+
+def test_record_builds_opnodes(ds):
+    from xrexpr.ir import OpNode
+
+    ops = ds.plan.mean("lat").isel(time=0)._ops
+    assert all(isinstance(n, OpNode) for n in ops)
+    mean_node, isel_node = ops
+    assert mean_node.kind == "reduce" and mean_node.consumes == frozenset({"lat"})
+    assert isel_node.kind == "select" and isel_node.consumes == frozenset({"time"})
+
+
+def test_schema_threads_as_ops_are_recorded(ds):
+    # each recorded op evolves the proxy's logical schema, no materialisation
+    assert dict(ds.plan._schema.dims) == {"time": 4, "lat": 3, "lon": 5}
+    assert dict(ds.plan.mean("lat")._schema.dims) == {"time": 4, "lon": 5}
+    assert dict(ds.plan.mean("lat").isel(time=0)._schema.dims) == {"lon": 5}
+
+
+def test_getitem_records_opaque_node(ds):
+    node = ds.plan["temperature"]._ops[0]
+    assert node.name == "__getitem__" and node.kind == "opaque"
+
+
 def test_readme_pipeline_positional_equal(ds):
     got = ds.plan.mean("lat").mean("lon").isel(time=0).compute()
     assert_equal(got, ds.mean("lat").mean("lon").isel(time=0))
@@ -84,7 +109,8 @@ def test_sel_merge_equal(ds):
 
 
 def _optimized(proxy: LazyDatasetProxy):
-    return proxy._optimize_ops(proxy._ops)
+    # the demo optimiser still runs on legacy tuples; bridge the recorded OpNodes
+    return proxy._optimize_ops(proxy._legacy_ops())
 
 
 def test_isel_merge_kwargs(ds):
