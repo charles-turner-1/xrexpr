@@ -97,9 +97,6 @@ def test_non_select_plan_unchanged(schema):
     assert [n.name for n in out] == ["mean", "mean"]
 
 
-# --- PR 8: pushdown_selects (select hops left past a disjoint reduce) ------------
-
-
 def test_pushdown_isel_past_mean(schema):
     plan = [_node(schema, "mean", "lat"), _node(schema, "isel", time=0)]
     out = optimize(plan)
@@ -126,9 +123,6 @@ def test_pushdown_sel_past_reduce(schema):
     plan = [_node(schema, "mean", "lat"), _node(schema, "sel", lon=2)]
     out = optimize(plan)
     assert [n.name for n in out] == ["sel", "mean"]
-
-
-# --- PR 9: the validity trichotomy (disjoint -> swap / consumed -> raise / scan -> leave)
 
 
 def test_select_on_reduced_dim_raises(schema):

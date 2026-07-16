@@ -82,9 +82,6 @@ def test_getitem_records_opaque_node(ds):
     assert node.name == "__getitem__" and node.kind == "opaque"
 
 
-# --- equality: record -> optimise -> replay matches the eager chain --------------
-
-
 def test_readme_pipeline_positional_equal(ds):
     got = ds.plan.mean("lat").mean("lon").isel(time=0).collect()
     assert_equal(got, ds.mean("lat").mean("lon").isel(time=0))
@@ -116,9 +113,6 @@ def test_sel_merge_equal(ds):
     assert_equal(got, ds.sel(lat=1).sel(lon=2))
 
 
-# --- PR 9: validity trichotomy surfaced through collect() -----------------------
-
-
 def test_select_on_reduced_dim_raises(ds):
     # mean removes lon; isel(lon=0) then references a dim that is gone -> invalid
     with pytest.raises(InvalidExpressionError):
@@ -135,9 +129,6 @@ def test_cumsum_then_select_computes(ds):
     # cumsum is a scan (order matters): left in place, not reordered and not raised
     got = ds.plan.cumsum("time").isel(time=2).collect()
     assert_equal(got, ds.cumsum("time").isel(time=2))
-
-
-# --- PR 10: explain() renders the optimised plan without running it --------------
 
 
 def test_explain_shows_optimised_plan(ds):
