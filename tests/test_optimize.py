@@ -96,8 +96,6 @@ def test_non_select_plan_unchanged(schema):
     assert [n.name for n in out] == ["mean", "mean"]
 
 
-
-
 def test_pushdown_isel_past_mean(schema):
     plan = [_node(schema, "mean", "lat"), _node(schema, "isel", time=0)]
     out = optimize(plan)
