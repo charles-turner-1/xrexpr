@@ -4,7 +4,7 @@ Imagine you have an xarray dataset that you want to do some analysis on. You mig
 
 ```python
 %%timeit
-ds.mean(dim="lat").mean(dim="lon").isel(time=0)
+ds.mean(dim="lat").mean(dim="lon").isel(time=0).compute()
 ```
 `193 ms ± 49.6 ms per loop (mean ± std. dev. of 5 runs, 5 loops each)`
 
@@ -12,7 +12,7 @@ ds.mean(dim="lat").mean(dim="lon").isel(time=0)
 However, it would be a lot faster if you instead wrote:
 
 ```python
-ds.isel(time=0).mean(dim="lat").mean(dim="lon")
+ds.isel(time=0).mean(dim="lat").mean(dim="lon").compute()
 ```
 `925 μs ± 401 μs per loop (mean ± std. dev. of 5 runs, 5 loops each)`
 
@@ -46,7 +46,7 @@ fast ordering while you keep writing the readable one. The result is exactly wha
 eager chain would have produced:
 
 ```python
-assert_equal(result, ds.mean(dim="lat").mean(dim="lon").isel(time=0))
+assert_equal(result, ds.mean(dim="lat").mean(dim="lon").isel(time=0)).compute()
 ```
 
 ## Seeing the rewrite
