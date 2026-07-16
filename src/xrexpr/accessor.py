@@ -2,14 +2,16 @@
 
 ``ds.plan`` returns a :class:`LazyDatasetProxy` that records the chained method
 calls made on it (``.mean``, ``.isel``, ``.sel``, ``__getitem__``, ...) instead
-of executing them. Calling :meth:`~LazyDatasetProxy.compute` optimises the
-recorded plan and replays it onto the real dataset.
+of executing them. Calling :meth:`~LazyDatasetProxy.collect` optimises the
+recorded plan and replays it onto the real dataset (:meth:`~LazyDatasetProxy.explain`
+returns the optimised plan as text without running it).
 
 The recorded plan is a list of :class:`~xrexpr.ir.OpNode`: each call is normalised
 by :func:`~xrexpr.schema.to_opnode` against a :class:`SchemaState` threaded from
-``self._base_ds`` and evolved per op (no materialisation). ``compute`` runs the plan
-through :func:`~xrexpr.optimize.optimize` (a fixpoint of rewrite rules) and replays
-the optimised ``OpNode``s onto the base dataset. See ``docs/pr-plan.md``.
+``self._base_ds`` and evolved per op (no materialisation). ``collect`` runs the plan
+through :func:`~xrexpr.optimize.optimize` (a fixpoint of rewrite rules), replays the
+optimised ``OpNode``s onto the base dataset, and materialises the result. See
+``docs/pr-plan.md``.
 """
 
 from functools import wraps
@@ -24,7 +26,7 @@ from xrexpr.schema import SchemaState, apply_schema, to_opnode
 
 @xr.register_dataset_accessor("plan")  # type: ignore[no-untyped-call]
 class LazyDatasetProxy:
-    """Record operations on an ``xr.Dataset`` and replay them on ``compute()``.
+    """Record operations on an ``xr.Dataset`` and replay them on ``collect()``.
 
     Registered as the ``.plan`` accessor, so ``ds.plan`` yields an empty proxy
     over ``ds``; each recorded call returns a fresh proxy (leaving the original
@@ -85,23 +87,49 @@ class LazyDatasetProxy:
             return _method
 
         # non-callable (properties): evaluate eagerly and return the attribute
-        return getattr(self.compute(), name)
+        return getattr(self.collect(), name)
 
     def __getitem__(self, key: Any) -> "LazyDatasetProxy":
         return self._record("__getitem__", key)
 
-    def compute(self) -> xr.Dataset | xr.DataArray:
-        """Optimise the recorded plan, replay it on the base dataset, return the result.
+    def collect(self) -> xr.Dataset | xr.DataArray:
+        """Optimise the recorded plan, replay it, and materialise the result.
 
-        Returns a ``DataArray`` rather than a ``Dataset`` when the chain selects a
-        single variable (e.g. ``ds.plan["temperature"]``).
+        The Polars-flavoured terminal of the plan: it runs the recorded ops through
+        :func:`~xrexpr.optimize.optimize`, replays the optimised ``OpNode``s onto the
+        base dataset, and calls xarray's own ``.compute()`` so dask-backed data is
+        realised. Returns a ``DataArray`` rather than a ``Dataset`` when the chain
+        selects a single variable (e.g. ``ds.plan["temperature"]``).
 
-        TEMPORARY (PR 1): the terminal is named ``compute`` and inherited verbatim
-        from the demo. It is renamed to ``.collect()`` (Polars-flavour) in PR 10
-        (#13), which also makes it call xarray's own ``.compute()`` on the replayed
-        result — this method only replays, it never materialises dask-backed data.
+        Raises :class:`~xrexpr.exceptions.InvalidExpressionError` if the plan cannot be
+        optimised (e.g. a select on a dim a preceding reduce removed).
         """
-        return self._replay(optimize(self._ops))
+        return self._replay(optimize(self._ops)).compute()
+
+    def explain(self) -> str:
+        """Return the optimised plan as text, without running it (à la Polars ``explain``).
+
+        Shows the ops :meth:`collect` would actually replay — i.e. *after* optimisation
+        — so the rewrite (merged / pushed-down selects) is visible. Raises the same
+        :class:`~xrexpr.exceptions.InvalidExpressionError` as :meth:`collect` when the
+        plan is invalid.
+        """
+        plan = optimize(self._ops)
+        if not plan:
+            return "plan (0 ops)"
+        body = "\n".join(
+            f"  {i}. {self._format_node(n)}" for i, n in enumerate(plan, 1)
+        )
+        return f"plan ({len(plan)} ops):\n{body}"
+
+    @staticmethod
+    def _format_node(node: OpNode) -> str:
+        """One-line human-readable form of an ``OpNode`` for :meth:`explain`."""
+        if node.name == "__getitem__":
+            return f"[{node.args[0]!r}]"
+        parts = [repr(a) for a in node.args]
+        parts += [f"{k}={v!r}" for k, v in node.kwargs.items()]
+        return f"{node.name}({', '.join(parts)})"
 
     def _replay(self, nodes: list[OpNode]) -> xr.Dataset | xr.DataArray:
         """Walk the optimised ``OpNode`` plan, calling the real xarray methods."""

@@ -1,6 +1,6 @@
 """Tests for the ``.plan`` accessor.
 
-Covers recording behaviour and *equality* — ``ds.plan.<chain>.compute()`` matches
+Covers recording behaviour and *equality* — ``ds.plan.<chain>.collect()`` matches
 the eager ``ds.<chain>`` for the README pipelines, exercising record → optimise →
 replay end to end. The golden op-list assertions that pin the optimiser itself live
 in ``tests/test_optimize.py`` (it owns ``optimize``); here we only care that the
@@ -54,7 +54,7 @@ def test_getattr_property_materialises(ds):
 
 
 def test_getitem_records_and_computes(ds):
-    assert_equal(ds.plan["temperature"].compute(), ds["temperature"])
+    assert_equal(ds.plan["temperature"].collect(), ds["temperature"])
 
 
 # --- PR 6: recording now builds OpNodes and threads the schema ------------------
@@ -83,49 +83,70 @@ def test_getitem_records_opaque_node(ds):
 
 
 def test_readme_pipeline_positional_equal(ds):
-    got = ds.plan.mean("lat").mean("lon").isel(time=0).compute()
+    got = ds.plan.mean("lat").mean("lon").isel(time=0).collect()
     assert_equal(got, ds.mean("lat").mean("lon").isel(time=0))
 
 
 def test_readme_pipeline_kwargs_equal(ds):
-    got = ds.plan.mean(dim="lat").mean(dim="lon").isel(time=0).compute()
+    got = ds.plan.mean(dim="lat").mean(dim="lon").isel(time=0).collect()
     assert_equal(got, ds.mean(dim="lat").mean(dim="lon").isel(time=0))
 
 
 def test_reduce_tuple_dims_equal(ds):
-    got = ds.plan.mean(dim=("lat", "lon")).isel(time=0).compute()
+    got = ds.plan.mean(dim=("lat", "lon")).isel(time=0).collect()
     assert_equal(got, ds.mean(dim=("lat", "lon")).isel(time=0))
 
 
 def test_reduce_then_select_equal(ds):
-    got = ds.plan.sum("lat").isel(time=0).compute()
+    got = ds.plan.sum("lat").isel(time=0).collect()
     assert_equal(got, ds.sum("lat").isel(time=0))
 
 
 def test_isel_merge_equal(ds):
     # two isels fold into one indexer; the replayed result is unchanged
-    got = ds.plan.isel(time=0).isel(lat=1).compute()
+    got = ds.plan.isel(time=0).isel(lat=1).collect()
     assert_equal(got, ds.isel(time=0).isel(lat=1))
 
 
 def test_sel_merge_equal(ds):
-    got = ds.plan.sel(lat=1).sel(lon=2).compute()
+    got = ds.plan.sel(lat=1).sel(lon=2).collect()
     assert_equal(got, ds.sel(lat=1).sel(lon=2))
 
 
 def test_select_on_reduced_dim_raises(ds):
     # mean removes lon; isel(lon=0) then references a dim that is gone -> invalid
     with pytest.raises(InvalidExpressionError):
-        ds.plan.mean(dim="lon").isel(lon=0).compute()
+        ds.plan.mean(dim="lon").isel(lon=0).collect()
 
 
 def test_bare_mean_then_select_raises(ds):
     # mean() reduces every dim; the demo's empty-dim bug is now an error, not a wrong swap
     with pytest.raises(InvalidExpressionError):
-        ds.plan.mean().isel(time=0).compute()
+        ds.plan.mean().isel(time=0).collect()
 
 
 def test_cumsum_then_select_computes(ds):
     # cumsum is a scan (order matters): left in place, not reordered and not raised
-    got = ds.plan.cumsum("time").isel(time=2).compute()
+    got = ds.plan.cumsum("time").isel(time=2).collect()
     assert_equal(got, ds.cumsum("time").isel(time=2))
+
+
+def test_explain_shows_optimised_plan(ds):
+    text = ds.plan.mean("lat").isel(time=0).explain()
+    assert text.startswith("plan (2 ops):")
+    # the optimisation is visible: the isel has been pushed in front of the mean
+    assert text.index("isel") < text.index("mean")
+
+
+def test_explain_formats_getitem(ds):
+    assert "['temperature']" in ds.plan["temperature"].explain()
+
+
+def test_explain_empty_plan(ds):
+    assert ds.plan.explain() == "plan (0 ops)"
+
+
+def test_explain_raises_on_invalid_plan(ds):
+    # explain optimises too, so an invalid plan raises the same error collect() would
+    with pytest.raises(InvalidExpressionError):
+        ds.plan.mean(dim="lon").isel(lon=0).explain()
