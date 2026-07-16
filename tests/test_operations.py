@@ -1,19 +1,12 @@
 """Tests for the op metadata table (PR 3).
 
 The headline behaviour is the reduce/scan split — the thing the old bare
-``AGGREGATIONS`` set could not express — plus the back-compat sets still derived
-from the table.
+``AGGREGATIONS`` set could not express.
 """
 
 import pytest
 
-from xrexpr.operations import (
-    AGGREGATIONS,
-    OP_TABLE,
-    SELECTIONS,
-    OpSpec,
-    spec,
-)
+from xrexpr.operations import OP_TABLE, OpSpec, spec
 
 _KINDS = {"reduce", "scan", "select"}
 
@@ -62,13 +55,3 @@ def test_spec_unknown_returns_none():
 
 def test_every_spec_kind_is_valid():
     assert {s.kind for s in OP_TABLE.values()} == _KINDS
-
-
-def test_selections_backcompat_unchanged():
-    assert SELECTIONS == frozenset({"sel", "isel"})
-
-
-def test_aggregations_backcompat_covers_reduces_and_scans():
-    assert {"mean", "sum", "median"} <= AGGREGATIONS  # reduces
-    assert {"cumsum", "cumprod", "diff"} <= AGGREGATIONS  # scans
-    assert AGGREGATIONS.isdisjoint(SELECTIONS)

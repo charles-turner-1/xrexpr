@@ -50,10 +50,3 @@ OP_TABLE: dict[str, OpSpec] = {
 def spec(name: str) -> OpSpec | None:
     """Return the :class:`OpSpec` for ``name``, or ``None`` if it isn't tabulated."""
     return OP_TABLE.get(name)
-
-
-# The (soon-to-be-removed) cst.py path still imports these; derive them from the
-# table so there is one source of truth. ``SELECTIONS`` is unchanged; ``AGGREGATIONS``
-# now also groups the scans (incl. ``diff``) — harmless, as it is otherwise unused.
-AGGREGATIONS = frozenset(n for n, s in OP_TABLE.items() if s.kind in ("reduce", "scan"))
-SELECTIONS = frozenset(n for n, s in OP_TABLE.items() if s.kind == "select")

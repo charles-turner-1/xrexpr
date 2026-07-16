@@ -25,4 +25,3 @@ repos:
         - xarray
         - numpy
         - frozendict
-        - libcst
