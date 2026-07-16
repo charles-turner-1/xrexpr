@@ -6,10 +6,17 @@ plan stops changing. Local rules + a fixpoint let a small rewrite (a select movi
 one hop) compose into a global one (the select reaching the front) without any rule
 having to reason about the whole chain.
 
-This PR (7) ships the scaffold plus one rule, :func:`merge_adjacent_selects` — fold a
-run of consecutive ``isel``/``isel`` (or ``sel``/``sel``) into a single indexer. The
-select-*pushdown* rules that reorder selects past reductions land in PR 8/9 (#11,
-#12); they slot into ``_RULES`` with no change to the loop. See ``docs/pr-plan.md``.
+Rules (in ``_RULES``):
+
+- :func:`merge_adjacent_selects` — fold a run of consecutive ``isel``/``isel`` (or
+  ``sel``/``sel``) into a single indexer (PR 7).
+- :func:`pushdown_selects` — hop a select left past a preceding reduce when their dims
+  are disjoint, so the reduction scans a smaller array (PR 8, #11).
+
+Each is a *local, single-step* rewrite; the fixpoint composes them (a select bubbles
+past a whole run of reductions, and newly-adjacent selects then merge). Classifying the
+non-disjoint conflict — invalid select vs. a scan the select must stay behind — lands in
+PR 9 (#12). See ``docs/pr-plan.md``.
 """
 
 from collections.abc import Callable
@@ -96,4 +103,32 @@ def _mergeable_select(node: OpNode) -> bool:
     return node.name in _SELECTS and all(k in node.indexer for k in node.kwargs)
 
 
-_RULES: tuple[Rule, ...] = (merge_adjacent_selects,)
+def pushdown_selects(nodes: Plan) -> Plan:
+    """Hop a select left past an immediately-preceding reduce when their dims are disjoint.
+
+    ``ds.mean("lat").isel(time=0)`` becomes ``ds.isel(time=0).mean("lat")`` — selecting
+    *before* reducing shrinks the array the reduction scans. The swap is valid whenever
+    the select touches no dim the reduce consumes (``time`` vs ``lat`` here). This reads
+    ``reduce.kind``/``consumes`` off the ``OpNode``, so it generalises the demo's
+    ``mean``/``sum``/``prod`` special-case to *any* reduce (``std``, ``max``, ...) —
+    fixing the mean-only limitation (#1).
+
+    One hop per call: the :func:`optimize` fixpoint re-applies it so a select bubbles
+    past a whole run of reductions. A select sharing a dim with the reduce is left in
+    place — whether that is an invalid expression or a scan the select must stay behind
+    is classified in PR 9 (#12).
+    """
+    for i in range(len(nodes) - 1):
+        reduce_node, select_node = nodes[i], nodes[i + 1]
+        if (
+            reduce_node.kind == "reduce"
+            and select_node.name in _SELECTS
+            and frozenset(select_node.indexer).isdisjoint(reduce_node.consumes)
+        ):
+            swapped = list(nodes)
+            swapped[i], swapped[i + 1] = select_node, reduce_node
+            return swapped
+    return nodes
+
+
+_RULES: tuple[Rule, ...] = (merge_adjacent_selects, pushdown_selects)

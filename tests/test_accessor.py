@@ -81,8 +81,6 @@ def test_getitem_records_opaque_node(ds):
     assert node.name == "__getitem__" and node.kind == "opaque"
 
 
-
-
 def test_readme_pipeline_positional_equal(ds):
     got = ds.plan.mean("lat").mean("lon").isel(time=0).compute()
     assert_equal(got, ds.mean("lat").mean("lon").isel(time=0))
