@@ -135,7 +135,6 @@ def test_cumsum_then_select_computes(ds):
     assert_equal(got, ds.cumsum("time").isel(time=2))
 
 
-# --- PR 10: explain() renders the optimised plan without running it --------------
 
 
 def test_explain_shows_optimised_plan(ds):
