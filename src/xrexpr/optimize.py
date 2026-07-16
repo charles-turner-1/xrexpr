@@ -14,15 +14,17 @@ Rules (in ``_RULES``):
   are disjoint, so the reduction scans a smaller array (PR 8, #11).
 
 Each is a *local, single-step* rewrite; the fixpoint composes them (a select bubbles
-past a whole run of reductions, and newly-adjacent selects then merge). Classifying the
-non-disjoint conflict — invalid select vs. a scan the select must stay behind — lands in
-PR 9 (#12). See ``docs/pr-plan.md``.
+past a whole run of reductions, and newly-adjacent selects then merge). ``pushdown_selects``
+classifies each adjacency by the report's validity **trichotomy** — disjoint → swap,
+consumed dim → :class:`InvalidExpressionError`, scan dim → leave (PR 9, #12). See
+``docs/pr-plan.md``.
 """
 
 from collections.abc import Callable
 
 from frozendict import frozendict
 
+from xrexpr.exceptions import InvalidExpressionError
 from xrexpr.ir import OpNode
 
 __all__ = ["optimize"]
@@ -104,30 +106,43 @@ def _mergeable_select(node: OpNode) -> bool:
 
 
 def pushdown_selects(nodes: Plan) -> Plan:
-    """Hop a select left past an immediately-preceding reduce when their dims are disjoint.
+    """Hop a select left past a preceding reduce, classifying each adjacency (trichotomy).
 
-    ``ds.mean("lat").isel(time=0)`` becomes ``ds.isel(time=0).mean("lat")`` — selecting
-    *before* reducing shrinks the array the reduction scans. The swap is valid whenever
-    the select touches no dim the reduce consumes (``time`` vs ``lat`` here). This reads
-    ``reduce.kind``/``consumes`` off the ``OpNode``, so it generalises the demo's
-    ``mean``/``sum``/``prod`` special-case to *any* reduce (``std``, ``max``, ...) —
-    fixing the mean-only limitation (#1).
+    For an adjacent ``(reduce, select)`` pair the select's dims fall into one of three
+    cases against the reduce's ``consumes``:
 
-    One hop per call: the :func:`optimize` fixpoint re-applies it so a select bubbles
-    past a whole run of reductions. A select sharing a dim with the reduce is left in
-    place — whether that is an invalid expression or a scan the select must stay behind
-    is classified in PR 9 (#12).
+    - **disjoint** — the select touches no reduced dim, so the swap is valid:
+      ``ds.mean("lat").isel(time=0)`` → ``ds.isel(time=0).mean("lat")`` (select first, a
+      smaller array to reduce). Keying off ``kind`` generalises this to *any* reduce
+      (``std``/``max``/...), not just the demo's ``mean``/``sum``/``prod`` (#1).
+    - **shares a consumed dim** — the select indexes a dim the reduce already removed, so
+      the expression can never replay (``mean("lon").isel(lon=0)``, and the all-dims
+      ``mean().isel(time=0)``): raise :class:`InvalidExpressionError` rather than emit a
+      silently-wrong reorder (the demo's empty-dim bug).
+
+    Scans are the third leg: a ``cumsum``/``diff`` is ``kind == "scan"``, not ``reduce``,
+    so this rule never fires on it — ``cumsum("time").isel(time=5)`` is left untouched
+    (order matters), neither swapped nor raised.
+
+    One hop per call; :func:`optimize`'s fixpoint composes hops so a select reaches the
+    front of a run of reductions (and adjacent selects then merge).
     """
     for i in range(len(nodes) - 1):
         reduce_node, select_node = nodes[i], nodes[i + 1]
-        if (
-            reduce_node.kind == "reduce"
-            and select_node.name in _SELECTS
-            and frozenset(select_node.indexer).isdisjoint(reduce_node.consumes)
-        ):
+        if reduce_node.kind != "reduce" or select_node.name not in _SELECTS:
+            continue
+
+        select_dims = frozenset(select_node.indexer)
+        if select_dims.isdisjoint(reduce_node.consumes):
             swapped = list(nodes)
             swapped[i], swapped[i + 1] = select_node, reduce_node
             return swapped
+
+        shared = sorted(str(d) for d in select_dims & reduce_node.consumes)
+        raise InvalidExpressionError(
+            f"{select_node.name}() indexes {shared}, "
+            f"which {reduce_node.name}() has already reduced away"
+        )
     return nodes
 
 

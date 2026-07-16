@@ -14,6 +14,7 @@ from xarray.testing import assert_equal
 
 import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
 from xrexpr.accessor import LazyDatasetProxy
+from xrexpr.exceptions import InvalidExpressionError
 
 
 @pytest.fixture
@@ -110,3 +111,21 @@ def test_isel_merge_equal(ds):
 def test_sel_merge_equal(ds):
     got = ds.plan.sel(lat=1).sel(lon=2).compute()
     assert_equal(got, ds.sel(lat=1).sel(lon=2))
+
+
+def test_select_on_reduced_dim_raises(ds):
+    # mean removes lon; isel(lon=0) then references a dim that is gone -> invalid
+    with pytest.raises(InvalidExpressionError):
+        ds.plan.mean(dim="lon").isel(lon=0).compute()
+
+
+def test_bare_mean_then_select_raises(ds):
+    # mean() reduces every dim; the demo's empty-dim bug is now an error, not a wrong swap
+    with pytest.raises(InvalidExpressionError):
+        ds.plan.mean().isel(time=0).compute()
+
+
+def test_cumsum_then_select_computes(ds):
+    # cumsum is a scan (order matters): left in place, not reordered and not raised
+    got = ds.plan.cumsum("time").isel(time=2).compute()
+    assert_equal(got, ds.cumsum("time").isel(time=2))
