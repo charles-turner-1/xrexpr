@@ -22,7 +22,17 @@ today's optimiser is too small to pay for any of this yet.
 
 `OpNode` is one flat frozen dataclass with a `kind: str` field constrained at runtime
 to `KINDS`. That is a **stringly-typed sum type**: the variants exist in the designer's
-head and in a `frozenset` literal, not in the type.
+head and in a `frozenset` literal, not in the type. Four different xarray ops all record
+as the *same* six-field record, differing only in which fields happen to be filled:
+
+```python
+ds.mean("lat")     # OpNode(name='mean',   kind='reduce',   consumes={'lat'},         indexer={})
+ds.isel(time=0)    # OpNode(name='isel',   kind='select',   consumes={'time'},        indexer={'time': 0})
+ds.cumsum("time")  # OpNode(name='cumsum', kind='scan',     consumes=set(),           indexer={})
+ds["temp"]         # OpNode(name='__getitem__', kind='opaque', consumes=set(),        indexer={})
+```
+
+(These are the actual values `to_opnode` produces; `args`/`kwargs` elided.)
 
 Python's `match` destructures *shape*. Since every node is the same shape, there is no
 shape to destructure — a class pattern like `OpNode(kind="reduce")` is an attribute
@@ -82,6 +92,23 @@ paper over it by giving every node every field. Per `to_opnode` (`schema.py:140-
 | `scan` | — (name only) | `consumes`, `indexer` |
 | `elementwise` / `opaque` | — | `consumes`, `indexer` |
 
+Concretely, `ds.mean("lat").isel(time=0)` records today as two nodes of identical shape,
+each carrying two fields it never uses:
+
+```python
+# today — flat record, empty fields marked ✗
+OpNode(name='mean', kind='reduce', consumes={'lat'},  indexer={})          # ✗ indexer
+OpNode(name='isel', kind='select', consumes={'time'}, indexer={'time': 0}) #   both used
+```
+
+Under §2's variants the same chain carries only what each op actually has:
+
+```python
+# proposed — each variant only has its own fields
+Reduce(name='mean', consumes={'lat'})
+Select(name='isel', indexer={'time': 0})   # consumes={'time'} is now a @property, not stored
+```
+
 Two distinct problems show up here, and only the first is the obvious one:
 
 **Empty fields.** `indexer` on a `mean` node, and `consumes` on a `cumsum`, are not
@@ -99,19 +126,30 @@ select is quietly responsible for it.
 `merge_adjacent_selects` is already carrying that responsibility: it runs two
 accumulators down a run, `indexer.update(...)` beside `consumes |= ...`. Those two can
 disagree — `indexer.update` keeps the **last** value for a dim while `consumes` **unions**
-across all of them, so folding `isel(time=0)` then `isel(time=slice(0, 5))` yields a node
-whose stored `consumes` is `{time}` while its own indexer says `time` survives:
+across all of them. Take `ds.isel(time=0).isel(time=slice(0, 5))`, which records as:
+
+```python
+OpNode(name='isel', kind='select', consumes={'time'}, indexer={'time': 0})
+OpNode(name='isel', kind='select', consumes=set(),    indexer={'time': slice(0, 5)})  # slice keeps the dim
+```
+
+Merging folds `indexer` (last-wins → `{time: slice(0, 5)}`) and unions `consumes`
+(`{time} | ∅ → {time}`) independently, producing a node that contradicts itself — its
+stored `consumes` says `time` was dropped, its own `indexer` says `time` survives:
 
 ```
-scalar→slice : stored {'time'} | derived set() | agree: False
+merged: indexer={'time': slice(0, 5)}  consumes={'time'}
+derived from indexer:                  ∅          (slice(0,5) is not a scalar index)
+agree: False
 ```
 
 This is **latent, not a live bug.** That ordering means indexing a dim a previous scalar
 select already dropped, which xarray rejects before we could ever record it — so in
 practice the invariant holds. But it holds by a *non-local* argument about what xarray
-permits upstream, not by anything visible at the merge site. Deriving `consumes` from
-`indexer` on the variant makes the question disappear: there is one accumulator, and the
-merged node cannot describe itself incorrectly.
+permits upstream, not by anything visible at the merge site. Under §2's `Select` the
+question disappears: the merged node holds only `indexer={'time': slice(0, 5)}` and the
+`consumes` property reads `∅` off it — one source of truth, and the node cannot describe
+itself incorrectly.
 
 ```python
 @dataclass(frozen=True)
@@ -141,12 +179,21 @@ Note that `consumes` stays meaningful on *both* `Reduce` and `Select` — the tw
 share the concept, they just source it differently. That's a structural-typing detail
 worth getting right before a port: it's a shared *accessor*, not a shared *field*.
 
-Now `match` earns its keep, because the arms bind *different fields*:
+Now `match` earns its keep, because the arms bind *different fields* — here the
+`pushdown_selects` adjacency, binding `consumes` off the reduce and `indexer` off the
+select in one line:
 
 ```python
+# today (optimize.py:131-132):
+#   reduce_node, select_node = nodes[i], nodes[i + 1]
+#   if reduce_node.kind != "reduce" or select_node.name not in _SELECTS: continue
+#   select_dims = frozenset(select_node.indexer)
+#   ...
+# proposed:
 match nodes[i], nodes[i + 1]:
     case Reduce(consumes=consumes) as red, Select(indexer=indexer) as sel:
-        ...
+        # e.g. ds.mean("lat").isel(time=0): consumes={'lat'}, indexer={'time': 0}
+        ...   # the disjoint/overlap trichotomy (§4) lives in the arm body
 ```
 
 `Select` has no `consumes` to misread; `Reduce` has no `indexer`. The `_SELECTS` constant
@@ -171,7 +218,7 @@ case _:
 
 With `Op` as a union of distinct classes, that gives us the Rust property in Python:
 adding a `Window` variant fails type-check at every rule that doesn't handle it. With
-today's `kind: str`, mypy cannot help — `"reduec"` is a valid `str` and a silently dead
+today's `kind: str`, mypy cannot help — `"reduce"` is a valid `str` and a silently dead
 branch.
 
 (`assert_never` is `typing.assert_never` on 3.11+; on our 3.10 floor it needs
