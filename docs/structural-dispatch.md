@@ -118,10 +118,21 @@ a plausible-looking empty dict instead of a type error.
 
 **A derived field stored as state.** `consumes` on a select is not independent data —
 `schema.py:150` computes it as exactly the scalar-indexed subset of `indexer`
-(`frozenset(d for d, v in indexer.items() if _is_scalar_index(v))`). The flat record
-denormalises it into a field, so "a select's `consumes` agrees with its `indexer`" is an
-invariant held by convention rather than by construction, and every rule that builds a
-select is quietly responsible for it.
+(`frozenset(d for d, v in indexer.items() if _is_scalar_index(v))`). Concretely,
+`ds.isel(time=0, lat=slice(0, 5))` records as:
+
+```python
+OpNode(name='isel', kind='select',
+       indexer={'time': 0, 'lat': slice(0, 5)},   # the two indexed dims
+       consumes={'time'})                          # ← just "which of those are scalar"
+```
+
+`consumes` here carries no information `indexer` doesn't already have: `time` is in it
+because `time=0` is a scalar, `lat` is out because `slice(0, 5)` keeps its dim. Given the
+`indexer`, you could recompute `consumes` at any time — the flat record instead
+**denormalises** it into a stored field. So "a select's `consumes` agrees with its
+`indexer`" is an invariant held by convention rather than by construction, and every rule
+that builds a select is quietly responsible for keeping the two in step.
 
 `merge_adjacent_selects` is already carrying that responsibility: it runs two
 accumulators down a run, `indexer.update(...)` beside `consumes |= ...`. Those two can
