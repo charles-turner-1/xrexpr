@@ -16,6 +16,33 @@ as anything other than a transliteration.
 It also tries to be honest about what *doesn't* transfer, and about the fact that
 today's optimiser is too small to pay for any of this yet.
 
+### The plan lifecycle: record → optimise → replay
+
+Three stages, and the memo leans on the third, so pin it down up front. A chain like
+`ds.plan.mean("lat").isel(time=0).collect()` runs:
+
+1. **Record.** Each call on the `.plan` proxy is *not executed* — it is normalised by
+   `to_opnode` into an `OpNode` and appended to a list (`accessor.py:_record`). The list
+   *is* the plan.
+2. **Optimise.** `optimize()` rewrites that list into an equivalent, cheaper list of
+   `OpNode`s (the merge / pushdown rules) — this is the only stage that inspects a node's
+   `kind`/`consumes`/`indexer`.
+3. **Replay.** `_replay` (`accessor.py:145`) walks the optimised list and *actually calls
+   the real xarray methods* on the base dataset, one node at a time:
+
+   ```python
+   for node in nodes:                                     # essentially the whole of replay
+       if node.name == "__getitem__":
+           ds = ds[node.args[0]]
+       else:
+           ds = getattr(ds, node.name)(*node.args, **node.kwargs)
+   ```
+
+**Replay is a uniform passthrough.** It never looks at `kind`, `consumes`, or `indexer` —
+it re-invokes the recorded xarray call verbatim from `name`/`args`/`kwargs`. That single
+property is what the §2 and §5.1 caveats turn on: whatever shape the IR takes, every node
+must still hand replay a `name` and the `args`/`kwargs` to call it with.
+
 ---
 
 ## 1. Why `match` over today's IR is cosmetic
