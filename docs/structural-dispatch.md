@@ -179,6 +179,25 @@ Note that `consumes` stays meaningful on *both* `Reduce` and `Select` — the tw
 share the concept, they just source it differently. That's a structural-typing detail
 worth getting right before a port: it's a shared *accessor*, not a shared *field*.
 
+**Caveat: the sketch above is semantic-only — it drops the fields replay needs.** The
+accessor replays a plan by calling every node uniformly:
+`getattr(ds, node.name)(*node.args, **node.kwargs)` (`accessor.py:145`), and
+`_format_node`/`__repr__` read the same three fields. So `name`/`args`/`kwargs` have to
+live on *every* variant, not just the semantic ones shown — `Reduce(name, consumes)` as
+written **can't replay** `mean("lat")` (it has no `args=('lat',)`), and `__getitem__`
+replays through `node.args[0]`. There are two ways out, and choosing between them is the
+real first design step — ahead of the enum itself:
+
+- **Keep `args`/`kwargs` on every variant.** Simplest, and replay is untouched — but it
+  reintroduces the "every node carries the same replay fields" shape the split was meant
+  to escape. The variants then differ only in their *semantic* fields (`consumes` /
+  `indexer`), which is still a real gain, just a smaller one than the sketch implies.
+- **Reconstruct the call from the semantic fields** (`consumes`/`indexer`) at replay time.
+  Drops `args`/`kwargs` for a genuinely minimal variant, but is a much larger change and
+  gives up the "keep `args`/`kwargs` verbatim for faithful replay" guarantee `to_opnode`
+  documents (`schema.py:133`) — replay stops being a passthrough and starts re-deriving
+  xarray calls.
+
 Now `match` earns its keep, because the arms bind *different fields* — here the
 `pushdown_selects` adjacency, binding `consumes` off the reduce and `indexer` off the
 select in one line:
@@ -315,6 +334,26 @@ It becomes worth it at any of these triggers, whichever comes first:
 
 Until then the flat record is the right size for the problem.
 
+### 5.1 Not every pass dispatches — the uniform ones are a standing cost
+
+The "one dispatch site" count above understates the case, because it's easy to picture
+*all* of the optimiser wanting variants. It doesn't. `OpNode` has three consumers, and
+only one of them dispatches on kind:
+
+| consumer | wants | why |
+|---|---|---|
+| `pushdown_selects` (`optimize.py:132`) | **variants** | binds different fields per kind — the one pass the sum type helps |
+| `_replay` / `_format_node` / `__repr__` (`accessor.py`) | **the flat shape** | treat every node identically: `getattr(ds, name)(*args, **kwargs)` — no dispatch at all |
+| `apply_schema` (`schema.py:70,75`) | **per-node field access** | reads `.consumes` *and* `.indexer` on every node; under the split, `Scan`/`Opaque` have neither, so it needs a shared `Protocol` with empty defaults or its own `match` |
+
+So the real trade is one cleaner `match` at the dispatch site against *added* ceremony at
+the two uniform sites — plus every golden-`OpNode` test moving. Net line count can rise,
+not fall. "Strictly clearer" overstates it: the sum type is clearer **at the dispatch
+site** and more ceremonious **at the uniform sites**. That balance still tips toward the
+sum type once a §5 trigger lands and there's more than one dispatch site to pay for it —
+but it is a balance, not a free win, and the replay caveat in §2 is the first thing to
+resolve when the time comes.
+
 ---
 
 ## 6. Recommendation
@@ -330,7 +369,9 @@ Until then the flat record is the right size for the problem.
   problem rather than the solution.
 - **At the first trigger in §5:** land the sum type (§2) and let `match` + `assert_never`
   fall out of it. That is the change that is simultaneously better Python, better typed,
-  and a 1:1 Rust enum.
+  and a 1:1 Rust enum — but settle the replay question first (§2's caveat: variants still
+  need `name`/`args`/`kwargs`, or replay must reconstruct calls), and expect it to add
+  ceremony at the uniform passes even as it cleans up the dispatch site (§5.1).
 
 The summary in one line: **`match` is the payoff, not the reform.** Reform the type and
 the `match` writes itself; write the `match` first and you've bought the syntax without
