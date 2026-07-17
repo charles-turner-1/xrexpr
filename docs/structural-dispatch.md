@@ -236,6 +236,12 @@ real first design step — ahead of the enum itself:
   documents (`schema.py:133`) — replay stops being a passthrough and starts re-deriving
   xarray calls.
 
+**This is now decided (§7.5): keep `args`/`kwargs` verbatim on every variant.**
+Reconstruction is a trap — the semantic fields are a *lossy* summary that omit orthogonal
+kwargs (`skipna`/`ddof` on a reduce, `drop`/`method` on a select), and `opaque` ops have
+no semantic fields to rebuild from at all. So the committed sketch (§7.2) carries the
+replay header on every variant and layers the semantic fields on top.
+
 Now `match` earns its keep, because the arms bind *different fields* — here the
 `pushdown_selects` adjacency, binding `consumes` off the reduce and `indexer` off the
 select in one line:
@@ -300,6 +306,18 @@ Today's `OpNode` maps to a Rust struct with a `kind: String` and four
 always-maybe-empty fields — which is the thing a Rust reviewer would immediately ask
 you to rewrite as an enum. Porting §1 (match over a flat record) means porting the
 problem.
+
+Two things the mapping table understates, both settled in §7:
+
+- **The union tracks structural *kinds*, not xarray methods.** `mean`/`std`/`sum` are all
+  one `Reduce`; the enum stays small and slow-growing (a handful of *categories*), while
+  the *methods* live in `OP_TABLE` (`operations.py`). Modelling one variant per xarray
+  method would be the anti-pattern — an enum of near-identical arms.
+- **`name` must live *inside* each variant, not on a shared header.** A struct with `name`
+  outside the enum (`struct OpNode { name: String, op: OpKind }`) lets `name` disagree with
+  the variant (`name: "mean"` beside `op: Select`) — and Rust inherits that footgun just as
+  Python does; the port doesn't fix it. Putting `name` in the variant (a `SelectName` enum
+  in Rust, `Literal["isel","sel"]` in Python) is what makes the mismatch unrepresentable.
 
 ### 3.1 A rule-signature finding that falls out of this
 
@@ -396,6 +414,13 @@ resolve when the time comes.
 
 ## 6. Recommendation
 
+> **Superseded (2026-07) — see §7.** The structural "not now" below was written on the
+> premise that the optimiser stays small. A design review took the opposite premise —
+> *design for growth* — which flips trigger 3's calculus and resolves the open questions
+> (§7). The three small wins under "Now" are still worth doing; the "Not now" / "at the
+> first trigger" framing is now **do it, as a fat-variant sum type**. Kept below for the
+> reasoning that led there.
+
 - **Now:** nothing structural. Three small, independent things worth doing on their own
   merits: tighten `Rule` to `Plan | None` (§3.1), which drops a redundant full-plan
   compare per fixpoint pass and moves the design toward the port; fix the docstring's
@@ -414,3 +439,130 @@ resolve when the time comes.
 The summary in one line: **`match` is the payoff, not the reform.** Reform the type and
 the `match` writes itself; write the `match` first and you've bought the syntax without
 the safety.
+
+---
+
+## 7. Decision: commit the unary sum type (fat variants)
+
+*(2026-07 — supersedes the "not now" of §5–§6.)*
+
+### 7.1 What, and why now
+
+The trigger calculus in §5 assumed the optimiser stays small. The working premise is now
+the opposite — **the op surface is expected to grow** — so the shape is worth fixing
+*before* the growth, not after. Decision: **land the unary sum type now, as fat variants**,
+and let `match` + `assert_never` (§2.1) fall out of it. "Unary" is load-bearing — this
+covers the one-input ops; §7.6 defers the rest.
+
+### 7.2 The shape
+
+Each variant is **self-contained**: it carries the replay header (`name`/`args`/`kwargs`,
+§7.5) *and* its own semantic fields, so dispatch is a single-level `match node`.
+
+```python
+@dataclass(frozen=True)
+class Reduce:
+    name: str                                   # tabulated reduction; open set → str
+    args: tuple[Any, ...] = ()
+    kwargs: frozendict[str, Any] = frozendict()
+    consumes: frozenset[Hashable] = frozenset()
+
+@dataclass(frozen=True)
+class Select:
+    name: Literal["isel", "sel"]                # closed set → Literal
+    args: tuple[Any, ...] = ()
+    kwargs: frozendict[str, Any] = frozendict()
+    indexer: frozendict[Hashable, Any] = frozendict()
+
+    @property
+    def consumes(self) -> frozenset[Hashable]:  # derived, never stored (§2)
+        return frozenset(d for d, v in self.indexer.items() if _is_scalar_index(v))
+
+@dataclass(frozen=True)
+class Scan:
+    name: Literal["cumsum", "cumprod", "diff"]  # closed set → Literal
+    args: tuple[Any, ...] = ()
+    kwargs: frozendict[str, Any] = frozendict()
+
+@dataclass(frozen=True)
+class Opaque:
+    name: str
+    args: tuple[Any, ...] = ()
+    kwargs: frozendict[str, Any] = frozendict()
+
+Op = Reduce | Select | Scan | Opaque
+```
+
+- **`Literal` where the name set is closed** (`Select`, `Scan`) — mypy then rejects
+  `Select(name="mean")`, making a name↔kind mismatch unrepresentable (§7.3). `Reduce` and
+  `Opaque` names are open, so they stay `str`; a `Reduce`'s kind-safety comes instead from
+  `to_opnode` only ever building one from a tabulated reduction.
+- **`consumes` is a `@property` on `Select`, never a field** — one accumulator, so a merged
+  node cannot describe itself incorrectly (§2). It stays a stored field on `Reduce`, which
+  sources it differently.
+- **`Elementwise` is dropped.** `ir.KINDS` lists it but `OP_TABLE` tabulates no elementwise
+  op, so `to_opnode` never emits one — a phantom. Reintroduce it only when a rule
+  dispatches on it (§7.4).
+- **`Scan` stays distinct from `Opaque`** even though neither carries a semantic field
+  today: a scan is *known* to keep its dim (order-significant), and tabulating it
+  (`operations.py`) is what guarantees a `cumsum` is never misread as a reduce. Its
+  semantic field (a scanned `dim`) arrives with the first scan-aware rule.
+
+### 7.3 Why not plain composition, or hybrid
+
+- **Plain composition** — `OpNode(name, args, kwargs, op: Reduce | Select | …)`, semantics
+  in `op`. Rejected: `name` on the shared header can contradict the payload (`name="mean"`
+  beside `op=Select(...)`), reintroducing the by-convention invariant the sum type exists
+  to kill — and it's a *shape* fault, not a Python one, so a literal Rust port
+  (`struct { name, op: enum }`) inherits it. Unrepresentability needs `name` *inside* the
+  variant, which composition structurally can't do (its header `name` must stay `str` for
+  opaque).
+- **Hybrid** — composition's header, but `name` pushed into the payload so it can be
+  `Literal`-typed. Sound, and it removes fat variants' field repetition — but it splits a
+  node's call across `node.op.name` + `node.args`, and the repetition it saves is mild
+  because variants are *kinds*, not methods (§7.4): there are only ever a dozen-ish. Keeping
+  each op's call data in one place wins.
+
+### 7.4 Variants are kinds, not methods
+
+The enum grows with **structural categories**, not xarray's method count. `mean`/`std`/
+`sum`/`median` are all `Reduce`, told apart by `name`. A new *method* is a row in
+`OP_TABLE` (`operations.py`, `name → kind`); a new *variant* is earned only by genuinely
+new structural data the optimiser must reason about — `groupby` (a grouper), `rolling`/
+`window` (a size). One variant per method would be the anti-pattern: an enum of
+structurally identical arms no `match` benefits from.
+
+### 7.5 Replay stays a verbatim passthrough
+
+The §2 caveat's open choice resolves to **keep `args`/`kwargs` on every variant**;
+reconstruction-from-semantics is a trap:
+
+- **Lossy.** `consumes`/`indexer` are the optimiser's *summary*, not the whole call.
+  `mean("lat", skipna=False)` records `consumes={'lat'}` with `skipna` living only in
+  `kwargs`; rebuilding `mean(dim={'lat'})` silently drops it. Same for `ddof` on `std`, and
+  `drop`/`method` on a select (stripped into `kwargs` at `schema.py:110`).
+- **Impossible for `opaque`.** An untabulated op has no semantic fields to rebuild from.
+
+So replay stays the uniform passthrough from the lifecycle definition (Context):
+`getattr(ds, node.name)(*node.args, **node.kwargs)`, unchanged. Semantic fields layer *on
+top of* the call payload, never *instead of* it.
+
+### 7.6 Deferred, because it's additive: binary ops → tree/DAG
+
+Only **unary** ops (one input — the previous dataset) are in scope now. Binary/n-ary ops —
+`merge`, `concat`, `where(cond, other)`, `ds1 + ds2` — are deferred on the finding that
+they're **orthogonal** to the variant shape: they *add* a `Join`/`Concat` variant carrying
+plan-typed children and promote the container `list → tree/DAG`, but they don't reopen
+`Reduce`/`Select`/`Scan`. Three tiers:
+
+1. **unary, constant params** — a list holds perfectly (nearly all of xarray).
+2. **binary with an eager operand** — a list still holds it, as an opaque node carrying the
+   already-materialised operand.
+3. **binary over a *lazy* operand you optimise across** (or a shared lazy prefix) — this,
+   and only this, forces a tree/DAG.
+
+Tier 3 is a genuine feature commitment (the Polars-`LazyFrame` shape), not a code detail,
+and isn't on the table yet. The one discipline it asks meanwhile: **keep the linearity
+assumption named in one place** (`ir.py`'s module docstring already states it) rather than
+leaking "my input is the previous element" into every rule — so the eventual promotion
+stays the additive change it should be.
