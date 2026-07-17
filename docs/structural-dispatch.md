@@ -446,6 +446,10 @@ the safety.
 
 *(2026-07 — supersedes the "not now" of §5–§6.)*
 
+The discussion that produced this decision — the questions, the wrong turns, and why each
+alternative was rejected — is recorded in
+[`structural-dispatch-discussion.md`](./structural-dispatch-discussion.md).
+
 ### 7.1 What, and why now
 
 The trigger calculus in §5 assumed the optimiser stays small. The working premise is now
