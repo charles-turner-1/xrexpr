@@ -30,7 +30,9 @@ from xrexpr.ir import OpNode
 __all__ = ["optimize"]
 
 Plan = list[OpNode]
-Rule = Callable[[Plan], Plan]
+#: A rule maps a plan to a rewritten one, or returns ``None`` when it changes nothing
+#: (letting :func:`optimize` detect the fixpoint without a full-plan equality compare).
+Rule = Callable[[Plan], Plan | None]
 
 #: ``isel``/``sel`` — the two select ops the merge rule folds.
 _SELECTS = ("isel", "sel")
@@ -41,19 +43,22 @@ def optimize(nodes: Plan) -> Plan:
 
     Each rule preserves the plan's result, so the returned plan replays to the same
     dataset as ``nodes`` — only cheaper. Termination relies on every rule being
-    non-growing (each either shrinks the plan or leaves it unchanged).
+    non-growing (each either shrinks the plan or leaves it unchanged). A rule returns
+    ``None`` when it changes nothing, so the loop detects the fixpoint from that signal
+    rather than by comparing whole plans each pass.
     """
     plan = list(nodes)
     while True:
-        rewritten = plan
+        changed = False
         for rule in _RULES:
-            rewritten = rule(rewritten)
-        if rewritten == plan:
-            return rewritten
-        plan = rewritten
+            rewritten = rule(plan)
+            if rewritten is not None:
+                plan, changed = rewritten, True
+        if not changed:
+            return plan
 
 
-def merge_adjacent_selects(nodes: Plan) -> Plan:
+def merge_adjacent_selects(nodes: Plan) -> Plan | None:
     """Fold each run of consecutive same-op selects into one node.
 
     Consecutive ``isel``s (or ``sel``s) commute and compose, so
@@ -61,8 +66,11 @@ def merge_adjacent_selects(nodes: Plan) -> Plan:
     A mixed ``isel``/``sel`` run is left alone (different indexing semantics), and a
     select carrying *option* kwargs (``drop``/``method``/...) is treated as a barrier
     — it isn't folded, since a single merged indexer couldn't carry those faithfully.
+
+    Returns ``None`` when no run was folded (nothing to change).
     """
     out: Plan = []
+    folded = False
     i, n = 0, len(nodes)
     while i < n:
         node = nodes[i]
@@ -73,6 +81,12 @@ def merge_adjacent_selects(nodes: Plan) -> Plan:
 
         j = i + 1
         indexer = dict(node.indexer)
+        # ``consumes`` is accumulated in step with ``indexer`` and must stay consistent
+        # with it: ``indexer.update`` keeps the last value for a dim while this unions,
+        # so a re-indexed dim could disagree. The two hold today only because xarray
+        # rejects re-indexing a dim a prior scalar select already dropped, upstream of
+        # recording — a non-local invariant. (The sum-type refactor makes ``consumes``
+        # a derived property of ``indexer``, so it can no longer drift.)
         consumes = set(node.consumes)
         while j < n and nodes[j].name == node.name and _mergeable_select(nodes[j]):
             indexer.update(nodes[j].indexer)
@@ -80,6 +94,7 @@ def merge_adjacent_selects(nodes: Plan) -> Plan:
             j += 1
 
         if j - i > 1:  # at least two selects folded
+            folded = True
             out.append(
                 OpNode(
                     name=node.name,
@@ -92,7 +107,7 @@ def merge_adjacent_selects(nodes: Plan) -> Plan:
         else:
             out.append(node)
         i = j
-    return out
+    return out if folded else None
 
 
 def _mergeable_select(node: OpNode) -> bool:
@@ -105,27 +120,31 @@ def _mergeable_select(node: OpNode) -> bool:
     return node.name in _SELECTS and all(k in node.indexer for k in node.kwargs)
 
 
-def pushdown_selects(nodes: Plan) -> Plan:
-    """Hop a select left past a preceding reduce, classifying each adjacency (trichotomy).
+def pushdown_selects(nodes: Plan) -> Plan | None:
+    """Hop a select left past a preceding reduce when their dims permit.
 
-    For an adjacent ``(reduce, select)`` pair the select's dims fall into one of three
-    cases against the reduce's ``consumes``:
+    The rule only *fires* on a `(reduce, select)` adjacency — that structural test is
+    the one thing this shares with pattern matching. What to do once it fires is decided
+    by **set algebra** on the select's dims vs the reduce's ``consumes``, not by any
+    further dispatch:
 
-    - **disjoint** — the select touches no reduced dim, so the swap is valid:
+    - **disjoint dims** — the select touches no reduced dim, so the swap is valid:
       ``ds.mean("lat").isel(time=0)`` → ``ds.isel(time=0).mean("lat")`` (select first, a
       smaller array to reduce). Keying off ``kind`` generalises this to *any* reduce
       (``std``/``max``/...), not just a hard-coded ``mean``/``sum``/``prod`` list (#1).
-    - **shares a consumed dim** — the select indexes a dim the reduce already removed, so
-      the expression can never replay (``mean("lon").isel(lon=0)``, and the all-dims
+    - **intersecting dims** — the select indexes a dim the reduce already removed, so the
+      expression can never replay (``mean("lon").isel(lon=0)``, and the all-dims
       ``mean().isel(time=0)``): raise :class:`InvalidExpressionError` rather than emit a
       silently-wrong reorder (the empty-dim reorder bug).
 
-    Scans are the third leg: a ``cumsum``/``diff`` is ``kind == "scan"``, not ``reduce``,
-    so this rule never fires on it — ``cumsum("time").isel(time=5)`` is left untouched
-    (order matters), neither swapped nor raised.
+    Any other adjacency is simply left. Scans are the salient case: a ``cumsum``/``diff``
+    is ``kind == "scan"``, not ``reduce``, so this rule never fires on it —
+    ``cumsum("time").isel(time=5)`` is left untouched (order matters), neither swapped nor
+    raised.
 
-    One hop per call; :func:`optimize`'s fixpoint composes hops so a select reaches the
-    front of a run of reductions (and adjacent selects then merge).
+    One hop per call, returning the rewritten plan; ``None`` when no adjacency swaps.
+    :func:`optimize`'s fixpoint composes hops so a select reaches the front of a run of
+    reductions (and adjacent selects then merge).
     """
     for i in range(len(nodes) - 1):
         reduce_node, select_node = nodes[i], nodes[i + 1]
@@ -143,7 +162,7 @@ def pushdown_selects(nodes: Plan) -> Plan:
             f"{select_node.name}() indexes {shared}, "
             f"which {reduce_node.name}() has already reduced away"
         )
-    return nodes
+    return None
 
 
 _RULES: tuple[Rule, ...] = (merge_adjacent_selects, pushdown_selects)
