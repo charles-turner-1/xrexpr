@@ -13,7 +13,7 @@ import xarray as xr
 from xarray.testing import assert_equal
 
 import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
-from xrexpr.accessor import LazyDatasetProxy
+from xrexpr.accessor import Explanation, LazyDatasetProxy
 from xrexpr.exceptions import InvalidExpressionError
 
 
@@ -150,6 +150,16 @@ def test_explain_raises_on_invalid_plan(ds):
     # explain optimises too, so an invalid plan raises the same error collect() would
     with pytest.raises(InvalidExpressionError):
         ds.plan.mean(dim="lon").isel(lon=0).explain()
+
+
+def test_explain_repr_is_unescaped_text(ds):
+    # the REPL echoes repr(); it must be the formatted multi-line plan, not the
+    # escaped one-liner ``'plan (2 ops):\n  ...'`` a plain str would produce.
+    text = ds.plan.mean("lat").isel(time=0).explain()
+    assert isinstance(text, Explanation)
+    assert isinstance(text, str)
+    assert repr(text) == str(text)
+    assert "\\n" not in repr(text)
 
 
 def test_compute_is_alias_for_collect(ds):
