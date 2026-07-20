@@ -15,7 +15,8 @@ from typing import NamedTuple
 
 
 class OpSpec(NamedTuple):
-    #: op family; one of ``"reduce"``/``"scan"``/``"select"`` (canonical set: ``ir.KINDS``)
+    #: op family; one of ``"reduce"``/``"scan"``/``"select"``. ``to_opnode`` maps this
+    #: to the matching :data:`~xrexpr.ir.Op` variant (untabulated names → ``Opaque``).
     kind: str
     #: reduce: the given dim is removed. scan/select: dim kept — selects resolve
     #: their actual dim removal from the *indexer* at record time, not from here.

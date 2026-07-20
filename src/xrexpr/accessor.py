@@ -19,7 +19,7 @@ from typing import Any
 
 import xarray as xr
 
-from xrexpr.ir import OpNode
+from xrexpr.ir import Op
 from xrexpr.optimize import optimize
 from xrexpr.schema import SchemaState, apply_schema, to_opnode
 
@@ -50,11 +50,11 @@ class LazyDatasetProxy:
     def __init__(
         self,
         base_ds: xr.Dataset,
-        ops: list[OpNode] | None = None,
+        ops: list[Op] | None = None,
         schema: SchemaState | None = None,
     ):
         self._base_ds = base_ds
-        self._ops: list[OpNode] = list(ops) if ops else []
+        self._ops: list[Op] = list(ops) if ops else []
         # schema is threaded by ``_record``; recompute from the base only for a
         # fresh (empty) proxy such as the one xarray builds for ``ds.plan``.
         self._schema = (
@@ -141,7 +141,7 @@ class LazyDatasetProxy:
         return Explanation(f"plan ({len(plan)} ops):\n{body}")
 
     @staticmethod
-    def _format_node(node: OpNode) -> str:
+    def _format_node(node: Op) -> str:
         """One-line human-readable form of an ``OpNode`` for :meth:`explain`."""
         if node.name == "__getitem__":
             return f"[{node.args[0]!r}]"
@@ -149,7 +149,7 @@ class LazyDatasetProxy:
         parts += [f"{k}={v!r}" for k, v in node.kwargs.items()]
         return f"{node.name}({', '.join(parts)})"
 
-    def _replay(self, nodes: list[OpNode]) -> xr.Dataset | xr.DataArray:
+    def _replay(self, nodes: list[Op]) -> xr.Dataset | xr.DataArray:
         """Walk the optimised ``OpNode`` plan, calling the real xarray methods."""
         ds: xr.Dataset | xr.DataArray = self._base_ds
         for node in nodes:

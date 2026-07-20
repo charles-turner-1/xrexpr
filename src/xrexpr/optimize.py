@@ -21,21 +21,19 @@ consumed dim → :class:`InvalidExpressionError`, scan dim → leave (PR 9, #12)
 """
 
 from collections.abc import Callable
+from typing import TypeGuard
 
 from frozendict import frozendict
 
 from xrexpr.exceptions import InvalidExpressionError
-from xrexpr.ir import OpNode
+from xrexpr.ir import Op, Reduce, Select
 
 __all__ = ["optimize"]
 
-Plan = list[OpNode]
+Plan = list[Op]
 #: A rule maps a plan to a rewritten one, or returns ``None`` when it changes nothing
 #: (letting :func:`optimize` detect the fixpoint without a full-plan equality compare).
 Rule = Callable[[Plan], Plan | None]
-
-#: ``isel``/``sel`` — the two select ops the merge rule folds.
-_SELECTS = ("isel", "sel")
 
 
 def optimize(nodes: Plan) -> Plan:
@@ -81,27 +79,24 @@ def merge_adjacent_selects(nodes: Plan) -> Plan | None:
 
         j = i + 1
         indexer = dict(node.indexer)
-        # ``consumes`` is accumulated in step with ``indexer`` and must stay consistent
-        # with it: ``indexer.update`` keeps the last value for a dim while this unions,
-        # so a re-indexed dim could disagree. The two hold today only because xarray
-        # rejects re-indexing a dim a prior scalar select already dropped, upstream of
-        # recording — a non-local invariant. (The sum-type refactor makes ``consumes``
-        # a derived property of ``indexer``, so it can no longer drift.)
-        consumes = set(node.consumes)
-        while j < n and nodes[j].name == node.name and _mergeable_select(nodes[j]):
-            indexer.update(nodes[j].indexer)
-            consumes |= set(nodes[j].consumes)
+        # ``consumes`` is no longer accumulated here — it is a derived property of the
+        # merged ``indexer`` on :class:`~xrexpr.ir.Select`, so it cannot drift from it
+        # (the desync the flat record risked). ``args`` still mirrors ``indexer`` and is
+        # rebuilt from it below, which stays the merge rule's local responsibility.
+        while j < n:
+            nxt = nodes[j]
+            if nxt.name != node.name or not _mergeable_select(nxt):
+                break
+            indexer.update(nxt.indexer)
             j += 1
 
         if j - i > 1:  # at least two selects folded
             folded = True
             out.append(
-                OpNode(
+                Select(
                     name=node.name,
-                    kind="select",
                     args=(dict(indexer),),
                     indexer=frozendict(indexer),
-                    consumes=frozenset(consumes),
                 )
             )
         else:
@@ -110,14 +105,15 @@ def merge_adjacent_selects(nodes: Plan) -> Plan | None:
     return out if folded else None
 
 
-def _mergeable_select(node: OpNode) -> bool:
+def _mergeable_select(node: Op) -> TypeGuard[Select]:
     """Whether ``node`` is a select fully described by its ``indexer`` (no option kwargs).
 
     A select whose kwargs carry keys beyond the indexed dims (``drop``, ``method``,
     ``missing_dims``, ``tolerance``) can't be folded into a bare indexer dict, so it
-    acts as a merge barrier rather than being silently stripped of those options.
+    acts as a merge barrier rather than being silently stripped of those options. A
+    ``TypeGuard`` so callers narrow ``node`` to :class:`~xrexpr.ir.Select`.
     """
-    return node.name in _SELECTS and all(k in node.indexer for k in node.kwargs)
+    return isinstance(node, Select) and all(k in node.indexer for k in node.kwargs)
 
 
 def pushdown_selects(nodes: Plan) -> Plan | None:
@@ -130,38 +126,40 @@ def pushdown_selects(nodes: Plan) -> Plan | None:
 
     - **disjoint dims** — the select touches no reduced dim, so the swap is valid:
       ``ds.mean("lat").isel(time=0)`` → ``ds.isel(time=0).mean("lat")`` (select first, a
-      smaller array to reduce). Keying off ``kind`` generalises this to *any* reduce
-      (``std``/``max``/...), not just a hard-coded ``mean``/``sum``/``prod`` list (#1).
+      smaller array to reduce). Matching the :class:`~xrexpr.ir.Reduce` variant
+      generalises this to *any* reduce (``std``/``max``/...), not just a hard-coded
+      ``mean``/``sum``/``prod`` list (#1).
     - **intersecting dims** — the select indexes a dim the reduce already removed, so the
       expression can never replay (``mean("lon").isel(lon=0)``, and the all-dims
       ``mean().isel(time=0)``): raise :class:`InvalidExpressionError` rather than emit a
       silently-wrong reorder (the empty-dim reorder bug).
 
     Any other adjacency is simply left. Scans are the salient case: a ``cumsum``/``diff``
-    is ``kind == "scan"``, not ``reduce``, so this rule never fires on it —
-    ``cumsum("time").isel(time=5)`` is left untouched (order matters), neither swapped nor
-    raised.
+    is a :class:`~xrexpr.ir.Scan`, not a :class:`~xrexpr.ir.Reduce`, so the pattern never
+    matches it — ``cumsum("time").isel(time=5)`` is left untouched (order matters),
+    neither swapped nor raised.
 
     One hop per call, returning the rewritten plan; ``None`` when no adjacency swaps.
     :func:`optimize`'s fixpoint composes hops so a select reaches the front of a run of
     reductions (and adjacent selects then merge).
     """
     for i in range(len(nodes) - 1):
-        reduce_node, select_node = nodes[i], nodes[i + 1]
-        if reduce_node.kind != "reduce" or select_node.name not in _SELECTS:
-            continue
+        match nodes[i], nodes[i + 1]:
+            case (
+                Reduce(consumes=consumes) as reduce_node,
+                Select(indexer=indexer) as select_node,
+            ):
+                select_dims = frozenset(indexer)
+                if select_dims.isdisjoint(consumes):
+                    swapped = list(nodes)
+                    swapped[i], swapped[i + 1] = select_node, reduce_node
+                    return swapped
 
-        select_dims = frozenset(select_node.indexer)
-        if select_dims.isdisjoint(reduce_node.consumes):
-            swapped = list(nodes)
-            swapped[i], swapped[i + 1] = select_node, reduce_node
-            return swapped
-
-        shared = sorted(str(d) for d in select_dims & reduce_node.consumes)
-        raise InvalidExpressionError(
-            f"{select_node.name}() indexes {shared}, "
-            f"which {reduce_node.name}() has already reduced away"
-        )
+                shared = sorted(str(d) for d in select_dims & consumes)
+                raise InvalidExpressionError(
+                    f"{select_node.name}() indexes {shared}, "
+                    f"which {reduce_node.name}() has already reduced away"
+                )
     return None
 
 

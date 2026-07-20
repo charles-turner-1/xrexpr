@@ -1,8 +1,9 @@
 """Tests for ``to_opnode`` (PR 5): record-time normalisation of a raw call.
 
-These are golden-``OpNode`` assertions: each recorded call, in every dim spelling,
-must resolve to the same normalised metadata (``kind`` / ``consumes`` / ``indexer``)
-while keeping ``args``/``kwargs`` verbatim for replay. The headline case is that a
+These are golden-node assertions: each recorded call, in every dim spelling, must
+resolve to the same :data:`~xrexpr.ir.Op` variant and normalised metadata
+(``consumes`` / ``indexer``) while keeping ``args``/``kwargs`` verbatim for replay.
+The headline case is that a
 no-dim ``mean()`` consumes *every current dim*, which is what fixes the empty-dim
 reorder bug downstream.
 """
@@ -12,7 +13,7 @@ import pytest
 import xarray as xr
 from frozendict import frozendict
 
-from xrexpr.ir import OpNode
+from xrexpr.ir import Opaque, Reduce, Scan, Select
 from xrexpr.schema import SchemaState, apply_schema, to_opnode
 
 
@@ -27,7 +28,7 @@ def schema() -> SchemaState:
 
 def test_reduce_positional_dim(schema):
     node = to_opnode(schema, "mean", ("lat",), {})
-    assert node.kind == "reduce"
+    assert isinstance(node, Reduce)
     assert node.consumes == frozenset({"lat"})
     assert node.args == ("lat",)
 
@@ -73,7 +74,7 @@ def test_reduce_keeps_non_dim_kwargs_verbatim(schema):
 
 def test_isel_scalar_kwarg_drops_dim(schema):
     node = to_opnode(schema, "isel", (), {"time": 0})
-    assert node.kind == "select"
+    assert isinstance(node, Select)
     assert node.indexer == frozendict({"time": 0})
     assert node.consumes == frozenset({"time"})
 
@@ -119,24 +120,21 @@ def test_sel_option_kwarg_excluded(schema):
     assert node.consumes == frozenset({"lat"})
 
 
-def test_scan_has_kind_only(schema):
+def test_scan_carries_no_resolved_dims(schema):
     node = to_opnode(schema, "cumsum", ("time",), {})
-    assert node.kind == "scan"
-    assert node.consumes == frozenset()
-    assert node.indexer == frozendict()
+    assert isinstance(node, Scan)  # a Scan has no consumes/indexer at all
     assert node.args == ("time",)  # dim kept in args for replay
 
 
 def test_untabulated_op_is_opaque(schema):
     node = to_opnode(schema, "__getitem__", ("temperature",), {})
-    assert node.kind == "opaque"
-    assert node.consumes == frozenset()
+    assert isinstance(node, Opaque)
     assert node.args == ("temperature",)
 
 
 def test_unknown_method_is_opaque(schema):
     node = to_opnode(schema, "where", ("cond",), {})
-    assert node.kind == "opaque"
+    assert isinstance(node, Opaque)
 
 
 def test_to_opnode_then_apply_schema_threads(schema):
@@ -150,5 +148,5 @@ def test_to_opnode_then_apply_schema_threads(schema):
     assert after2.dims == frozendict({"lon": 5})
 
 
-def test_returns_an_opnode(schema):
-    assert isinstance(to_opnode(schema, "mean", ("lat",), {}), OpNode)
+def test_returns_the_matching_variant(schema):
+    assert isinstance(to_opnode(schema, "mean", ("lat",), {}), Reduce)

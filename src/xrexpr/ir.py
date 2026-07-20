@@ -1,52 +1,124 @@
-"""The expression IR: a single flat record type, :class:`OpNode`.
+"""The expression IR: a sum type over the operation *kinds* the optimiser distinguishes.
 
 A Dataset method chain is *linear* (each op has exactly one input — the previous
-dataset), so the IR is a **list** of ``OpNode``, not a tree. Each node carries
-enough normalised metadata for the optimiser to decide whether two ops commute,
-without re-inspecting raw call ``args``/``kwargs``.
+dataset), so the IR is a **list** of :data:`Op`, not a tree. Each variant carries the
+verbatim call header (``name``/``args``/``kwargs``) that replay re-invokes, *plus* the
+normalised metadata the optimiser reasons about — and that metadata differs per kind, so
+the variants have genuinely different shapes rather than one flat record with mostly-empty
+fields. ``match`` over :data:`Op` then binds different fields per arm, and ``assert_never``
+makes the union exhaustive under mypy.
+
+The union tracks structural **kinds**, not xarray methods: ``mean``/``std``/``sum`` are
+all one :class:`Reduce`, told apart by ``name`` (the method table lives in
+``operations.py``). A new *variant* is earned only by genuinely new structural data.
 
 ``to_opnode`` (in ``schema.py``) builds these at record time; the optimiser
 (``optimize.py``) rewrites the list and the ``.plan`` accessor replays it.
+
+Only **unary** ops are modelled here. Binary/n-ary ops (``merge``/``concat``/``where``)
+would add their own variants carrying plan-typed children and promote the container from
+a list to a tree — an additive, orthogonal change deferred until such an op is in scope.
+Keep that linearity assumption named *here*, not leaked into individual rules.
 """
 
 from collections.abc import Hashable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
+import numpy as np
 from frozendict import frozendict
 
-__all__ = ["KINDS", "OpNode", "frozendict"]
+__all__ = ["Op", "Opaque", "Reduce", "Scan", "Select", "frozendict"]
 
-#: The op kinds the optimiser distinguishes (see the report's validity trichotomy).
-KINDS = frozenset({"reduce", "scan", "select", "elementwise", "opaque"})
+
+def _is_scalar_index(value: Any) -> bool:
+    """Whether an indexer drops its dim (a scalar) rather than keeping it.
+
+    A ``slice``/``list``/``tuple``/array keeps the dim (and resizes it); anything
+    else is treated as a scalar that removes it. (A tuple MultiIndex *label* is the
+    known exception — niche, and left for later.)
+    """
+    return not isinstance(value, slice | list | tuple | np.ndarray)
 
 
 @dataclass(frozen=True)
-class OpNode:
-    """One recorded operation in a linear plan.
+class Reduce:
+    """A dimension-destroying reduction (``mean``/``sum``/``std``/...).
 
-    ``args``/``kwargs``/``consumes``/``indexer`` are coerced to immutable
-    containers (``frozendict`` for the mappings) on construction, so a node is
-    fully hashable and safe to share between the recorded plan and its optimised
-    copy — optimiser rules cannot mutate recorded call metadata in place.
+    ``consumes`` — the dims the reduction removes — is *stored*, resolved by
+    ``to_opnode`` from the ``dim`` spec against the record-time schema (a bare
+    ``mean()`` consumes *every* current dim). ``args``/``kwargs`` are coerced to
+    immutable containers so the node is hashable and safe to share between plans.
     """
 
-    name: str  # "mean", "isel", "sel", "cumsum", "__getitem__", ...
-    kind: str  # one of KINDS
+    name: str  # open set of tabulated reductions → str (kind-safety via OP_TABLE)
     args: tuple[Any, ...] = ()
     kwargs: frozendict[str, Any] = field(default_factory=frozendict)
-    # dim names use xarray's ``Hashable`` (usually str); kwargs *names* are str.
-    consumes: frozenset[Hashable] = frozenset()  # dims removed, vs the current schema
-    indexer: frozendict[Hashable, Any] = field(
-        default_factory=frozendict
-    )  # selects: {dim: indexer}
+    consumes: frozenset[Hashable] = frozenset()
 
     def __post_init__(self) -> None:
-        if self.kind not in KINDS:
-            raise ValueError(
-                f"unknown op kind {self.kind!r}; expected one of {sorted(KINDS)}"
-            )
         object.__setattr__(self, "args", tuple(self.args))
         object.__setattr__(self, "kwargs", frozendict(self.kwargs))
         object.__setattr__(self, "consumes", frozenset(self.consumes))
+
+
+@dataclass(frozen=True)
+class Select:
+    """An ``isel``/``sel`` selection, described by its ``{dim: indexer}`` mapping.
+
+    ``consumes`` is a *derived* view of ``indexer`` (the scalar-indexed dims, which
+    drop) — a ``@property``, never a stored field — so a merged select cannot disagree
+    with itself the way a separately-accumulated ``consumes`` could.
+    """
+
+    name: Literal["isel", "sel"]  # closed set → Literal (rejects Select(name="mean"))
+    args: tuple[Any, ...] = ()
+    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    indexer: frozendict[Hashable, Any] = field(default_factory=frozendict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "args", tuple(self.args))
+        object.__setattr__(self, "kwargs", frozendict(self.kwargs))
         object.__setattr__(self, "indexer", frozendict(self.indexer))
+
+    @property
+    def consumes(self) -> frozenset[Hashable]:
+        """Dims this select drops: the scalar-indexed ones (slices/sequences keep theirs)."""
+        return frozenset(d for d, v in self.indexer.items() if _is_scalar_index(v))
+
+
+@dataclass(frozen=True)
+class Scan:
+    """An order-significant scan (``cumsum``/``cumprod``/``diff``) — *keeps* its dim.
+
+    Distinct from a reduce (which destroys its dim) and from an opaque op (a scan is
+    *known* to preserve dims, so a rule must not reorder across it); its scanned-dim
+    metadata arrives with the first scan-aware rule.
+    """
+
+    name: Literal["cumsum", "cumprod", "diff"]  # closed set → Literal
+    args: tuple[Any, ...] = ()
+    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "args", tuple(self.args))
+        object.__setattr__(self, "kwargs", frozendict(self.kwargs))
+
+
+@dataclass(frozen=True)
+class Opaque:
+    """Any op the optimiser doesn't model — replayed verbatim, never reordered."""
+
+    name: str
+    args: tuple[Any, ...] = ()
+    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "args", tuple(self.args))
+        object.__setattr__(self, "kwargs", frozendict(self.kwargs))
+
+
+#: The optimiser's IR node: a sum over the structural op *kinds*. ``match`` over this
+#: binds different fields per arm; ``typing.assert_never`` on the ``case _`` arm makes
+#: the union exhaustive (adding a variant fails type-check at every unhandled site).
+Op = Reduce | Select | Scan | Opaque
