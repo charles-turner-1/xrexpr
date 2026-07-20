@@ -6,11 +6,11 @@ of executing them. Calling :meth:`~LazyDatasetProxy.collect` optimises the
 recorded plan and replays it onto the real dataset (:meth:`~LazyDatasetProxy.explain`
 returns the optimised plan as text without running it).
 
-The recorded plan is a list of :class:`~xrexpr.ir.OpNode`: each call is normalised
+The recorded plan is a list of :data:`~xrexpr.ir.Op` variants: each call is normalised
 by :func:`~xrexpr.schema.to_opnode` against a :class:`SchemaState` threaded from
 ``self._base_ds`` and evolved per op (no materialisation). ``collect`` runs the plan
 through :func:`~xrexpr.optimize.optimize` (a fixpoint of rewrite rules), replays the
-optimised ``OpNode``s onto the base dataset, and materialises the result. See
+optimised ``Op`` nodes onto the base dataset, and materialises the result. See
 ``docs/pr-plan.md``.
 """
 
@@ -110,7 +110,7 @@ class LazyDatasetProxy:
         """Optimise the recorded plan, replay it, and materialise the result.
 
         The Polars-flavoured terminal of the plan: it runs the recorded ops through
-        :func:`~xrexpr.optimize.optimize`, replays the optimised ``OpNode``s onto the
+        :func:`~xrexpr.optimize.optimize`, replays the optimised ``Op`` nodes onto the
         base dataset, and calls xarray's own ``.compute()`` so dask-backed data is
         realised. Returns a ``DataArray`` rather than a ``Dataset`` when the chain
         selects a single variable (e.g. ``ds.plan["temperature"]``).
@@ -142,7 +142,7 @@ class LazyDatasetProxy:
 
     @staticmethod
     def _format_node(node: Op) -> str:
-        """One-line human-readable form of an ``OpNode`` for :meth:`explain`."""
+        """One-line human-readable form of an :data:`~xrexpr.ir.Op` node for :meth:`explain`."""
         if node.name == "__getitem__":
             return f"[{node.args[0]!r}]"
         parts = [repr(a) for a in node.args]
@@ -150,7 +150,7 @@ class LazyDatasetProxy:
         return f"{node.name}({', '.join(parts)})"
 
     def _replay(self, nodes: list[Op]) -> xr.Dataset | xr.DataArray:
-        """Walk the optimised ``OpNode`` plan, calling the real xarray methods."""
+        """Walk the optimised ``Op`` plan, calling the real xarray methods."""
         ds: xr.Dataset | xr.DataArray = self._base_ds
         for node in nodes:
             if node.name == "__getitem__":
