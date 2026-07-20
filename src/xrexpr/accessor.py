@@ -24,6 +24,20 @@ from xrexpr.optimize import optimize
 from xrexpr.schema import SchemaState, apply_schema, to_opnode
 
 
+class Explanation(str):
+    """The text returned by :meth:`LazyDatasetProxy.explain`.
+
+    A plain ``str`` whose ``repr`` is the text itself, so a bare
+    ``ds.plan.xyz.explain()`` at a REPL / in Jupyter prints the formatted,
+    multi-line plan instead of an escaped one-liner (``'plan (2 ops):\\n  ...'``).
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return str(self)
+
+
 @xr.register_dataset_accessor("plan")  # type: ignore[no-untyped-call]
 class LazyDatasetProxy:
     """Record operations on an ``xr.Dataset`` and replay them on ``collect()``.
@@ -110,7 +124,7 @@ class LazyDatasetProxy:
         """Alias for :meth:`collect`, for xarray users who reach for ``.compute()``."""
         return self.collect()
 
-    def explain(self) -> str:
+    def explain(self) -> Explanation:
         """Return the optimised plan as text, without running it (à la Polars ``explain``).
 
         Shows the ops :meth:`collect` would actually replay — i.e. *after* optimisation
@@ -120,11 +134,11 @@ class LazyDatasetProxy:
         """
         plan = optimize(self._ops)
         if not plan:
-            return "plan (0 ops)"
+            return Explanation("plan (0 ops)")
         body = "\n".join(
             f"  {i}. {self._format_node(n)}" for i, n in enumerate(plan, 1)
         )
-        return f"plan ({len(plan)} ops):\n{body}"
+        return Explanation(f"plan ({len(plan)} ops):\n{body}")
 
     @staticmethod
     def _format_node(node: OpNode) -> str:
