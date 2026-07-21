@@ -1,4 +1,4 @@
-"""The plan optimiser: rewrite a linear ``OpNode`` plan to a cheaper equivalent.
+"""The plan optimiser: rewrite a linear :data:`~xrexpr.ir.Op` plan to a cheaper equivalent.
 
 :func:`optimize` runs a set of local rewrite *rules* to a **fixpoint** — each rule
 maps a plan to an equivalent plan, and the loop reapplies the whole set until the
@@ -15,9 +15,9 @@ Rules (in ``_RULES``):
 
 Each is a *local, single-step* rewrite; the fixpoint composes them (a select bubbles
 past a whole run of reductions, and newly-adjacent selects then merge). ``pushdown_selects``
-classifies each adjacency by the report's validity **trichotomy** — disjoint → swap,
-consumed dim → :class:`InvalidExpressionError`, scan dim → leave (PR 9, #12). See
-``docs/pr-plan.md``.
+handles each ``(reduce, select)`` adjacency by set algebra — disjoint dims → swap,
+intersecting dims → :class:`InvalidExpressionError` — and leaves anything else (PR 9, #12).
+See ``docs/pr-plan.md``.
 """
 
 from collections.abc import Callable

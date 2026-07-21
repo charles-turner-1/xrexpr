@@ -4,7 +4,7 @@ Covers recording behaviour and *equality* — ``ds.plan.<chain>.collect()`` matc
 the eager ``ds.<chain>`` for the README pipelines, exercising record → optimise →
 replay end to end. The golden op-list assertions that pin the optimiser itself live
 in ``tests/test_optimize.py`` (it owns ``optimize``); here we only care that the
-accessor records ``OpNode``s, threads the schema, and replays to the right result.
+accessor records ``Op`` nodes, threads the schema, and replays to the right result.
 """
 
 import numpy as np

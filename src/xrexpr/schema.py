@@ -8,8 +8,8 @@ array data**. That is the record-time win the CST path could never have: it lets
 *right now*" rather than blindly against the original dataset.
 
 :class:`SchemaState` is an immutable snapshot; :func:`apply_schema` returns the
-next snapshot after an :class:`~xrexpr.ir.OpNode` is applied; :func:`to_opnode`
-normalises a raw recorded call into that ``OpNode`` against the current schema.
+next snapshot after an :data:`~xrexpr.ir.Op` node is applied; :func:`to_opnode`
+normalises a raw recorded call into that ``Op`` variant against the current schema.
 """
 
 from collections.abc import Hashable, Iterable, Mapping
