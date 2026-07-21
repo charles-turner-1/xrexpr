@@ -9,23 +9,9 @@ a non-scalar select leaves the dim in ``indexer`` only.
 
 import numpy as np
 import pytest
-import xarray as xr
 
 from xrexpr.ir import Reduce, Scan, Select
 from xrexpr.schema import SchemaState, apply_schema
-
-
-@pytest.fixture
-def ds() -> xr.Dataset:
-    rng = np.random.default_rng(0)
-    return xr.Dataset(
-        {"temperature": (("time", "lat", "lon"), rng.random((4, 3, 5)))},
-        coords={
-            "time": np.arange(4),
-            "lat": np.arange(3),
-            "lon": np.arange(5),
-        },
-    )
 
 
 def test_from_dataset_snapshots_dims_and_coords(ds):

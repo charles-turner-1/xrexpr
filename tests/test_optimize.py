@@ -8,23 +8,12 @@ select hops left past any reduce with disjoint dims, and the two rules compose v
 fixpoint (bubble-then-merge). Classifying the non-disjoint conflict is PR 9's job.
 """
 
-import numpy as np
 import pytest
-import xarray as xr
 from frozendict import frozendict
 
 from xrexpr.exceptions import InvalidExpressionError
 from xrexpr.optimize import optimize
-from xrexpr.schema import SchemaState, to_opnode
-
-
-@pytest.fixture
-def schema() -> SchemaState:
-    ds = xr.Dataset(
-        {"temperature": (("time", "lat", "lon"), np.zeros((4, 3, 5)))},
-        coords={"time": np.arange(4), "lat": np.arange(3), "lon": np.arange(5)},
-    )
-    return SchemaState.from_dataset(ds)
+from xrexpr.schema import to_opnode
 
 
 def _node(schema, name, *args, **kwargs):

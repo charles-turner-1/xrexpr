@@ -7,27 +7,12 @@ in ``tests/test_optimize.py`` (it owns ``optimize``); here we only care that the
 accessor records ``Op`` nodes, threads the schema, and replays to the right result.
 """
 
-import numpy as np
 import pytest
-import xarray as xr
 from xarray.testing import assert_equal
 
 import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
 from xrexpr.accessor import Explanation, LazyDatasetProxy
 from xrexpr.exceptions import InvalidExpressionError
-
-
-@pytest.fixture
-def ds() -> xr.Dataset:
-    rng = np.random.default_rng(0)
-    return xr.Dataset(
-        {"temperature": (("time", "lat", "lon"), rng.random((4, 3, 5)))},
-        coords={
-            "time": np.arange(4),
-            "lat": np.arange(3),
-            "lon": np.arange(5),
-        },
-    )
 
 
 def test_plan_accessor_returns_proxy(ds):

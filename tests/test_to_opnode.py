@@ -8,22 +8,10 @@ no-dim ``mean()`` consumes *every current dim*, which is what fixes the empty-di
 reorder bug downstream.
 """
 
-import numpy as np
-import pytest
-import xarray as xr
 from frozendict import frozendict
 
 from xrexpr.ir import Opaque, Reduce, Scan, Select
-from xrexpr.schema import SchemaState, apply_schema, to_opnode
-
-
-@pytest.fixture
-def schema() -> SchemaState:
-    ds = xr.Dataset(
-        {"temperature": (("time", "lat", "lon"), np.zeros((4, 3, 5)))},
-        coords={"time": np.arange(4), "lat": np.arange(3), "lon": np.arange(5)},
-    )
-    return SchemaState.from_dataset(ds)
+from xrexpr.schema import apply_schema, to_opnode
 
 
 def test_reduce_positional_dim(schema):
