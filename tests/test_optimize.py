@@ -189,3 +189,102 @@ def test_optimize_is_idempotent(schema):
     ]
     once = optimize(plan)
     assert optimize(once) == once
+
+
+# --- same-dim composition (#33) ------------------------------------------------
+#
+# The regression these guard: a run of selects used to merge by ``dict.update``, so a
+# second indexer on an already-indexed dim *replaced* the first instead of composing
+# with it. The later indexer addresses positions within the earlier one's result, so
+# ``isel(time=slice(100, 1000)).isel(time=slice(10, 20))`` is ``slice(110, 120)``, not
+# ``slice(10, 20)``. Cases with no provable composition must end the run (two nodes)
+# rather than fold to a wrong one.
+
+
+@pytest.mark.parametrize(
+    "outer, inner, expected",
+    [
+        (slice(100, 1000), slice(10, 20), slice(110, 120, 1)),
+        (slice(100, None), slice(10, 20), slice(110, 120, 1)),
+        (slice(None, 50), slice(10, None), slice(10, 50, 1)),
+        (slice(None), slice(2, 5), slice(2, 5, 1)),
+        (slice(10, 100, 2), slice(1, 4), slice(12, 18, 2)),  # every 2nd, then 3 of them
+        (slice(10, 100), slice(0, 5, 3), slice(10, 15, 3)),
+        (slice(100, 1000), 5, 105),  # slice then scalar -> scalar (dim drops)
+        (slice(10, 20), slice(50, 60), slice(60, 20, 1)),  # past the end -> empty
+        ([10, 20, 30], 1, 20),  # concrete positions: just index them
+        ([10, 20, 30], slice(1, 3), [20, 30]),
+        ([10, 20, 30], [2, 0], [30, 10]),
+        ([10, 20, 30], -1, 30),  # negatives are exact against a known sequence
+    ],
+)
+def test_same_dim_selects_compose(schema, outer, inner, expected):
+    plan = [_node(schema, "isel", time=outer), _node(schema, "isel", time=inner)]
+    out = optimize(plan)
+    assert len(out) == 1
+    assert out[0].indexer == frozendict({"time": expected})
+
+
+@pytest.mark.parametrize(
+    "outer, inner",
+    [
+        (slice(0, 10), slice(-3, None)),  # negative bound needs the dim length
+        (slice(0, 10), slice(None, None, -1)),  # reversal needs the dim length
+        (slice(-5, None), slice(0, 2)),
+        (slice(0, 10), -1),  # negative scalar into a bounded slice
+        (slice(0, 10), 20),  # out of the outer slice's range: xarray should raise
+        (0, 0),  # scalar outer already dropped the dim
+        ([10, 20, 30], 7),  # out of range against a known sequence
+    ],
+)
+def test_uncomposable_same_dim_selects_are_left_separate(schema, outer, inner):
+    plan = [_node(schema, "isel", time=outer), _node(schema, "isel", time=inner)]
+    out = optimize(plan)
+    assert [n.indexer for n in out] == [
+        frozendict({"time": outer}),
+        frozendict({"time": inner}),
+    ]
+
+
+def test_same_dim_sel_is_never_composed(schema):
+    # label indexers would need coordinate values to compose; positions are all we have
+    plan = [
+        _node(schema, "sel", time=slice(0, 10)),
+        _node(schema, "sel", time=slice(2, 4)),
+    ]
+    assert len(optimize(plan)) == 2
+
+
+def test_uncomposable_dim_abandons_the_whole_merge(schema):
+    # lat *could* merge, but time can't -> neither does, or the plan would be neither select
+    plan = [
+        _node(schema, "isel", time=0, lat=slice(0, 3)),
+        _node(schema, "isel", time=0, lat=1),
+    ]
+    out = optimize(plan)
+    assert len(out) == 2
+    assert out[0].indexer == frozendict({"time": 0, "lat": slice(0, 3)})
+
+
+def test_composed_run_of_three_on_one_dim(schema):
+    plan = [
+        _node(schema, "isel", time=slice(100, 1000)),
+        _node(schema, "isel", time=slice(10, 20)),
+        _node(schema, "isel", time=2),
+    ]
+    out = optimize(plan)
+    assert len(out) == 1
+    assert out[0].indexer == frozendict({"time": 112})
+    assert out[0].consumes == frozenset({"time"})
+
+
+def test_composition_survives_pushdown_past_a_reduce(schema):
+    # the trailing isel hops past mean, then composes with the leading one on time
+    plan = [
+        _node(schema, "isel", time=slice(1, 4)),
+        _node(schema, "mean", "lat"),
+        _node(schema, "isel", time=1),
+    ]
+    out = optimize(plan)
+    assert [n.name for n in out] == ["isel", "mean"]
+    assert out[0].indexer == frozendict({"time": 2})
