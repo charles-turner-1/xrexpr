@@ -25,6 +25,7 @@ classifiers = [
 license = {text = "Apache Software License 2.0"}
 dependencies = [
    "frozendict",
+   "typing_extensions",  # assert_never on the 3.10 floor (typing.assert_never is 3.11+)
    "xarray"
 ]
 
@@ -148,6 +149,7 @@ platforms = ["osx-arm64", "linux-64", "win-64"]
 python = ">=3.10"
 xarray = "*"
 frozendict = "*"
+typing_extensions = "*"
 versioneer = ">=0.29,<0.30"
 
 [tool.pixi.pypi-dependencies]

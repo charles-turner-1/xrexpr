@@ -57,17 +57,17 @@ def test_getitem_records_and_computes(ds):
     assert_equal(ds.plan["temperature"].collect(), ds["temperature"])
 
 
-# --- PR 6: recording now builds OpNodes and threads the schema ------------------
+# --- PR 6: recording now builds Op variants and threads the schema --------------
 
 
-def test_record_builds_opnodes(ds):
-    from xrexpr.ir import OpNode
+def test_record_builds_op_variants(ds):
+    from xrexpr.ir import Op, Reduce, Select
 
     ops = ds.plan.mean("lat").isel(time=0)._ops
-    assert all(isinstance(n, OpNode) for n in ops)
+    assert all(isinstance(n, Op) for n in ops)
     mean_node, isel_node = ops
-    assert mean_node.kind == "reduce" and mean_node.consumes == frozenset({"lat"})
-    assert isel_node.kind == "select" and isel_node.consumes == frozenset({"time"})
+    assert isinstance(mean_node, Reduce) and mean_node.consumes == frozenset({"lat"})
+    assert isinstance(isel_node, Select) and isel_node.consumes == frozenset({"time"})
 
 
 def test_schema_threads_as_ops_are_recorded(ds):
@@ -78,8 +78,10 @@ def test_schema_threads_as_ops_are_recorded(ds):
 
 
 def test_getitem_records_opaque_node(ds):
+    from xrexpr.ir import Opaque
+
     node = ds.plan["temperature"]._ops[0]
-    assert node.name == "__getitem__" and node.kind == "opaque"
+    assert node.name == "__getitem__" and isinstance(node, Opaque)
 
 
 def test_readme_pipeline_positional_equal(ds):

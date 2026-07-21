@@ -14,13 +14,14 @@ normalises a raw recorded call into that ``OpNode`` against the current schema.
 
 from collections.abc import Hashable, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal, cast
 
 import numpy as np
 import xarray as xr
 from frozendict import frozendict
+from typing_extensions import assert_never
 
-from xrexpr.ir import OpNode
+from xrexpr.ir import Op, Opaque, Reduce, Scan, Select
 from xrexpr.operations import spec as op_spec
 
 __all__ = ["SchemaState", "apply_schema", "to_opnode"]
@@ -53,28 +54,38 @@ class SchemaState:
         return frozenset(self.dims)
 
 
-def apply_schema(schema: SchemaState, node: OpNode) -> SchemaState:
+def apply_schema(schema: SchemaState, node: Op) -> SchemaState:
     """Return the schema resulting from applying ``node`` to ``schema``.
 
-    - dims in ``node.consumes`` are removed (reductions, and scalar selects that
-      drop their dim);
-    - a select that *keeps* a dim (a slice/sequence indexer) resizes it;
-    - a coordinate sharing a name with a removed dim disappears.
+    Each variant affects the schema differently, so this dispatches with ``match``:
 
-    Ops touching neither ``consumes`` nor ``indexer`` (scans, elementwise) leave
-    the schema unchanged — ``apply_schema`` is driven entirely by node metadata,
-    never by re-inspecting raw call args.
+    - :class:`~xrexpr.ir.Reduce` removes its ``consumes`` dims;
+    - :class:`~xrexpr.ir.Select` removes the dims it drops (scalar indices) and
+      *resizes* the dims it keeps (slice/sequence indices);
+    - :class:`~xrexpr.ir.Scan`/:class:`~xrexpr.ir.Opaque` leave dims untouched;
+    - a coordinate sharing a name with a removed dim disappears (all cases).
+
+    ``assert_never`` on the final arm makes the union exhaustive: a new variant fails
+    type-check here until handled.
     """
     dims = dict(schema.dims)
 
-    for dim in node.consumes:
-        dims.pop(dim, None)
-
-    # A non-scalar select keeps its dim but changes its size (scalar selects are
-    # already gone via ``consumes``).
-    for dim, indexer in node.indexer.items():
-        if dim not in node.consumes and dim in dims:
-            dims[dim] = _indexer_size(indexer, dims[dim])
+    match node:
+        case Reduce(consumes=consumes):
+            for dim in consumes:
+                dims.pop(dim, None)
+        case Select(indexer=indexer) as select:
+            for dim in select.consumes:
+                dims.pop(dim, None)
+            # A non-scalar select keeps its dim but changes its size (scalar selects
+            # are already gone via ``consumes``).
+            for dim, index in indexer.items():
+                if dim not in select.consumes and dim in dims:
+                    dims[dim] = _indexer_size(index, dims[dim])
+        case Scan() | Opaque():
+            pass
+        case _:
+            assert_never(node)
 
     removed = frozenset(schema.dims) - frozenset(dims)
     coords = frozenset(c for c in schema.coords if c not in removed)
@@ -115,8 +126,8 @@ def to_opnode(
     name: str,
     args: tuple[Any, ...],
     kwargs: Mapping[str, Any],
-) -> OpNode:
-    """Normalise one recorded call into a resolved :class:`~xrexpr.ir.OpNode`.
+) -> Op:
+    """Normalise one recorded call into a resolved :data:`~xrexpr.ir.Op` variant.
 
     Resolution is against the *current* ``schema`` (not the original dataset) — the
     record-time win the proxy unlocks:
@@ -128,35 +139,39 @@ def to_opnode(
     - **select** (``isel``/``sel``): the indexer (a positional dict and/or kwargs,
       minus option kwargs like ``drop``) becomes ``indexer``; a dim given a *scalar*
       index is dropped and so also lands in ``consumes`` (a slice/list/array keeps it).
-    - **scan** / untabulated ops: ``kind`` only; no dims resolved.
+    - **scan** / untabulated ops: no dims resolved (name/args/kwargs only).
 
     ``args``/``kwargs`` are kept verbatim for faithful replay; ``consumes``/``indexer``
-    are the derived metadata the optimiser reasons about.
+    are the derived metadata the optimiser reasons about. The ``OP_TABLE`` kind selects
+    the variant; a ``Select``/``Scan`` name is ``cast`` to its ``Literal`` because the
+    table guarantees it is one of the closed set (the ``Literal`` still guards
+    hand-written construction elsewhere).
     """
     op = op_spec(name)
     kind = op.kind if op is not None else "opaque"
     kw = frozendict(kwargs)
 
     if kind == "reduce":
-        return OpNode(
+        return Reduce(
             name=name,
-            kind=kind,
             args=args,
             kwargs=kw,
             consumes=_reduce_dims(schema, args, kwargs),
         )
     if kind == "select":
-        indexer = _select_indexer(args, kwargs)
-        consumes = frozenset(d for d, v in indexer.items() if _is_scalar_index(v))
-        return OpNode(
-            name=name,
-            kind=kind,
+        return Select(
+            name=cast(Literal["isel", "sel"], name),
             args=args,
             kwargs=kw,
-            consumes=consumes,
-            indexer=indexer,
+            indexer=_select_indexer(args, kwargs),
         )
-    return OpNode(name=name, kind=kind, args=args, kwargs=kw)
+    if kind == "scan":
+        return Scan(
+            name=cast(Literal["cumsum", "cumprod", "diff"], name),
+            args=args,
+            kwargs=kw,
+        )
+    return Opaque(name=name, args=args, kwargs=kw)
 
 
 def _reduce_dims(
@@ -192,13 +207,3 @@ def _select_indexer(
         if key not in _SELECT_OPTION_KWARGS:
             indexer[key] = value
     return frozendict(indexer)
-
-
-def _is_scalar_index(value: Any) -> bool:
-    """Whether an indexer drops its dim (a scalar) rather than keeping it.
-
-    A ``slice``/``list``/``tuple``/array keeps the dim (and resizes it); anything
-    else is treated as a scalar that removes it. (A tuple MultiIndex *label* is the
-    known exception — niche, and left for later.)
-    """
-    return not isinstance(value, slice | list | tuple | np.ndarray)

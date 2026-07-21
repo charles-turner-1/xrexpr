@@ -5052,6 +5052,7 @@ packages:
   name: xrexpr
   requires_dist:
   - frozendict
+  - typing-extensions
   - xarray
   - black ; extra == 'dev'
   - coverage ; extra == 'dev'
