@@ -4,14 +4,15 @@
 ``apply_schema`` using only :data:`~xrexpr.ir.Op` metadata — no array data is touched.
 The nodes here are built by hand, which also documents the contract ``apply_schema``
 relies on: a scalar select drops its dim (``Select.consumes``, derived from ``indexer``);
-a non-scalar select leaves the dim in ``indexer`` only.
+a non-scalar select leaves the dim in ``indexer`` only. ``data_vars`` (variable name
+-> its dims) is tracked alongside, since that is what a projection rewrite consults.
 """
 
 import numpy as np
 import pytest
 import xarray as xr
 
-from xrexpr.ir import Reduce, Scan, Select
+from xrexpr.ir import Project, Reduce, Scan, Select
 from xrexpr.schema import SchemaState, apply_schema
 
 
@@ -19,7 +20,10 @@ from xrexpr.schema import SchemaState, apply_schema
 def ds() -> xr.Dataset:
     rng = np.random.default_rng(0)
     return xr.Dataset(
-        {"temperature": (("time", "lat", "lon"), rng.random((4, 3, 5)))},
+        {
+            "temperature": (("time", "lat", "lon"), rng.random((4, 3, 5))),
+            "elevation": (("lat", "lon"), rng.random((3, 5))),
+        },
         coords={
             "time": np.arange(4),
             "lat": np.arange(3),
@@ -132,6 +136,63 @@ def test_schema_threads_through_a_chain(ds):
     schema = apply_schema(schema, Select(name="isel", indexer={"time": 0}))
     assert schema.dims == {"lon": 5}
     assert schema.coords == {"lon"}
+
+
+def test_from_dataset_snapshots_variable_dims(ds):
+    schema = SchemaState.from_dataset(ds)
+    assert schema.data_vars == {
+        "temperature": ("time", "lat", "lon"),
+        "elevation": ("lat", "lon"),
+    }
+
+
+def test_from_dataarray_has_no_data_vars(ds):
+    assert SchemaState.from_dataset(ds["temperature"]).data_vars == {}
+
+
+def test_reduce_strips_the_dim_from_every_variable(ds):
+    schema = SchemaState.from_dataset(ds)
+    after = apply_schema(schema, Reduce(name="mean", consumes=["lat"]))
+    assert after.data_vars == {"temperature": ("time", "lon"), "elevation": ("lon",)}
+
+
+def test_scalar_select_strips_the_dim_from_every_variable(ds):
+    schema = SchemaState.from_dataset(ds)
+    after = apply_schema(schema, Select(name="isel", indexer={"time": 0}))
+    assert after.data_vars == {
+        "temperature": ("lat", "lon"),
+        "elevation": ("lat", "lon"),
+    }
+
+
+def test_project_restricts_variables_but_not_dims_or_coords(ds):
+    # xarray's ``ds[[...]]`` keeps coords and indexes; only the variables narrow
+    schema = SchemaState.from_dataset(ds)
+    after = apply_schema(schema, Project(name="__getitem__", variables=("elevation",)))
+    assert after.data_vars == {"elevation": ("lat", "lon")}
+    assert after.dims == schema.dims
+    assert after.coords == schema.coords
+
+
+def test_project_of_an_unknown_name_yields_nothing_known(ds):
+    schema = SchemaState.from_dataset(ds)
+    after = apply_schema(schema, Project(name="__getitem__", variables=("nope",)))
+    assert after.data_vars == {}
+
+
+def test_var_dims_unions_known_names(ds):
+    schema = SchemaState.from_dataset(ds)
+    assert schema.var_dims(["elevation"]) == {"lat", "lon"}
+    assert schema.var_dims(["temperature", "elevation"]) == {"time", "lat", "lon"}
+    assert schema.var_dims([]) == frozenset()
+
+
+def test_var_dims_is_none_for_an_unknown_name(ds):
+    # "don't know" -- a coord, or a variable an unmodelled op introduced. Callers must
+    # read this as "no rewrite", not as "no dims".
+    schema = SchemaState.from_dataset(ds)
+    assert schema.var_dims(["lat"]) is None  # a coord, not a data variable
+    assert schema.var_dims(["temperature", "nope"]) is None
 
 
 def test_non_dimension_coord_survives_unrelated_removal():

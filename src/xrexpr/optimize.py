@@ -12,36 +12,57 @@ Rules (in ``_RULES``):
   ``sel``/``sel``) into a single indexer (PR 7).
 - :func:`pushdown_selects` — hop a select left past a preceding reduce when their dims
   are disjoint, so the reduction scans a smaller array (PR 8, #11).
+- :func:`pushdown_projections` — hop a variable projection left past a preceding reduce
+  or select, so only the needed variables flow through the plan (#32).
 
 Each is a *local, single-step* rewrite; the fixpoint composes them (a select bubbles
 past a whole run of reductions, and newly-adjacent selects then merge). ``pushdown_selects``
 handles each ``(reduce, select)`` adjacency by set algebra — disjoint dims → swap,
 intersecting dims → :class:`InvalidExpressionError` — and leaves anything else (PR 9, #12).
 See ``docs/pr-plan.md``.
+
+**The schema, and how far it can be trusted.** Dim-level rules read everything they need
+off the nodes themselves, but a *variable*-level rule can't: whether a projection may cross
+an op depends on which dims the projected variables carry at that point in the plan. So
+:func:`optimize` takes the **base** schema and :func:`_schemas` folds it forward to give
+the schema each node sees. :func:`~xrexpr.schema.apply_schema` models
+:class:`~xrexpr.ir.Opaque` as variable-preserving, which is not true of ``rename`` or
+``drop_vars``, so those folded schemas are exact only up to the first opaque node —
+:func:`_trusted_prefix` marks that boundary and rules that consult ``data_vars`` stay
+inside it.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from typing import TypeGuard
 
 from frozendict import frozendict
 
 from xrexpr.exceptions import InvalidExpressionError
-from xrexpr.ir import Op, Reduce, Select
+from xrexpr.ir import Op, Opaque, Project, Reduce, Select
+from xrexpr.schema import SchemaState, apply_schema
 
 __all__ = ["optimize"]
 
 Plan = list[Op]
-#: A rule maps a plan to a rewritten one, or returns ``None`` when it changes nothing
-#: (letting :func:`optimize` detect the fixpoint without a full-plan equality compare).
-Rule = Callable[[Plan], Plan | None]
+#: A rule maps a plan (and the schema its first node sees) to a rewritten plan, or
+#: returns ``None`` when it changes nothing (letting :func:`optimize` detect the fixpoint
+#: without a full-plan equality compare). Dim-level rules ignore the schema argument.
+Rule = Callable[[Plan, SchemaState], Plan | None]
 
 
-def optimize(nodes: Plan) -> Plan:
+def optimize(nodes: Plan, schema: SchemaState) -> Plan:
     """Rewrite ``nodes`` into an equivalent plan, applying every rule to a fixpoint.
+
+    ``schema`` is the schema of the dataset the plan starts from — the *base*, not the
+    one left at the end of recording — since rules need to know the shape each node
+    sees, and rewriting changes that.
 
     Each rule preserves the plan's result, so the returned plan replays to the same
     dataset as ``nodes`` — only cheaper. Termination relies on every rule being
-    non-growing (each either shrinks the plan or leaves it unchanged). A rule returns
+    non-growing *and* directional: a rule either shrinks the plan or moves a node
+    strictly left, and no rule moves a node right, so the plan cannot cycle. (The two
+    pushdown rules fire on disjoint adjacencies — ``(reduce, select)`` vs
+    ``(reduce | select, project)`` — so they can't undo each other.) A rule returns
     ``None`` when it changes nothing, so the loop detects the fixpoint from that signal
     rather than by comparing whole plans each pass.
     """
@@ -49,14 +70,37 @@ def optimize(nodes: Plan) -> Plan:
     while True:
         changed = False
         for rule in _RULES:
-            rewritten = rule(plan)
+            rewritten = rule(plan, schema)
             if rewritten is not None:
                 plan, changed = rewritten, True
         if not changed:
             return plan
 
 
-def merge_adjacent_selects(nodes: Plan) -> Plan | None:
+def _schemas(nodes: Plan, base: SchemaState) -> list[SchemaState]:
+    """The schema each node *sees*: ``out[i]`` is the schema entering ``nodes[i]``."""
+    if not nodes:
+        return []
+    out = [base]
+    for node in nodes[:-1]:
+        out.append(apply_schema(out[-1], node))
+    return out
+
+
+def _trusted_prefix(nodes: Plan) -> int:
+    """How far the folded schema is exact: the index of the first unmodelled op.
+
+    :class:`~xrexpr.ir.Opaque` covers anything the IR doesn't model, including ops that
+    rename, add or drop variables — so past the first one, ``data_vars`` is a guess. A
+    rule reasoning about variables must confine itself to ``nodes[:_trusted_prefix(nodes)]``.
+    """
+    for i, node in enumerate(nodes):
+        if isinstance(node, Opaque):
+            return i
+    return len(nodes)
+
+
+def merge_adjacent_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
     """Fold each run of consecutive same-op selects into one node.
 
     Consecutive ``isel``s (or ``sel``s) commute and compose, so
@@ -116,7 +160,7 @@ def _mergeable_select(node: Op) -> TypeGuard[Select]:
     return isinstance(node, Select) and all(k in node.indexer for k in node.kwargs)
 
 
-def pushdown_selects(nodes: Plan) -> Plan | None:
+def pushdown_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
     """Hop a select left past a preceding reduce when their dims permit.
 
     The rule only *fires* on a `(reduce, select)` adjacency — that structural test is
@@ -163,4 +207,70 @@ def pushdown_selects(nodes: Plan) -> Plan | None:
     return None
 
 
-_RULES: tuple[Rule, ...] = (merge_adjacent_selects, pushdown_selects)
+def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
+    """Hop a variable projection left past a preceding reduce or select.
+
+    ``ds.mean("time")[["tas"]]`` reduces every variable in the dataset and then throws
+    all but ``tas`` away; ``ds[["tas"]].mean("time")`` reduces one. The rule fires on a
+    ``(reduce | select, project)`` adjacency and swaps it when the projection can safely
+    go first — which turns on a single question the nodes alone can't answer: **do the
+    projected variables still carry the dims the crossed op names?** ``mean("time")`` on
+    a dataset whose only variable has no ``time`` dim raises, so with
+    ``tas(time, lat)`` and ``elevation(lat)``:
+
+    - ``ds.mean("time")[["tas"]]`` → swap (``tas`` has ``time``);
+    - ``ds.mean("time")[["elevation"]]`` → **left alone**. Unlike
+      :func:`pushdown_selects` this rule never raises: that plan is perfectly valid
+      eagerly, it simply can't be reordered.
+
+    The dims come from ``data_vars`` in the schema entering the crossed op (:func:`_schemas`),
+    i.e. the variables' dims *before* it — the post-op dims would report ``tas`` as lacking
+    ``time`` and block the very case this rule exists for. Two conservative edges:
+    a name that isn't a known data variable (a coordinate, or something an unmodelled op
+    introduced) blocks the hop, as does a dim carried only by a coordinate rather than by
+    a projected variable.
+
+    Reductions and selections act per variable, so a swap leaves the surviving variables'
+    values untouched. A bare ``mean()`` needs no special case: its ``consumes`` is every
+    current dim, so the subset test only passes when the projected variables span all of
+    them — exactly when the verbatim replayed ``mean()`` reduces the same dims.
+
+    One hop per call, returning the rewritten plan; ``None`` when nothing moves.
+    :func:`optimize`'s fixpoint composes hops so a projection walks to the front of the
+    plan (where #43 will eventually turn it into a backend read plan).
+    """
+    if not any(isinstance(node, Project) for node in nodes):
+        return None  # nothing to move: don't fold the schema for a projection-free plan
+
+    limit = _trusted_prefix(nodes)
+    schemas = _schemas(nodes[:limit], schema)
+    for i in range(limit - 1):
+        project = nodes[i + 1]
+        if not isinstance(project, Project):
+            continue
+
+        crossed = nodes[i]
+        needed: frozenset[Hashable]
+        match crossed:
+            case Reduce(consumes=consumes):
+                needed = consumes
+            case Select(indexer=indexer):
+                needed = frozenset(indexer)
+            case _:
+                continue
+
+        available = schemas[i].var_dims(project.variables)
+        if available is None or not needed <= available:
+            continue
+
+        swapped = list(nodes)
+        swapped[i], swapped[i + 1] = project, crossed
+        return swapped
+    return None
+
+
+_RULES: tuple[Rule, ...] = (
+    merge_adjacent_selects,
+    pushdown_selects,
+    pushdown_projections,
+)
