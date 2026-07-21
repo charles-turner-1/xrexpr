@@ -12,6 +12,8 @@ Rules (in ``_RULES``):
   ``sel``/``sel``) into a single indexer (PR 7).
 - :func:`pushdown_selects` — hop a select left past a preceding reduce when their dims
   are disjoint, so the reduction scans a smaller array (PR 8, #11).
+- :func:`pushdown_selects_past_rechunks` — hop a select left past a preceding ``chunk``
+  so the rechunk moves less data (#57).
 
 Each is a *local, single-step* rewrite; the fixpoint composes them (a select bubbles
 past a whole run of reductions, and newly-adjacent selects then merge). ``pushdown_selects``
@@ -26,7 +28,7 @@ from typing import TypeGuard
 from frozendict import frozendict
 
 from xrexpr.exceptions import InvalidExpressionError
-from xrexpr.ir import Op, Reduce, Select
+from xrexpr.ir import Op, Rechunk, Reduce, Select
 
 __all__ = ["optimize"]
 
@@ -40,10 +42,15 @@ def optimize(nodes: Plan) -> Plan:
     """Rewrite ``nodes`` into an equivalent plan, applying every rule to a fixpoint.
 
     Each rule preserves the plan's result, so the returned plan replays to the same
-    dataset as ``nodes`` — only cheaper. Termination relies on every rule being
-    non-growing (each either shrinks the plan or leaves it unchanged). A rule returns
-    ``None`` when it changes nothing, so the loop detects the fixpoint from that signal
-    rather than by comparing whole plans each pass.
+    dataset as ``nodes`` — only cheaper. A rule returns ``None`` when it changes nothing,
+    so the loop detects the fixpoint from that signal rather than by comparing whole
+    plans each pass.
+
+    **Termination.** Every rule strictly decreases the lexicographic measure
+    ``(len(plan), sum of the indices of the Select nodes)``. Merging and dropping a
+    spent rechunk shrink the plan; the pushdown rules leave the length alone but move a
+    select strictly left. Neither component can grow, so no rule may ever push a select
+    *right* or lengthen a plan — the invariant a new rule has to preserve.
     """
     plan = list(nodes)
     while True:
@@ -163,4 +170,83 @@ def pushdown_selects(nodes: Plan) -> Plan | None:
     return None
 
 
-_RULES: tuple[Rule, ...] = (merge_adjacent_selects, pushdown_selects)
+def pushdown_selects_past_rechunks(nodes: Plan) -> Plan | None:
+    """Hop a select left past a preceding ``chunk`` so the rechunk moves less data.
+
+    A rechunk changes no dim, no size and no value — only chunk topology — so a select
+    and a rechunk *always* commute as far as results go. What the rule protects is the
+    chunking itself: selecting first can only leave dask with less data to shuffle, and
+    the topology it lands on is no coarser than the eager order's. ``chunk({time: 100})``
+    then ``isel(time=slice(50, 250))`` yields ragged ``(50, 100, 50)`` blocks; pushed, it
+    yields fresh regular ``(100, 100)`` ones.
+
+    The rewrite is not a plain swap, because a dim the select *drops* must also leave the
+    chunk spec — xarray raises ``ValueError: chunks keys ('time',) not found in data
+    dimensions`` otherwise. So, against the select's ``consumes``:
+
+    - **no named dim dropped** — swap as-is (this covers the uniform forms, ``chunk()`` /
+      ``chunk(100)`` / ``chunk("auto")``, which name no dim at all; ``"auto"`` simply
+      re-picks block sizes against whatever survives, which is the point of asking for it).
+    - **some named dims dropped** — swap, rebuilding the rechunk from the surviving keys.
+    - **every named dim dropped** — swap and *drop the rechunk*. What is left would be
+      ``chunk({})``: a single-chunk dask array, so no parallelism and no out-of-core
+      benefit — it would preserve dask-ness and nothing of value. (Note this is not the
+      disk-chunk-aware ``open_dataset(chunks={})``; the *method* has no such knowledge.)
+      A rechunk that named no dim to begin with is kept, since there the conversion is
+      the stated purpose rather than a leftover.
+
+    Unlike :func:`pushdown_selects` this never raises: a rechunk cannot make a select
+    unreplayable, only slower. One hop per call; ``None`` when nothing moved.
+    """
+    for i in range(len(nodes) - 1):
+        match nodes[i], nodes[i + 1]:
+            case (Rechunk() as rechunk, Select() as select) if _pushable_rechunk(
+                rechunk
+            ):
+                kept = {
+                    dim: spec
+                    for dim, spec in rechunk.chunks.items()
+                    if dim not in select.consumes
+                }
+                if len(kept) == len(rechunk.chunks):  # nothing named was dropped
+                    moved: Plan = [select, rechunk]
+                elif kept:
+                    moved = [
+                        select,
+                        Rechunk(
+                            name=rechunk.name,
+                            args=(dict(kept),),
+                            chunks=frozendict(kept),
+                        ),
+                    ]
+                else:  # the spec is spent
+                    moved = [select]
+                return list(nodes[:i]) + moved + list(nodes[i + 2 :])
+    return None
+
+
+def _pushable_rechunk(node: Rechunk) -> bool:
+    """Whether a select may cross ``node``, or it acts as a barrier.
+
+    Two forms are barriers:
+
+    - an **explicit block sequence** (``chunk({"time": (100, 400, 500)})``, or a
+      positional sequence), whose blocks must sum to the dim's length. A slice select
+      moving in front would shrink the dim and leave a spec that cannot replay at all —
+      and someone writing explicit block sizes is already reasoning about chunking, so
+      nothing crosses such a call, scalar selects included.
+    - **option kwargs** (``token``, ``chunked_array_type``, ...), which a rebuilt spec
+      couldn't carry faithfully — the same reason :func:`_mergeable_select` bails.
+    """
+    if any(key not in node.chunks for key in node.kwargs):
+        return False
+    if node.args and isinstance(node.args[0], list | tuple):
+        return False
+    return not any(isinstance(spec, list | tuple) for spec in node.chunks.values())
+
+
+_RULES: tuple[Rule, ...] = (
+    merge_adjacent_selects,
+    pushdown_selects,
+    pushdown_selects_past_rechunks,
+)

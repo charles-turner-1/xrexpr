@@ -8,7 +8,7 @@ import pytest
 
 from xrexpr.operations import OP_TABLE, OpSpec, spec
 
-_KINDS = {"reduce", "scan", "select"}
+_KINDS = {"reduce", "scan", "select", "rechunk"}
 
 
 @pytest.mark.parametrize(

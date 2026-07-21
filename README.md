@@ -71,7 +71,8 @@ local, result-preserving rules:
 
 - **merge** consecutive `isel`/`sel` selections into a single indexer;
 - **push** a selection left past any reduction (`mean`, `sum`, `std`, ...) whose dims it
-  doesn't touch, so the reduction scans a smaller array.
+  doesn't touch, so the reduction scans a smaller array;
+- **push** a selection left past a `chunk()`, so the rechunk moves less data.
 
 A selection that indexes a dimension a reduction has already removed can never run — for
 example `ds.plan.mean(dim="lon").isel(lon=0)` — so `xrexpr` raises
@@ -89,6 +90,27 @@ except InvalidExpressionError:
 
 Scans (`cumsum`, `cumprod`, `diff`) are order-sensitive, so a selection on the scanned
 dimension is left exactly where you put it.
+
+### Rechunking
+
+A `chunk()` changes no value — only chunk topology — so a selection can always move in
+front of one, leaving less data to shuffle. When the selection drops the only dimension
+the rechunk named, the rechunk has nothing left to do and disappears:
+
+```python
+>>> print(ds.plan.chunk({"time": 100}).isel(time=0).explain())
+plan (1 ops):
+  1. isel(time=0)
+```
+
+Selecting a *range* keeps the rechunk, and lands on better blocks than the eager order
+does: `ds.chunk({"time": 100}).isel(time=slice(50, 250))` cuts across block boundaries
+for ragged `(50, 100, 50)` chunks, where the rewritten plan rechunks the selected data
+into regular `(100, 100)` ones.
+
+One case is left alone: an *explicit block sequence* like `chunk({"time": (100, 400, 500)})`
+pins blocks that must sum to the dimension's length, so nothing crosses it — if you're
+spelling out block sizes, you're already planning your chunking deliberately.
 
 ___
 
