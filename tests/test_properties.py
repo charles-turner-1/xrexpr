@@ -108,11 +108,6 @@ def _build_plan(ds, calls):
     return plan, schema
 
 
-# --------------------------------------------------------------------------- #
-# strategies
-# --------------------------------------------------------------------------- #
-
-
 @st.composite
 def datasets(draw):
     """A tiny dataset with 2-3 dims, monotonic integer coords and readable values."""
@@ -240,11 +235,6 @@ def select_runs(draw):
         current = _apply(current, [call])
         calls.append(call)
     return ds, calls
-
-
-# --------------------------------------------------------------------------- #
-# properties
-# --------------------------------------------------------------------------- #
 
 
 @SETTINGS
