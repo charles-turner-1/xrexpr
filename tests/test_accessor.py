@@ -173,8 +173,6 @@ def test_explain_repr_is_unescaped_text(ds):
     assert "\\n" not in repr(text)
 
 
-# --- #57: selections push in front of rechunks ----------------------------------
-
 
 @pytest.fixture
 def chunky_ds() -> xr.Dataset:
