@@ -1,15 +1,22 @@
 """Tests for the indexer *value* sum type (:mod:`xrexpr.indexers`).
 
-:func:`classify` is the sole constructor from raw ``isel``/``sel`` values, so the taxonomy
-is pinned here: each raw shape lands in exactly one variant, ``drops_dim`` matches the old
-scalar/keeps-dim split, ``size`` matches the old ``_indexer_size`` branches, and ``to_raw``
-round-trips back to a value replay can hand to xarray.
+:func:`classify` is the sole constructor from raw ``isel``/``sel`` values, so the taxonomy is
+pinned here, split deliberately between two styles.
 
-The example-based cases at the top fix the taxonomy by hand; the property-based section at
-the bottom checks the two claims that matter against xarray *itself* rather than against a
-hand-computed answer — ``size`` predicts the real post-``isel`` length, and composing two
-indexers replays identically to applying them in sequence (the same-dim case the optimiser
-property suite in ``test_properties.py`` deliberately excludes).
+**Examples, at the top.** The taxonomy itself — which raw shape becomes which variant — is a
+decision, not a derivable fact, so it is written out. Generating it would mean reimplementing
+``classify`` in the strategy in order to know the expected answer, which asserts nothing. The
+examples that remain beyond the taxonomy table are the ones the properties structurally cannot
+reach: the ``sel`` label path, the scalar-has-no-size contract, and the ``ForwardSlice``
+constructor invariant.
+
+**Properties, at the bottom.** The claims that *are* derivable are checked against xarray
+itself rather than a hand-computed answer: ``size`` predicts the real post-``isel`` length,
+``drops_dim`` predicts whether the dim survives, ``to_raw`` replays like the value it came
+from, a ``ForwardSlice`` selects a length-independent prefix, and composing two indexers
+replays identically to applying them in sequence (the same-dim case the optimiser property
+suite in ``test_properties.py`` deliberately excludes). Between them these cover every
+positional size and round-trip branch, so those examples are not duplicated above.
 """
 
 from typing import get_args
@@ -124,31 +131,13 @@ def test_exactly_one_variant_drops_its_dim():
     assert len(dropping) + len(keeping) == len(get_args(Indexer))
 
 
-# --- size: reproduces the old _indexer_size branches --------------------------------------
-
-
-def test_forward_slice_sizes_via_indices():
-    assert classify(slice(0, 2)).size(4) == 2
-
-
-def test_general_slice_sizes_against_length():
-    assert classify(slice(-3, None)).size(4) == 3
-
-
-def test_positions_sizes_by_length():
-    assert classify([0, 2, 4]).size(5) == 3
-
-
-def test_integer_array_sizes_by_length():
-    assert classify(np.array([0, 1])).size(5) == 2
-
-
-def test_boolean_array_sizes_by_true_count():
-    assert classify(np.array([True, False, True, True])).size(4) == 3
-
-
-def test_boolean_list_sizes_by_true_count():
-    assert classify([True, False, True, True]).size(4) == 3
+# --- size: the cases the properties below cannot reach ------------------------------------
+#
+# Every *positional* size branch (forward and general slices, positions, boolean masks) is
+# checked against xarray itself by ``test_size_predicts_the_real_isel_length``, over far more
+# inputs than could be written out here — so those examples are not repeated. What is left is
+# what the properties structurally cannot generate: the ``sel`` label path (they draw ``isel``
+# values only) and the scalar contract (a scalar has no size to compare against).
 
 
 def test_label_slice_keeps_current_size():
@@ -165,19 +154,14 @@ def test_scalar_size_is_undefined():
 
 
 # --- to_raw: round-trips to a replayable value --------------------------------------------
+#
+# Positional values are covered against xarray by ``test_to_raw_replays_like_the_value_it_came
+# _from``. Only the label shapes are pinned by hand, since the properties draw ``isel`` values.
 
 
-@pytest.mark.parametrize(
-    "raw",
-    [0, "2020", slice(0, 5), slice(-3, None), slice("a", "z"), [0, 2, 4]],
-)
-def test_to_raw_round_trips_by_value(raw):
+@pytest.mark.parametrize("raw", ["2020", slice("a", "z"), ["2020", "2021"]])
+def test_label_to_raw_round_trips_by_value(raw):
     assert classify(raw).to_raw() == raw
-
-
-def test_mask_to_raw_returns_the_mask():
-    mask = np.array([True, False])
-    assert classify(mask).to_raw() is mask
 
 
 # --- constructor invariant: a ForwardSlice cannot be built backwards ----------------------
@@ -206,17 +190,37 @@ def _da(n: int) -> xr.DataArray:
     return xr.DataArray(np.arange(n), dims="x", coords={"x": np.arange(n)})
 
 
+def _positions(lo, hi):
+    """Integers in ``[lo, hi]``, sometimes numpy-typed rather than plain ``int``.
+
+    Widening past plain ``int`` is not incidental coverage. ``argmin``, ``np.where`` and
+    ``arr.values[i]`` all hand back ``np.int64``, and an ``isinstance(x, int)`` classifier
+    misfiles those as labels — mis-sizing the dim and quietly making the indexer
+    uncomposable. Drawing both spellings is what puts that class of bug in reach of every
+    property below rather than only of the hand-written examples above.
+    """
+    return st.integers(lo, hi).flatmap(
+        lambda i: st.sampled_from([i, np.int64(i), np.int32(i)])
+    )
+
+
+def _forward_slice(draw, n):
+    """A forward slice over ``[0, n]``, with plain-or-numpy bounds."""
+    bound = st.one_of(st.none(), _positions(0, n))
+    return slice(draw(bound), draw(bound), draw(st.one_of(st.none(), _positions(1, 3))))
+
+
 @st.composite
 def _isel_value(draw, n):
     """A raw ``isel`` value valid against a dim of size ``n``, across every variant shape."""
     kind = draw(st.sampled_from(["scalar", "forward", "general", "positions", "mask"]))
     if kind == "scalar":
-        return draw(st.integers(-n, n - 1))
-    if kind == "forward":
-        bound = st.one_of(st.none(), st.integers(0, n))
-        return slice(
-            draw(bound), draw(bound), draw(st.one_of(st.none(), st.integers(1, 3)))
+        # a 0-d array indexes like the bare int, so it belongs in the scalar arm
+        return draw(
+            st.one_of(_positions(-n, n - 1), st.integers(-n, n - 1).map(np.array))
         )
+    if kind == "forward":
+        return _forward_slice(draw, n)
     if (
         kind == "general"
     ):  # a negative bound or reversed step — keeps the dim, uncomposable
@@ -224,7 +228,7 @@ def _isel_value(draw, n):
             st.sampled_from([slice(-n, None), slice(None, -1), slice(None, None, -1)])
         )
     if kind == "positions":
-        return draw(st.lists(st.integers(0, n - 1), max_size=n))
+        return draw(st.lists(_positions(0, n - 1), max_size=n))
     return np.array(draw(st.lists(st.booleans(), min_size=n, max_size=n)))
 
 
@@ -232,11 +236,8 @@ def _isel_value(draw, n):
 def _composable_outer(draw, n):
     """An ``isel`` value the composer actually handles as *outer*: a forward slice or positions."""
     if draw(st.booleans()):
-        bound = st.one_of(st.none(), st.integers(0, n))
-        return slice(
-            draw(bound), draw(bound), draw(st.one_of(st.none(), st.integers(1, 3)))
-        )
-    return draw(st.lists(st.integers(0, n - 1), min_size=1, max_size=n))
+        return _forward_slice(draw, n)
+    return draw(st.lists(_positions(0, n - 1), min_size=1, max_size=n))
 
 
 @st.composite
@@ -284,6 +285,40 @@ def test_classify_to_raw_round_trips_to_the_same_variant(case):
     indexer = classify(value)
     assume(not isinstance(indexer, Mask))  # ndarray-backed, so ``==`` is ill-defined
     assert classify(indexer.to_raw()) == indexer
+
+
+@_SETTINGS
+@given(_sized_value())
+def test_to_raw_replays_like_the_value_it_came_from(case):
+    """``to_raw()`` selects the same data as the raw value ``classify`` was handed.
+
+    The round trip above is about the *variant* surviving; this is about the data. It is the
+    claim ``optimize.py`` leans on whenever a rewrite rebuilds a node's ``args`` from its
+    ``indexer`` — if ``to_raw`` drifted from its input, every optimised plan would replay
+    something subtly different from what the user wrote, and nothing else would notice.
+    """
+    n, value = case
+    da = _da(n)
+    assert_equal(da.isel(x=classify(value).to_raw()), da.isel(x=value))
+
+
+@_SETTINGS
+@given(st.integers(1, 8), st.data())
+def test_forward_slice_selects_a_prefix_independent_of_length(n, data):
+    """A ``ForwardSlice`` resolved at length ``n`` is a prefix of itself resolved longer.
+
+    This is *why* the variant exists: the composer reasons about a ForwardSlice arithmetically
+    without carrying the dim length, which is only sound if growing the dim can never change
+    the positions already chosen. A negative bound breaks it (it counts from the end, so every
+    position moves), which is exactly what ``_is_forward`` exists to exclude — so this is the
+    property that fails if that predicate is ever loosened too far.
+    """
+    indexer = classify(_forward_slice(data.draw, n))
+    assume(isinstance(indexer, ForwardSlice))
+
+    at_n = list(range(*indexer.to_raw().indices(n)))
+    at_longer = list(range(*indexer.to_raw().indices(n + data.draw(st.integers(1, 5)))))
+    assert at_longer[: len(at_n)] == at_n
 
 
 @_SETTINGS
