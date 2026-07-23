@@ -15,7 +15,7 @@ import xarray as xr
 from xarray.testing import assert_equal
 
 import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
-from xrexpr.accessor import Explanation, LazyDatasetProxy
+from xrexpr.accessor import _EAGER_ATTRS, Explanation, LazyDatasetProxy
 from xrexpr.exceptions import InvalidExpressionError
 from xrexpr.optimize import optimize
 
@@ -23,6 +23,11 @@ from xrexpr.optimize import optimize
 #: chunk manager xarray raises ``ImportError``. Only the rechunk tests below need it.
 requires_dask = pytest.mark.skipif(
     importlib.util.find_spec("dask") is None, reason="dask is not installed"
+)
+
+#: ``.plot`` delegates to xarray's plotting, which needs matplotlib.
+requires_matplotlib = pytest.mark.skipif(
+    importlib.util.find_spec("matplotlib") is None, reason="matplotlib is not installed"
 )
 
 
@@ -296,3 +301,88 @@ def test_compute_is_alias_for_collect(ds):
     # recorded op -- it returns the materialised result, not another proxy
     chain = ds.plan.mean("lat").isel(time=0)
     assert_equal(chain.compute(), chain.collect())
+
+
+# --- terminal operations -------------------------------------------------------------
+# ``.plot`` / ``.to_*`` consume the plan into a figure/file/array rather than another
+# link in the chain. They are callable (``ds.plot`` is an accessor with ``__call__``),
+# so without special handling they would be *recorded* and silently never run. They must
+# instead trigger ``collect()`` (firing the rewrite) and delegate to the realised object.
+
+
+@pytest.mark.parametrize("term", sorted(_EAGER_ATTRS))
+def test_every_terminal_is_routed_not_recorded(ds, term):
+    # Coverage guard over the whole ``_EAGER_ATTRS`` set: catches a typo'd / nonexistent
+    # name in the set, or a terminal that gets silently recorded instead of delegated.
+    # Route through the chain whose collected result actually carries the terminal --
+    # some are Dataset-only (``to_array``, ``to_stacked_array``), some DataArray-only
+    # (``to_series``, ``to_numpy``). Picking by ``hasattr`` keeps this declarative and
+    # avoids hardcoded lists that would rot if the set changes.
+    ds_chain = ds.plan.mean("lat")  # collects to a Dataset
+    da_chain = ds.plan["temperature"].mean("lat")  # collects to a DataArray
+    chain = ds_chain if hasattr(ds_chain.collect(), term) else da_chain
+
+    # Access only -- never call, so no args / netcdf backend / matplotlib are needed.
+    attr = getattr(chain, term)
+    # A recorded terminal would come back as the recording wrapper (a plain function) or
+    # a proxy; a routed one is the *materialised* object's own attribute.
+    assert not isinstance(attr, LazyDatasetProxy)
+    assert type(attr) is type(getattr(chain.collect(), term))
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="``to_nowhere`` is not a registered terminal, so it is never routed -- this "
+    "pins that the routing guard above discriminates, passing only for names in "
+    "``_EAGER_ATTRS`` rather than vacuously.",
+)
+def test_unregistered_terminal_is_not_routed(ds):
+    # The negative of ``test_every_terminal_is_routed_not_recorded``: a name absent from
+    # ``_EAGER_ATTRS`` must NOT reach the eager-delegate path. It falls through to the
+    # record / property branch and (being bogus) raises ``AttributeError`` -- so the
+    # routing assertions below never hold. Strict xfail, so if ``to_nowhere`` is ever
+    # added to the set (or otherwise made to route) this turns green and fails the suite,
+    # forcing a deliberate update.
+    term = "to_nowhere"
+    assert term not in _EAGER_ATTRS
+    chain = ds.plan["temperature"].mean("lat")
+    attr = getattr(chain, term)
+    assert not isinstance(attr, LazyDatasetProxy)
+    assert type(attr) is type(getattr(chain.collect(), term))
+
+
+def test_terminal_to_dataframe_triggers_collect_and_delegates(ds):
+    # regression: ``.to_dataframe()`` used to return a proxy (recorded, never run). It
+    # must now materialise -- proving the rewrite ran and delegation reached xarray.
+    chain = ds.plan["temperature"].isel(time=0)
+    result = chain.to_dataframe()
+
+    assert not isinstance(result, LazyDatasetProxy)
+    eager = ds["temperature"].isel(time=0).to_dataframe()
+    assert result.equals(eager)
+
+
+def test_terminal_to_dict_matches_eager(ds):
+    chain = ds.plan.mean("lat")
+    assert chain.to_dict() == ds.mean("lat").to_dict()
+
+
+@requires_matplotlib
+def test_plot_triggers_collect_and_delegates(ds):
+    import matplotlib
+
+    matplotlib.use("Agg")
+
+    chain = ds.plan["temperature"].isel(time=0)
+
+    # ``.plot`` is xarray's plot accessor off the *materialised* DataArray, not a
+    # recording wrapper -- so calling it draws instead of returning a proxy.
+    assert not isinstance(chain.plot, LazyDatasetProxy)
+    artist = chain.plot()
+    assert not isinstance(artist, LazyDatasetProxy)
+    assert type(artist) is type(ds["temperature"].isel(time=0).plot())
+
+    # delegating the whole ``plot`` attribute (not just calling it) also reaches the
+    # accessor's own methods, e.g. ``plot.line`` on a 1-D selection.
+    line = ds.plan["temperature"].isel(time=0, lat=0).plot.line()
+    assert not isinstance(line, LazyDatasetProxy)

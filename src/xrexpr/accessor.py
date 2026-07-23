@@ -38,6 +38,31 @@ class Explanation(str):
         return str(self)
 
 
+#: Attributes that consume the plan into a non-Dataset artifact (a figure, file,
+#: array or DataFrame) rather than another link in the chain. Accessing one
+#: materialises via :meth:`~LazyDatasetProxy.collect` and delegates to the realised
+#: object instead of recording a lazy op — otherwise the call would be silently
+#: recorded and never run (``collect`` is never reached, so the rewrite never fires).
+#: ``plot`` is xarray's plot *accessor*, so delegating the attribute (not calling it)
+#: also fixes ``plot.line()`` / ``plot.scatter()``.
+_EAGER_ATTRS = frozenset(
+    {
+        "plot",
+        "to_netcdf",
+        "to_zarr",
+        "to_dataframe",
+        "to_dask_dataframe",
+        "to_pandas",
+        "to_series",
+        "to_array",
+        "to_dataarray",
+        "to_numpy",
+        "to_dict",
+        "to_stacked_array",
+    }
+)
+
+
 @xr.register_dataset_accessor("plan")  # type: ignore[no-untyped-call]
 class LazyDatasetProxy:
     """Record operations on an ``xr.Dataset`` and replay them on ``collect()``.
@@ -89,16 +114,32 @@ class LazyDatasetProxy:
         return f"<LazyDatasetProxy base={type(self._base_ds).__name__} ops=[{ops_preview}]>"
 
     def __getattr__(self, name: str) -> Any:
-        """Record callable methods; eagerly resolve non-callable attributes.
+        """Route an attribute to one of three behaviours.
 
-        Callables (``.mean``, ``.isel``, ...) return a wrapper that records the
-        call and returns a new proxy. Non-callable attributes (``.dims``,
-        ``.coords``, ...) force materialisation and are read off the realised
-        dataset.
+        - **Terminals** (:data:`_EAGER_ATTRS`: ``.plot``, ``.to_netcdf``, ...) consume
+          the plan into a non-Dataset artifact, so they force materialisation and are
+          read off the realised object — even though they are callable.
+        - **Callables** (``.mean``, ``.isel``, ...) return a wrapper that records the
+          call and returns a new proxy.
+        - **Non-callable attributes** (``.dims``, ``.coords``, ...) force
+          materialisation and are read off the realised dataset.
+
+        Known limitation — intermediate accessor-returning methods (``groupby``,
+        ``resample``, ``rolling``, ``coarsen``, ``weighted``) are mis-modelled: they take
+        the callable branch and record as ``Opaque``, so a following ``.mean()`` is
+        recorded as a *Dataset*-level reduce rather than a reduction over the group /
+        window, and can be reordered or dim-resolved wrongly. Handling them needs the IR
+        to model a grouped/windowed context (a new ``Op`` variant or a sub-plan), not
+        just a name allowlist. Deferred; do not chain a reduction after these on ``.plan``.
         """
         # protect internal / dunder attribute lookups
         if name.startswith("_"):
             raise AttributeError(name)
+
+        # terminals must be checked before the callable branch: they are callable
+        # (``.plot`` is an accessor with ``__call__``) but must not be recorded.
+        if name in _EAGER_ATTRS:
+            return getattr(self.collect(), name)
 
         if self._is_method_callable_on_dataset(name):
 
