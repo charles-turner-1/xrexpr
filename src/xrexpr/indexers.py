@@ -151,7 +151,7 @@ class Label:
     def size(self, current: int) -> int:
         if isinstance(self.value, np.ndarray):
             return int(self.value.size)
-        if isinstance(self.value, (list, tuple)):
+        if isinstance(self.value, (list | tuple)):
             return len(self.value)
         return current  # a label slice needs coord values to size — leave it unchanged
 
@@ -195,8 +195,8 @@ def classify(value: Any) -> Indexer:
         if np.issubdtype(value.dtype, np.integer):
             return Positions(tuple(int(x) for x in value.tolist()))
         return Label(value)
-    if isinstance(value, (list, tuple)):
-        if value and all(isinstance(x, (bool, np.bool_)) for x in value):
+    if isinstance(value, (list | tuple)):
+        if value and all(isinstance(x, (bool | np.bool_)) for x in value):
             return Mask(value)
         if all(isinstance(x, int) for x in value):  # pure-bool already handled above
             return Positions(tuple(int(x) for x in value))
