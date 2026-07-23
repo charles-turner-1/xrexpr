@@ -31,7 +31,16 @@ from typing import Any, Literal
 import numpy as np
 from frozendict import frozendict
 
-__all__ = ["Op", "Opaque", "Project", "Rechunk", "Reduce", "Scan", "Select", "frozendict"]
+__all__ = [
+    "Op",
+    "Opaque",
+    "Project",
+    "Rechunk",
+    "Reduce",
+    "Scan",
+    "Select",
+    "frozendict",
+]
 
 
 def _is_scalar_index(value: Any) -> bool:
