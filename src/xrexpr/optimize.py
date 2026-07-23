@@ -9,11 +9,14 @@ having to reason about the whole chain.
 Rules (in ``_RULES``):
 
 - :func:`merge_adjacent_selects` — fold a run of consecutive ``isel``/``isel`` (or
-  ``sel``/``sel``) into a single indexer (PR 7).
+  ``sel``/``sel``) into a single indexer, *composing* rather than overwriting when both
+  select the same dim (PR 7, #33).
 - :func:`pushdown_selects` — hop a select left past a preceding reduce when their dims
   are disjoint, so the reduction scans a smaller array (PR 8, #11).
 - :func:`pushdown_projections` — hop a variable projection left past a preceding reduce
   or select, so only the needed variables flow through the plan (#32).
+- :func:`pushdown_selects_past_rechunks` — hop a select left past a preceding ``chunk``
+  so the rechunk moves less data (#57).
 
 Each is a *local, single-step* rewrite; the fixpoint composes them (a select bubbles
 past a whole run of reductions, and newly-adjacent selects then merge). ``pushdown_selects``
@@ -32,14 +35,16 @@ the schema each node sees. :func:`~xrexpr.schema.apply_schema` models
 inside it.
 """
 
-from collections.abc import Callable, Hashable
-from typing import TypeGuard
+from collections.abc import Callable, Hashable, Mapping
+from typing import Any, TypeGuard
 
+import numpy as np
 from frozendict import frozendict
 
 from xrexpr.exceptions import InvalidExpressionError
 from xrexpr.ir import Op, Opaque, Project, Reduce, Select
 from xrexpr.schema import SchemaState, apply_schema
+
 
 __all__ = ["optimize"]
 
@@ -58,13 +63,15 @@ def optimize(nodes: Plan, schema: SchemaState) -> Plan:
     sees, and rewriting changes that.
 
     Each rule preserves the plan's result, so the returned plan replays to the same
-    dataset as ``nodes`` — only cheaper. Termination relies on every rule being
-    non-growing *and* directional: a rule either shrinks the plan or moves a node
-    strictly left, and no rule moves a node right, so the plan cannot cycle. (The two
-    pushdown rules fire on disjoint adjacencies — ``(reduce, select)`` vs
-    ``(reduce | select, project)`` — so they can't undo each other.) A rule returns
-    ``None`` when it changes nothing, so the loop detects the fixpoint from that signal
-    rather than by comparing whole plans each pass.
+    dataset as ``nodes`` — only cheaper. A rule returns ``None`` when it changes nothing,
+    so the loop detects the fixpoint from that signal rather than by comparing whole
+    plans each pass.
+
+    **Termination.** Every rule strictly decreases the lexicographic measure
+    ``(len(plan), sum of the indices of the Select nodes)``. Merging and dropping a
+    spent rechunk shrink the plan; the pushdown rules leave the length alone but move a
+    select strictly left. Neither component can grow, so no rule may ever push a select
+    *right* or lengthen a plan — the invariant a new rule has to preserve.
     """
     plan = list(nodes)
     while True:
@@ -103,11 +110,17 @@ def _trusted_prefix(nodes: Plan) -> int:
 def merge_adjacent_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
     """Fold each run of consecutive same-op selects into one node.
 
-    Consecutive ``isel``s (or ``sel``s) commute and compose, so
-    ``ds.isel(time=0).isel(lat=1)`` becomes a single ``isel({time: 0, lat: 1})``.
-    A mixed ``isel``/``sel`` run is left alone (different indexing semantics), and a
-    select carrying *option* kwargs (``drop``/``method``/...) is treated as a barrier
-    — it isn't folded, since a single merged indexer couldn't carry those faithfully.
+    Consecutive ``isel``s (or ``sel``s) compose, so ``ds.isel(time=0).isel(lat=1)``
+    becomes a single ``isel({time: 0, lat: 1})``. Selects on *different* dims simply
+    union; selects on the **same** dim are composed by :func:`_compose_into`, because
+    the later indexer addresses positions within the earlier one's result rather than
+    the original dim.
+
+    Three things act as barriers, each ending the run so the plan keeps two correct
+    nodes instead of collapsing to one wrong one: a mixed ``isel``/``sel`` run
+    (different indexing semantics), a select carrying *option* kwargs
+    (``drop``/``method``/...) that a bare merged indexer couldn't carry faithfully, and
+    a same-dim collision with no statically provable composition.
 
     Returns ``None`` when no run was folded (nothing to change).
     """
@@ -131,7 +144,10 @@ def merge_adjacent_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
             nxt = nodes[j]
             if nxt.name != node.name or not _mergeable_select(nxt):
                 break
-            indexer.update(nxt.indexer)
+            merged = _compose_into(node.name, indexer, nxt.indexer)
+            if merged is None:  # a dim we can't compose — end the run here
+                break
+            indexer = merged
             j += 1
 
         if j - i > 1:  # at least two selects folded
@@ -160,7 +176,142 @@ def _mergeable_select(node: Op) -> TypeGuard[Select]:
     return isinstance(node, Select) and all(k in node.indexer for k in node.kwargs)
 
 
-def pushdown_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
+def _compose_into(
+    name: str,
+    outer: dict[Hashable, Any],
+    inner: Mapping[Hashable, Any],
+) -> dict[Hashable, Any] | None:
+    """Merge ``inner``'s indexers into ``outer``'s, composing where dims collide.
+
+    A dim in only one of the two carries over untouched. A dim in **both** is the case
+    the plain ``dict.update`` got wrong: ``isel(time=slice(100,1000)).isel(time=slice(10,20))``
+    is *not* ``isel(time=slice(10,20))`` — the second indexer addresses positions
+    **within the first's result**, so the two must compose (here to ``slice(110,120)``).
+    :func:`_compose_indexer` does that for the cases it can prove; ``None`` from either
+    function means "don't merge these two selects at all" (the caller ends the run), so
+    an uncomposable collision degrades to a correct two-node plan rather than a wrong
+    one-node plan.
+
+    Composition is all-or-nothing: a single uncomposable dim abandons the whole merge,
+    since a half-applied ``inner`` would be neither select.
+    """
+    if name != "isel":  # ``sel`` composition needs coordinate values; positions only
+        return None if set(outer) & set(inner) else {**outer, **inner}
+
+    merged = dict(outer)
+    for dim, index in inner.items():
+        if dim not in merged:
+            merged[dim] = index
+            continue
+        composed = _compose_indexer(merged[dim], index)
+        if composed is _UNCOMPOSABLE:
+            return None
+        merged[dim] = composed
+    return merged
+
+
+#: Sentinel for "these two indexers have no statically-known composition" — distinct
+#: from ``None``, which is itself a legitimate slice bound.
+_UNCOMPOSABLE: Any = object()
+
+
+def _compose_indexer(outer: Any, inner: Any) -> Any:
+    """Compose two positional indexers applied to the same dim, ``outer`` then ``inner``.
+
+    Returns the single equivalent indexer, or :data:`_UNCOMPOSABLE` when no composition
+    is provable without the dim's length (which the optimiser doesn't carry). Handled:
+
+    - **sequence then anything** — ``outer`` is a concrete list of positions, so the
+      answer is just indexing it: ``[10, 20, 30]`` then ``1`` is ``20``.
+    - **forward slice then forward slice / non-negative scalar** — arithmetic on the
+      bounds, e.g. ``slice(100, 1000)`` then ``slice(10, 20)`` → ``slice(110, 120)``.
+
+    Deliberately *not* handled (all yield :data:`_UNCOMPOSABLE`): negative starts, stops
+    or steps, which index from the end and so need the length; boolean masks; and a
+    scalar ``outer``, which drops the dim entirely so that ``inner`` cannot be replayed
+    against it at all.
+    """
+    if isinstance(outer, np.ndarray) and outer.dtype != bool:
+        outer = outer.tolist()
+    if isinstance(outer, list | tuple) and all(isinstance(x, int) for x in outer):
+        return _index_sequence(list(outer), inner)
+    if isinstance(outer, slice):
+        return _compose_slice(outer, inner)
+    return _UNCOMPOSABLE
+
+
+def _index_sequence(positions: list[int], inner: Any) -> Any:
+    """Apply ``inner`` to a concrete list of positions, i.e. ``positions[inner]``.
+
+    Exact by construction — the outer selection is already fully enumerated, so there
+    is nothing to reason about. An out-of-range ``inner`` would raise here; that is
+    reported as uncomposable so the error surfaces from xarray at replay, in its own
+    words, rather than from the optimiser.
+    """
+    try:
+        if isinstance(inner, slice):
+            return positions[inner]
+        if isinstance(inner, int) and not isinstance(inner, bool):
+            return positions[inner]
+        if isinstance(inner, list | tuple) and all(isinstance(x, int) for x in inner):
+            return [positions[i] for i in inner]
+    except IndexError:
+        return _UNCOMPOSABLE
+    return _UNCOMPOSABLE
+
+
+def _compose_slice(outer: slice, inner: Any) -> Any:
+    """Compose a forward, non-negative ``outer`` slice with ``inner``.
+
+    Element ``k`` of the result is ``outer_start + (inner_start + k * inner_step) *
+    outer_step``, which is itself an arithmetic progression — so a slice composed with a
+    slice is a slice, and with a scalar is a scalar. The stop bound is the *tighter* of
+    the two constraints: ``inner`` cannot run past its own stop, nor past the end of
+    what ``outer`` produced.
+    """
+    if not _is_forward_slice(outer):
+        return _UNCOMPOSABLE
+    start, step = outer.start or 0, outer.step or 1
+
+    if isinstance(inner, int) and not isinstance(inner, bool):
+        if inner < 0:
+            return _UNCOMPOSABLE
+        position = start + inner * step
+        # Out of ``outer``'s range: xarray raises, but the composed scalar might well
+        # be a valid position in the full dim, which would silently return data instead.
+        if outer.stop is not None and position >= outer.stop:
+            return _UNCOMPOSABLE
+        return position
+
+    if isinstance(inner, slice) and _is_forward_slice(inner):
+        inner_start, inner_step = inner.start or 0, inner.step or 1
+        candidates = (outer.stop, _scaled_stop(inner.stop, start, step))
+        stops = [s for s in candidates if s is not None]
+        return slice(
+            start + inner_start * step,
+            min(stops) if stops else None,
+            step * inner_step,
+        )
+    return _UNCOMPOSABLE
+
+
+def _is_forward_slice(s: slice) -> bool:
+    """Whether ``s`` steps forward from non-negative bounds, so it needs no dim length.
+
+    A negative bound or step counts from the end of the dim, which the optimiser cannot
+    resolve without knowing how long the dim is.
+    """
+    if s.step is not None and (not isinstance(s.step, int) or s.step < 1):
+        return False
+    return all(b is None or (isinstance(b, int) and b >= 0) for b in (s.start, s.stop))
+
+
+def _scaled_stop(inner_stop: int | None, start: int, step: int) -> int | None:
+    """``inner``'s stop expressed as a position in the *original* dim, or ``None``."""
+    return None if inner_stop is None else start + inner_stop * step
+
+
+def pushdown_selects(nodes: Plan) -> Plan | None:
     """Hop a select left past a preceding reduce when their dims permit.
 
     The rule only *fires* on a `(reduce, select)` adjacency — that structural test is
@@ -267,10 +418,84 @@ def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
         swapped[i], swapped[i + 1] = project, crossed
         return swapped
     return None
+def pushdown_selects_past_rechunks(nodes: Plan) -> Plan | None:
+    """Hop a select left past a preceding ``chunk`` so the rechunk moves less data.
+
+    A rechunk changes no dim, no size and no value — only chunk topology — so a select
+    and a rechunk *always* commute as far as results go. What the rule protects is the
+    chunking itself: selecting first can only leave dask with less data to shuffle, and
+    the topology it lands on is no coarser than the eager order's. ``chunk({time: 100})``
+    then ``isel(time=slice(50, 250))`` yields ragged ``(50, 100, 50)`` blocks; pushed, it
+    yields fresh regular ``(100, 100)`` ones.
+
+    The rewrite is not a plain swap, because a dim the select *drops* must also leave the
+    chunk spec — xarray raises ``ValueError: chunks keys ('time',) not found in data
+    dimensions`` otherwise. So, against the select's ``consumes``:
+
+    - **no named dim dropped** — swap as-is (this covers the uniform forms, ``chunk()`` /
+      ``chunk(100)`` / ``chunk("auto")``, which name no dim at all; ``"auto"`` simply
+      re-picks block sizes against whatever survives, which is the point of asking for it).
+    - **some named dims dropped** — swap, rebuilding the rechunk from the surviving keys.
+    - **every named dim dropped** — swap and *drop the rechunk*. What is left would be
+      ``chunk({})``: a single-chunk dask array, so no parallelism and no out-of-core
+      benefit — it would preserve dask-ness and nothing of value. (Note this is not the
+      disk-chunk-aware ``open_dataset(chunks={})``; the *method* has no such knowledge.)
+      A rechunk that named no dim to begin with is kept, since there the conversion is
+      the stated purpose rather than a leftover.
+
+    Unlike :func:`pushdown_selects` this never raises: a rechunk cannot make a select
+    unreplayable, only slower. One hop per call; ``None`` when nothing moved.
+    """
+    for i in range(len(nodes) - 1):
+        match nodes[i], nodes[i + 1]:
+            case (Rechunk() as rechunk, Select() as select) if _pushable_rechunk(
+                rechunk
+            ):
+                kept = {
+                    dim: spec
+                    for dim, spec in rechunk.chunks.items()
+                    if dim not in select.consumes
+                }
+                if len(kept) == len(rechunk.chunks):  # nothing named was dropped
+                    moved: Plan = [select, rechunk]
+                elif kept:
+                    moved = [
+                        select,
+                        Rechunk(
+                            name=rechunk.name,
+                            args=(dict(kept),),
+                            chunks=frozendict(kept),
+                        ),
+                    ]
+                else:  # the spec is spent
+                    moved = [select]
+                return list(nodes[:i]) + moved + list(nodes[i + 2 :])
+    return None
+
+
+def _pushable_rechunk(node: Rechunk) -> bool:
+    """Whether a select may cross ``node``, or it acts as a barrier.
+
+    Two forms are barriers:
+
+    - an **explicit block sequence** (``chunk({"time": (100, 400, 500)})``, or a
+      positional sequence), whose blocks must sum to the dim's length. A slice select
+      moving in front would shrink the dim and leave a spec that cannot replay at all —
+      and someone writing explicit block sizes is already reasoning about chunking, so
+      nothing crosses such a call, scalar selects included.
+    - **option kwargs** (``token``, ``chunked_array_type``, ...), which a rebuilt spec
+      couldn't carry faithfully — the same reason :func:`_mergeable_select` bails.
+    """
+    if any(key not in node.chunks for key in node.kwargs):
+        return False
+    if node.args and isinstance(node.args[0], list | tuple):
+        return False
+    return not any(isinstance(spec, list | tuple) for spec in node.chunks.values())
 
 
 _RULES: tuple[Rule, ...] = (
     merge_adjacent_selects,
     pushdown_selects,
     pushdown_projections,
+    pushdown_selects_past_rechunks,
 )

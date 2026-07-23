@@ -35,6 +35,7 @@ dynamic = ["version"]
 dev = [
     "black",  # formatting
     "coverage",  # testing
+    "dask",  # testing: rechunk rewrites need a chunk manager to replay
     "mypy",  # linting
     "pytest",  # testing
     "ruff",  # linting
@@ -165,6 +166,9 @@ test-py313 = { features = ["py313", "test"] }
 [tool.pixi.feature.test.dependencies]
 pytest = ">=8.4.2,<9"
 coverage = "*"
+# not a runtime dependency: xrexpr must keep working dask-free. The rechunk tests
+# skip themselves without it (``pytest.importorskip``).
+dask = "*"
 
 [tool.pixi.feature.test.tasks]
 test = { cmd = "pytest tests", description = "Run tests" }

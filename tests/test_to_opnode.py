@@ -13,7 +13,7 @@ import pytest
 import xarray as xr
 from frozendict import frozendict
 
-from xrexpr.ir import Opaque, Project, Reduce, Scan, Select
+from xrexpr.ir import Opaque, Rechunk, Reduce, Scan, Select
 from xrexpr.schema import SchemaState, apply_schema, to_opnode
 
 
@@ -127,6 +127,42 @@ def test_scan_carries_no_resolved_dims(schema):
     node = to_opnode(schema, "cumsum", ("time",), {})
     assert isinstance(node, Scan)  # a Scan has no consumes/indexer at all
     assert node.args == ("time",)  # dim kept in args for replay
+
+
+def test_rechunk_positional_mapping(schema):
+    node = to_opnode(schema, "chunk", ({"time": 100},), {})
+    assert isinstance(node, Rechunk)
+    assert node.chunks == frozendict({"time": 100})
+
+
+def test_rechunk_kwarg_mapping(schema):
+    node = to_opnode(schema, "chunk", (), {"time": 100, "lat": 1})
+    assert node.chunks == frozendict({"time": 100, "lat": 1})
+
+
+@pytest.mark.parametrize("spec", [100, "auto", -1])
+def test_uniform_rechunk_names_no_dim(schema, spec):
+    # a uniform spec has no dim key a later select could invalidate, so ``chunks``
+    # stays empty and the spec is replayed verbatim from ``args``
+    node = to_opnode(schema, "chunk", (spec,), {})
+    assert node.chunks == frozendict()
+    assert node.args == (spec,)
+
+
+def test_bare_rechunk_names_no_dim(schema):
+    node = to_opnode(schema, "chunk", (), {})
+    assert node.chunks == frozendict()
+
+
+def test_rechunk_option_kwarg_not_treated_as_a_dim(schema):
+    node = to_opnode(schema, "chunk", ({"time": 100},), {"token": "t"})
+    assert node.chunks == frozendict({"time": 100})
+    assert node.kwargs == frozendict({"token": "t"})  # verbatim for replay
+
+
+def test_rechunk_leaves_the_schema_unchanged(schema):
+    node = to_opnode(schema, "chunk", ({"time": 100},), {})
+    assert apply_schema(schema, node) == schema
 
 
 def test_getitem_of_a_name_is_a_projection(schema):

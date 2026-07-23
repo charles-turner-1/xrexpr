@@ -39,6 +39,19 @@ def test_scan_and_opaque_minimal_defaults():
     assert Opaque(name="where").kwargs == frozendict()
 
 
+def test_rechunk_minimal_defaults():
+    node = Rechunk(name="chunk")
+    assert node.args == ()
+    assert node.kwargs == frozendict()
+    assert node.chunks == frozendict()
+
+
+def test_rechunk_coerces_containers():
+    node = Rechunk(name="chunk", args=[{"time": 100}], chunks={"time": 100})
+    assert node.args == ({"time": 100},)
+    assert isinstance(node.chunks, frozendict)
+
+
 def test_reduce_coerces_containers():
     node = Reduce(name="mean", args=["lat"], kwargs={"skipna": True}, consumes=["lat"])
     assert node.args == ("lat",)

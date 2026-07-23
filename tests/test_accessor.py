@@ -7,6 +7,8 @@ in ``tests/test_optimize.py`` (it owns ``optimize``); here we only care that the
 accessor records ``Op`` nodes, threads the schema, and replays to the right result.
 """
 
+import importlib.util
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -15,6 +17,13 @@ from xarray.testing import assert_equal
 import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
 from xrexpr.accessor import Explanation, LazyDatasetProxy
 from xrexpr.exceptions import InvalidExpressionError
+from xrexpr.optimize import optimize
+
+#: xrexpr itself never needs dask, but replaying a ``chunk()`` call does -- without a
+#: chunk manager xarray raises ``ImportError``. Only the rechunk tests below need it.
+requires_dask = pytest.mark.skipif(
+    importlib.util.find_spec("dask") is None, reason="dask is not installed"
+)
 
 
 @pytest.fixture
@@ -201,6 +210,79 @@ def test_explain_repr_is_unescaped_text(ds):
     assert isinstance(text, str)
     assert repr(text) == str(text)
     assert "\\n" not in repr(text)
+
+
+@pytest.fixture
+def chunky_ds() -> xr.Dataset:
+    """A dataset big enough along ``time`` for chunk topology to be observable."""
+    rng = np.random.default_rng(0)
+    return xr.Dataset(
+        {"temperature": (("time", "lat"), rng.random((1000, 4)))},
+        coords={"time": np.arange(1000), "lat": np.arange(4)},
+    )
+
+
+def _replayed(proxy) -> xr.Dataset:
+    """The optimised plan replayed but *not* computed, so ``.chunks`` survives."""
+    return proxy._replay(optimize(proxy._ops))
+
+
+@requires_dask
+def test_scalar_isel_past_rechunk_matches_eager(chunky_ds):
+    ds = chunky_ds
+    assert_equal(
+        ds.plan.chunk({"time": 100}).isel(time=0).collect(),
+        ds.chunk({"time": 100}).isel(time=0).compute(),
+    )
+
+
+@requires_dask
+def test_spent_rechunk_leaves_a_single_op(chunky_ds):
+    assert "chunk" not in chunky_ds.plan.chunk({"time": 100}).isel(time=0).explain()
+
+
+@requires_dask
+def test_stripped_rechunk_still_replays(chunky_ds):
+    # the regression the rewrite exists to avoid: leaving ``time`` in the spec after
+    # the select has dropped it raises ``ValueError: chunks keys ... not found``
+    ds = chunky_ds
+    chain = ds.plan.chunk({"time": 100, "lat": 2}).isel(time=0)
+    assert_equal(chain.collect(), ds.chunk({"time": 100, "lat": 2}).isel(time=0))
+    assert _replayed(chain).chunks["lat"] == (2, 2)  # lat chunking preserved
+
+
+@requires_dask
+def test_slice_isel_past_rechunk_is_no_coarser(chunky_ds):
+    ds = chunky_ds
+    indexer = {"time": slice(50, 250)}
+    chain = ds.plan.chunk({"time": 100}).isel(**indexer)
+    eager = ds.chunk({"time": 100}).isel(**indexer)
+
+    assert_equal(chain.collect(), eager.compute())
+    # eager cuts across block boundaries -> ragged (50, 100, 50); pushed rechunks the
+    # already-selected data -> regular (100, 100). Same values, fewer blocks.
+    assert eager.chunks["time"] == (50, 100, 50)
+    assert _replayed(chain).chunks["time"] == (100, 100)
+
+
+@requires_dask
+def test_explicit_block_tuple_chain_matches_eager(chunky_ds):
+    # the barrier case: nothing moves, and the plan still replays as written
+    ds = chunky_ds
+    blocks = (200, 300, 500)
+    assert_equal(
+        ds.plan.chunk({"time": blocks}).isel(time=slice(50, 250)).collect(),
+        ds.chunk({"time": blocks}).isel(time=slice(50, 250)).compute(),
+    )
+
+
+@requires_dask
+def test_rechunk_and_reduce_pushdown_compose(chunky_ds):
+    ds = chunky_ds
+    assert_equal(
+        ds.plan.chunk({"time": 100}).mean("lat").isel(time=0).collect(),
+        ds.chunk({"time": 100}).mean("lat").isel(time=0).compute(),
+    )
 
 
 def test_compute_is_alias_for_collect(ds):

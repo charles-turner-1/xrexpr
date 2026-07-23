@@ -274,6 +274,109 @@ def test_projection_and_select_pushdown_compose(schema):
     ]
     out = optimize(plan, schema)
     assert [n.name for n in out] == ["__getitem__", "isel", "mean"]
+def test_scalar_isel_past_rechunk_drops_the_spent_rechunk(schema):
+    # the headline (#57): chunk({time: 100}).isel(time=0) -> isel(time=0). The rechunk's
+    # only named dim is gone, and chunk({}) would buy nothing but a single-chunk array
+    plan = [_node(schema, "chunk", {"time": 100}), _node(schema, "isel", time=0)]
+    out = optimize(plan)
+    assert [n.name for n in out] == ["isel"]
+    assert out[0].indexer == frozendict({"time": 0})
+
+
+def test_scalar_isel_past_rechunk_strips_only_the_dropped_dim(schema):
+    # lat survives the select, so the rechunk stays -- minus the dim that no longer exists
+    plan = [
+        _node(schema, "chunk", {"time": 100, "lat": 50}),
+        _node(schema, "isel", time=0),
+    ]
+    out = optimize(plan)
+    assert [n.name for n in out] == ["isel", "chunk"]
+    assert out[1].chunks == frozendict({"lat": 50})
+    assert out[1].args == ({"lat": 50},)  # replayable: no stale ``time`` key
+
+
+def test_slice_isel_pushes_with_the_spec_intact(schema):
+    # a slice keeps its dim, so nothing is stripped; pushing means the rechunk sees
+    # less data *and* lands on regular blocks instead of ragged ones
+    plan = [
+        _node(schema, "chunk", {"time": 100}),
+        _node(schema, "isel", time=slice(0, 2)),
+    ]
+    out = optimize(plan)
+    assert [n.name for n in out] == ["isel", "chunk"]
+    assert out[1].chunks == frozendict({"time": 100})
+
+
+def test_select_on_unchunked_dim_is_a_plain_swap(schema):
+    plan = [_node(schema, "chunk", {"lat": 2}), _node(schema, "isel", time=0)]
+    out = optimize(plan)
+    assert [n.name for n in out] == ["isel", "chunk"]
+    assert out[1].chunks == frozendict({"lat": 2})
+
+
+def test_rechunk_kwarg_form_pushes(schema):
+    plan = [_node(schema, "chunk", time=100), _node(schema, "isel", lat=0)]
+    out = optimize(plan)
+    assert [n.name for n in out] == ["isel", "chunk"]
+    assert out[1].chunks == frozendict({"time": 100})
+
+
+def test_uniform_rechunk_forms_push_and_are_kept(schema):
+    # chunk() / chunk(100) / chunk("auto") name no dim: nothing to strip, nothing spent.
+    # "auto" simply re-picks block sizes against whatever survives the select
+    for args in ((), (100,), ("auto",)):
+        plan = [_node(schema, "chunk", *args), _node(schema, "isel", time=0)]
+        out = optimize(plan)
+        assert [n.name for n in out] == ["isel", "chunk"]
+        assert out[1].args == args
+
+
+def test_explicit_block_tuple_is_a_barrier(schema):
+    # blocks must sum to the dim length, so a select must never cross -- not even a
+    # scalar one, though that case would merely strip the key
+    for indexer in ({"time": 0}, {"time": slice(0, 2)}):
+        plan = [
+            _node(schema, "chunk", {"time": (1, 1, 2)}),
+            _node(schema, "isel", **indexer),
+        ]
+        out = optimize(plan)
+        assert [n.name for n in out] == ["chunk", "isel"]
+
+
+def test_rechunk_option_kwarg_is_a_barrier(schema):
+    # a rebuilt spec couldn't carry the option faithfully -> leave the call alone
+    plan = [
+        _node(schema, "chunk", {"time": 100}, chunked_array_type="dask"),
+        _node(schema, "isel", time=0),
+    ]
+    out = optimize(plan)
+    assert [n.name for n in out] == ["chunk", "isel"]
+
+
+def test_rechunk_never_raises_on_a_reduced_dim(schema):
+    # unlike a reduce, a rechunk can't make a select unreplayable
+    plan = [_node(schema, "chunk", {"time": 100}), _node(schema, "sel", time=0)]
+    assert [n.name for n in optimize(plan)] == ["sel"]
+
+
+def test_select_reaches_the_front_past_rechunk_and_reduce(schema):
+    # the fixpoint composes both pushdown rules
+    plan = [
+        _node(schema, "chunk", {"time": 100}),
+        _node(schema, "mean", "lat"),
+        _node(schema, "isel", time=0),
+    ]
+    out = optimize(plan)
+    assert [n.name for n in out] == ["isel", "mean"]
+
+
+def test_rechunk_pushdown_is_idempotent(schema):
+    plan = [
+        _node(schema, "chunk", {"time": 100, "lat": 50}),
+        _node(schema, "isel", time=0),
+    ]
+    once = optimize(plan)
+    assert optimize(once) == once
 
 
 def test_empty_plan(schema):
@@ -298,3 +401,104 @@ def test_optimize_is_idempotent_with_a_projection(schema):
     ]
     once = optimize(plan, schema)
     assert optimize(once, schema) == once
+    once = optimize(plan)
+    assert optimize(once) == once
+
+
+# --- same-dim composition (#33) ------------------------------------------------
+#
+# The regression these guard: a run of selects used to merge by ``dict.update``, so a
+# second indexer on an already-indexed dim *replaced* the first instead of composing
+# with it. The later indexer addresses positions within the earlier one's result, so
+# ``isel(time=slice(100, 1000)).isel(time=slice(10, 20))`` is ``slice(110, 120)``, not
+# ``slice(10, 20)``. Cases with no provable composition must end the run (two nodes)
+# rather than fold to a wrong one.
+
+
+@pytest.mark.parametrize(
+    "outer, inner, expected",
+    [
+        (slice(100, 1000), slice(10, 20), slice(110, 120, 1)),
+        (slice(100, None), slice(10, 20), slice(110, 120, 1)),
+        (slice(None, 50), slice(10, None), slice(10, 50, 1)),
+        (slice(None), slice(2, 5), slice(2, 5, 1)),
+        (slice(10, 100, 2), slice(1, 4), slice(12, 18, 2)),  # every 2nd, then 3 of them
+        (slice(10, 100), slice(0, 5, 3), slice(10, 15, 3)),
+        (slice(100, 1000), 5, 105),  # slice then scalar -> scalar (dim drops)
+        (slice(10, 20), slice(50, 60), slice(60, 20, 1)),  # past the end -> empty
+        ([10, 20, 30], 1, 20),  # concrete positions: just index them
+        ([10, 20, 30], slice(1, 3), [20, 30]),
+        ([10, 20, 30], [2, 0], [30, 10]),
+        ([10, 20, 30], -1, 30),  # negatives are exact against a known sequence
+    ],
+)
+def test_same_dim_selects_compose(schema, outer, inner, expected):
+    plan = [_node(schema, "isel", time=outer), _node(schema, "isel", time=inner)]
+    out = optimize(plan)
+    assert len(out) == 1
+    assert out[0].indexer == frozendict({"time": expected})
+
+
+@pytest.mark.parametrize(
+    "outer, inner",
+    [
+        (slice(0, 10), slice(-3, None)),  # negative bound needs the dim length
+        (slice(0, 10), slice(None, None, -1)),  # reversal needs the dim length
+        (slice(-5, None), slice(0, 2)),
+        (slice(0, 10), -1),  # negative scalar into a bounded slice
+        (slice(0, 10), 20),  # out of the outer slice's range: xarray should raise
+        (0, 0),  # scalar outer already dropped the dim
+        ([10, 20, 30], 7),  # out of range against a known sequence
+    ],
+)
+def test_uncomposable_same_dim_selects_are_left_separate(schema, outer, inner):
+    plan = [_node(schema, "isel", time=outer), _node(schema, "isel", time=inner)]
+    out = optimize(plan)
+    assert [n.indexer for n in out] == [
+        frozendict({"time": outer}),
+        frozendict({"time": inner}),
+    ]
+
+
+def test_same_dim_sel_is_never_composed(schema):
+    # label indexers would need coordinate values to compose; positions are all we have
+    plan = [
+        _node(schema, "sel", time=slice(0, 10)),
+        _node(schema, "sel", time=slice(2, 4)),
+    ]
+    assert len(optimize(plan)) == 2
+
+
+def test_uncomposable_dim_abandons_the_whole_merge(schema):
+    # lat *could* merge, but time can't -> neither does, or the plan would be neither select
+    plan = [
+        _node(schema, "isel", time=0, lat=slice(0, 3)),
+        _node(schema, "isel", time=0, lat=1),
+    ]
+    out = optimize(plan)
+    assert len(out) == 2
+    assert out[0].indexer == frozendict({"time": 0, "lat": slice(0, 3)})
+
+
+def test_composed_run_of_three_on_one_dim(schema):
+    plan = [
+        _node(schema, "isel", time=slice(100, 1000)),
+        _node(schema, "isel", time=slice(10, 20)),
+        _node(schema, "isel", time=2),
+    ]
+    out = optimize(plan)
+    assert len(out) == 1
+    assert out[0].indexer == frozendict({"time": 112})
+    assert out[0].consumes == frozenset({"time"})
+
+
+def test_composition_survives_pushdown_past_a_reduce(schema):
+    # the trailing isel hops past mean, then composes with the leading one on time
+    plan = [
+        _node(schema, "isel", time=slice(1, 4)),
+        _node(schema, "mean", "lat"),
+        _node(schema, "isel", time=1),
+    ]
+    out = optimize(plan)
+    assert [n.name for n in out] == ["isel", "mean"]
+    assert out[0].indexer == frozendict({"time": 2})

@@ -127,16 +127,42 @@ class Project:
     args: tuple[Any, ...] = ()
     kwargs: frozendict[str, Any] = field(default_factory=frozendict)
     variables: tuple[Hashable, ...] = ()
+      
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "args", tuple(self.args))
+        object.__setattr__(self, "kwargs", frozendict(self.kwargs))
+        object.__setattr__(self, "variables", tuple(self.variables))
+        
+    @property
+    def single(self) -> bool:
+        """Whether this projects *one* variable to a ``DataArray`` (``ds["tas"]``)."""
+        return bool(self.args) and not isinstance(self.args[0], list)
+        
+class Rechunk:
+    """A ``chunk`` call: changes chunk topology only — never a dim, size or value.
+
+    ``chunks`` holds the **mapping-form** ``{dim: spec}`` only (a positional dict and/or
+    dim kwargs). It stays empty for the uniform forms — ``chunk()``, ``chunk(100)``,
+    ``chunk("auto")`` — whose spec names no dim and so lives verbatim in ``args``. That
+    split is what a rewrite needs: only *named* dims have to be stripped from the spec
+    when a select drops them, and only a named-dim spec can be emptied out entirely.
+
+    Whether a given rechunk may be *crossed* is deliberately not decided here — that
+    judgement lives with the rule (``_pushable_rechunk`` in ``optimize.py``), as it does
+    for selects.
+    """
+
+    name: Literal["chunk"]  # closed set → Literal
+    args: tuple[Any, ...] = ()
+    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    chunks: frozendict[Hashable, Any] = field(default_factory=frozendict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "args", tuple(self.args))
         object.__setattr__(self, "kwargs", frozendict(self.kwargs))
         object.__setattr__(self, "variables", tuple(self.variables))
+        object.__setattr__(self, "chunks", frozendict(self.chunks))
 
-    @property
-    def single(self) -> bool:
-        """Whether this projects *one* variable to a ``DataArray`` (``ds["tas"]``)."""
-        return bool(self.args) and not isinstance(self.args[0], list)
 
 
 @dataclass(frozen=True)
@@ -155,4 +181,4 @@ class Opaque:
 #: The optimiser's IR node: a sum over the structural op *kinds*. ``match`` over this
 #: binds different fields per arm; ``typing.assert_never`` on the ``case _`` arm makes
 #: the union exhaustive (adding a variant fails type-check at every unhandled site).
-Op = Reduce | Select | Scan | Project | Opaque
+Op = Reduce | Select | Scan | Rechunk | Opaque
