@@ -16,11 +16,11 @@ from collections.abc import Hashable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
-import numpy as np
 import xarray as xr
 from frozendict import frozendict
 from typing_extensions import assert_never
 
+from xrexpr.indexers import classify
 from xrexpr.ir import Op, Opaque, Project, Rechunk, Reduce, Scan, Select
 from xrexpr.operations import spec as op_spec
 
@@ -126,7 +126,7 @@ def apply_schema(schema: SchemaState, node: Op) -> SchemaState:
             # are already gone via ``consumes``).
             for dim, index in indexer.items():
                 if dim not in select.consumes and dim in dims:
-                    dims[dim] = _indexer_size(index, dims[dim])
+                    dims[dim] = classify(index).size(dims[dim])
         case Project(variables=variables):
             data_vars = {v: data_vars[v] for v in variables if v in data_vars}
         case Scan() | Rechunk() | Opaque():
@@ -143,31 +143,6 @@ def apply_schema(schema: SchemaState, node: Op) -> SchemaState:
     return SchemaState(
         dims=frozendict(dims), coords=coords, data_vars=frozendict(data_vars)
     )
-
-
-def _indexer_size(indexer: Any, current: int) -> int:
-    """Best-effort new size of a kept dim under a non-scalar ``isel``/``sel`` indexer.
-
-    Handles the cheap, unambiguous cases (slices, integer/boolean sequences and
-    arrays). For anything that would need data to size — e.g. a ``sel`` label slice
-    needing coordinate values — it conservatively returns the current size. Being
-    conservative is always *safe*: an imprecise size never changes the result of a
-    replayed plan, it only leaves a potential size-driven optimisation on the table.
-    """
-    if isinstance(indexer, slice):
-        bounds = (indexer.start, indexer.stop, indexer.step)
-        if all(b is None or isinstance(b, int) for b in bounds):
-            return len(range(*indexer.indices(current)))
-        return current  # label slice (e.g. sel) — needs coords to size
-
-    if isinstance(indexer, np.ndarray):
-        return int(indexer.sum()) if indexer.dtype == bool else int(indexer.size)
-    if isinstance(indexer, list | tuple):
-        seq = list(indexer)
-        if seq and all(isinstance(x, bool | np.bool_) for x in seq):
-            return int(sum(bool(x) for x in seq))
-        return len(seq)
-    return current
 
 
 #: ``isel``/``sel`` keyword arguments that are *options*, not dim indexers.

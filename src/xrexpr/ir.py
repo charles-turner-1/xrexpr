@@ -28,8 +28,9 @@ from collections.abc import Hashable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-import numpy as np
 from frozendict import frozendict
+
+from xrexpr.indexers import classify
 
 __all__ = [
     "Op",
@@ -41,16 +42,6 @@ __all__ = [
     "Select",
     "frozendict",
 ]
-
-
-def _is_scalar_index(value: Any) -> bool:
-    """Whether an indexer drops its dim (a scalar) rather than keeping it.
-
-    A ``slice``/``list``/``tuple``/array keeps the dim (and resizes it); anything
-    else is treated as a scalar that removes it. (A tuple MultiIndex *label* is the
-    known exception — niche, and left for later.)
-    """
-    return not isinstance(value, slice | list | tuple | np.ndarray)
 
 
 @dataclass(frozen=True)
@@ -96,7 +87,7 @@ class Select:
     @property
     def consumes(self) -> frozenset[Hashable]:
         """Dims this select drops: the scalar-indexed ones (slices/sequences keep theirs)."""
-        return frozenset(d for d, v in self.indexer.items() if _is_scalar_index(v))
+        return frozenset(d for d, v in self.indexer.items() if classify(v).drops_dim)
 
 
 @dataclass(frozen=True)
