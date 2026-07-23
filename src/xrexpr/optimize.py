@@ -248,8 +248,8 @@ def _index_sequence(positions: tuple[int, ...], inner: Indexer) -> Indexer | Non
     seq = list(positions)
     try:
         match inner:
-            case Scalar(value=i) if isinstance(i, int) and not isinstance(i, bool):
-                return Scalar(seq[i])
+            case Scalar() as s if s.position is not None:
+                return Scalar(seq[s.position])
             case ForwardSlice() | GeneralSlice() as s:
                 # ``seq`` is already concrete, so a reversed/negative slice is fine here.
                 return Positions(tuple(seq[s.to_raw()]))
@@ -274,10 +274,8 @@ def _compose_slice(outer: ForwardSlice, inner: Indexer) -> Indexer | None:
     start, step = outer.start or 0, outer.step or 1
 
     match inner:
-        case Scalar(value=i) if (
-            isinstance(i, int) and not isinstance(i, bool) and i >= 0
-        ):
-            position = start + i * step
+        case Scalar() as s if s.position is not None and s.position >= 0:
+            position = start + s.position * step
             # Out of ``outer``'s range: xarray raises, but the composed scalar might well
             # be a valid position in the full dim, which would silently return data instead.
             if outer.stop is not None and position >= outer.stop:

@@ -36,6 +36,7 @@ from xrexpr.indexers import (
     Mask,
     Positions,
     Scalar,
+    _is_int,
     classify,
 )
 from xrexpr.optimize import _compose_indexer
@@ -99,7 +100,22 @@ def test_label_list_classifies_as_label():
 def test_zero_dim_integer_array_classifies_as_scalar():
     # indexes exactly like the bare int -- xarray drops the dim -- so it must not be read as a
     # one-element enumeration
-    assert classify(np.array(0)) == Scalar(np.array(0))
+    assert classify(np.array(0)) == Scalar(0)
+
+
+@pytest.mark.parametrize("raw", [np.int64(0), np.int32(0), np.array(0)])
+def test_integer_scalars_normalise_to_plain_int(raw):
+    # Same normalisation Positions and ForwardSlice apply. Two things depend on it: an
+    # np.int64 selection must compare equal to the int spelling (plan equality, golden
+    # assertions), and a Scalar holding an *array* is unhashable -- see the test below.
+    assert classify(raw) == Scalar(0)
+    assert type(classify(raw).value) is int
+
+
+def test_classified_scalars_are_hashable():
+    # Select stores indexers in a frozendict, so an unhashable value silently makes the whole
+    # node unhashable. A 0-d array would do exactly that if it were stored verbatim.
+    assert {classify(np.array(0)), classify(np.int64(0)), classify(0)} == {Scalar(0)}
 
 
 def test_numpy_int_slice_bounds_classify_as_forward_slice():
@@ -319,6 +335,42 @@ def test_forward_slice_selects_a_prefix_independent_of_length(n, data):
     at_n = list(range(*indexer.to_raw().indices(n)))
     at_longer = list(range(*indexer.to_raw().indices(n + data.draw(st.integers(1, 5)))))
     assert at_longer[: len(at_n)] == at_n
+
+
+def _respell(raw, wrap):
+    """The same ``isel`` value with every integer rewritten via ``wrap`` (``int`` or ``np.int64``)."""
+    if isinstance(raw, slice):
+        bounds = (raw.start, raw.stop, raw.step)
+        return slice(*(None if b is None else wrap(b) for b in bounds))
+    if isinstance(raw, list):
+        return [wrap(i) for i in raw]
+    if isinstance(raw, np.ndarray) and raw.ndim == 0:
+        return wrap(raw.item())
+    if _is_int(raw):
+        return wrap(raw)
+    return raw  # a mask: no integers to respell
+
+
+@_SETTINGS
+@given(_same_dim_pair())
+def test_composition_does_not_depend_on_integer_spelling(case):
+    """Whether two indexers compose must not depend on how their integers were spelled.
+
+    The replay property below can only see compositions that *happen*: it ``assume``s away a
+    ``None``, so an indexer that should have composed but silently didn't is filtered out
+    rather than failed. That blind spot is real — it hid a live bug, where a ``np.int64``
+    scalar refused to compose because the composer tested ``isinstance(i, int)`` directly
+    instead of asking the value. Comparing the two spellings needs no oracle for *when*
+    composition ought to succeed, and still catches exactly that class of regression.
+    """
+    _, outer, inner = case
+    as_int = _compose_indexer(
+        classify(_respell(outer, int)), classify(_respell(inner, int))
+    )
+    as_numpy = _compose_indexer(
+        classify(_respell(outer, np.int64)), classify(_respell(inner, np.int64))
+    )
+    assert as_int == as_numpy
 
 
 @_SETTINGS
