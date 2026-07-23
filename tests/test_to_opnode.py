@@ -11,6 +11,7 @@ reorder bug downstream.
 import pytest
 from frozendict import frozendict
 
+from xrexpr.indexers import ForwardSlice, Scalar
 from xrexpr.ir import Opaque, Project, Rechunk, Reduce, Scan, Select
 from xrexpr.schema import apply_schema, to_opnode
 
@@ -64,19 +65,19 @@ def test_reduce_keeps_non_dim_kwargs_verbatim(schema):
 def test_isel_scalar_kwarg_drops_dim(schema):
     node = to_opnode(schema, "isel", (), {"time": 0})
     assert isinstance(node, Select)
-    assert node.indexer == frozendict({"time": 0})
+    assert node.indexer == frozendict({"time": Scalar(0)})
     assert node.consumes == frozenset({"time"})
 
 
 def test_isel_positional_dict(schema):
     node = to_opnode(schema, "isel", ({"time": 0},), {})
-    assert node.indexer == frozendict({"time": 0})
+    assert node.indexer == frozendict({"time": Scalar(0)})
     assert node.consumes == frozenset({"time"})
 
 
 def test_isel_slice_keeps_dim(schema):
     node = to_opnode(schema, "isel", (), {"time": slice(0, 2)})
-    assert node.indexer == frozendict({"time": slice(0, 2)})
+    assert node.indexer == frozendict({"time": ForwardSlice(0, 2)})
     assert node.consumes == frozenset()
 
 
@@ -87,14 +88,14 @@ def test_isel_list_keeps_dim(schema):
 
 def test_isel_option_kwarg_not_treated_as_dim(schema):
     node = to_opnode(schema, "isel", (), {"time": 0, "drop": True})
-    assert node.indexer == frozendict({"time": 0})  # drop excluded from indexer
+    assert node.indexer == frozendict({"time": Scalar(0)})  # drop excluded from indexer
     assert node.consumes == frozenset({"time"})
     assert node.kwargs == frozendict({"time": 0, "drop": True})  # verbatim for replay
 
 
 def test_sel_scalar_label_drops_dim(schema):
     node = to_opnode(schema, "sel", (), {"lat": 1})
-    assert node.indexer == frozendict({"lat": 1})
+    assert node.indexer == frozendict({"lat": Scalar(1)})
     assert node.consumes == frozenset({"lat"})
 
 
@@ -105,7 +106,7 @@ def test_sel_label_slice_keeps_dim(schema):
 
 def test_sel_option_kwarg_excluded(schema):
     node = to_opnode(schema, "sel", (), {"lat": 1, "method": "nearest"})
-    assert node.indexer == frozendict({"lat": 1})
+    assert node.indexer == frozendict({"lat": Scalar(1)})
     assert node.consumes == frozenset({"lat"})
 
 

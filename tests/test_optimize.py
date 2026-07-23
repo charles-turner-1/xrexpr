@@ -18,6 +18,7 @@ import pytest
 from frozendict import frozendict
 
 from xrexpr.exceptions import InvalidExpressionError
+from xrexpr.indexers import classify
 from xrexpr.optimize import optimize
 from xrexpr.schema import to_opnode
 
@@ -26,12 +27,17 @@ def _node(schema, name, *args, **kwargs):
     return to_opnode(schema, name, args, kwargs)
 
 
+def _ix(**dims):
+    """The ``indexer`` a ``Select`` would hold for these raw values (each classified)."""
+    return frozendict({d: classify(v) for d, v in dims.items()})
+
+
 def test_merge_consecutive_isel_kwargs(schema):
     plan = [_node(schema, "isel", time=0), _node(schema, "isel", lat=1)]
     out = optimize(plan, schema)
     assert len(out) == 1
     assert out[0].name == "isel"
-    assert out[0].indexer == frozendict({"time": 0, "lat": 1})
+    assert out[0].indexer == _ix(time=0, lat=1)
     assert out[0].args == ({"time": 0, "lat": 1},)
     assert out[0].consumes == frozenset({"time", "lat"})
 
@@ -40,7 +46,7 @@ def test_merge_consecutive_isel_positional_dict(schema):
     plan = [_node(schema, "isel", {"time": 0}), _node(schema, "isel", {"lat": 1})]
     out = optimize(plan, schema)
     assert len(out) == 1
-    assert out[0].indexer == frozendict({"time": 0, "lat": 1})
+    assert out[0].indexer == _ix(time=0, lat=1)
 
 
 def test_merge_run_of_three_isel(schema):
@@ -51,7 +57,7 @@ def test_merge_run_of_three_isel(schema):
     ]
     out = optimize(plan, schema)
     assert len(out) == 1
-    assert out[0].indexer == frozendict({"time": 0, "lat": 1, "lon": 2})
+    assert out[0].indexer == _ix(time=0, lat=1, lon=2)
 
 
 def test_merge_consecutive_sel(schema):
@@ -59,7 +65,7 @@ def test_merge_consecutive_sel(schema):
     out = optimize(plan, schema)
     assert len(out) == 1
     assert out[0].name == "sel"
-    assert out[0].indexer == frozendict({"lat": 1, "lon": 2})
+    assert out[0].indexer == _ix(lat=1, lon=2)
 
 
 def test_isel_keeps_slice_dim_when_merging(schema):
@@ -67,7 +73,7 @@ def test_isel_keeps_slice_dim_when_merging(schema):
     plan = [_node(schema, "isel", time=slice(0, 2)), _node(schema, "isel", lat=1)]
     out = optimize(plan, schema)
     assert len(out) == 1
-    assert out[0].indexer == frozendict({"time": slice(0, 2), "lat": 1})
+    assert out[0].indexer == _ix(time=slice(0, 2), lat=1)
     assert out[0].consumes == frozenset({"lat"})
 
 
@@ -96,7 +102,7 @@ def test_pushdown_isel_past_mean(schema):
     plan = [_node(schema, "mean", "lat"), _node(schema, "isel", time=0)]
     out = optimize(plan, schema)
     assert [n.name for n in out] == ["isel", "mean"]
-    assert out[0].indexer == frozendict({"time": 0})
+    assert out[0].indexer == _ix(time=0)
 
 
 def test_pushdown_generalises_to_sum(schema):
@@ -169,7 +175,7 @@ def test_pushdown_then_merge_across_a_reduce(schema):
     ]
     out = optimize(plan, schema)
     assert [n.name for n in out] == ["isel", "mean"]
-    assert out[0].indexer == frozendict({"time": 0, "lon": 2})
+    assert out[0].indexer == _ix(time=0, lon=2)
 
 
 def test_pushdown_projection_past_reduce(schema):
@@ -266,7 +272,7 @@ def test_scalar_isel_past_rechunk_drops_the_spent_rechunk(schema):
     plan = [_node(schema, "chunk", {"time": 100}), _node(schema, "isel", time=0)]
     out = optimize(plan, schema)
     assert [n.name for n in out] == ["isel"]
-    assert out[0].indexer == frozendict({"time": 0})
+    assert out[0].indexer == _ix(time=0)
 
 
 def test_scalar_isel_past_rechunk_strips_only_the_dropped_dim(schema):
@@ -420,7 +426,7 @@ def test_same_dim_selects_compose(schema, outer, inner, expected):
     plan = [_node(schema, "isel", time=outer), _node(schema, "isel", time=inner)]
     out = optimize(plan, schema)
     assert len(out) == 1
-    assert out[0].indexer == frozendict({"time": expected})
+    assert out[0].indexer == _ix(time=expected)
 
 
 @pytest.mark.parametrize(
@@ -438,10 +444,7 @@ def test_same_dim_selects_compose(schema, outer, inner, expected):
 def test_uncomposable_same_dim_selects_are_left_separate(schema, outer, inner):
     plan = [_node(schema, "isel", time=outer), _node(schema, "isel", time=inner)]
     out = optimize(plan, schema)
-    assert [n.indexer for n in out] == [
-        frozendict({"time": outer}),
-        frozendict({"time": inner}),
-    ]
+    assert [n.indexer for n in out] == [_ix(time=outer), _ix(time=inner)]
 
 
 def test_same_dim_sel_is_never_composed(schema):
@@ -461,7 +464,7 @@ def test_uncomposable_dim_abandons_the_whole_merge(schema):
     ]
     out = optimize(plan, schema)
     assert len(out) == 2
-    assert out[0].indexer == frozendict({"time": 0, "lat": slice(0, 3)})
+    assert out[0].indexer == _ix(time=0, lat=slice(0, 3))
 
 
 def test_composed_run_of_three_on_one_dim(schema):
@@ -472,7 +475,7 @@ def test_composed_run_of_three_on_one_dim(schema):
     ]
     out = optimize(plan, schema)
     assert len(out) == 1
-    assert out[0].indexer == frozendict({"time": 112})
+    assert out[0].indexer == _ix(time=112)
     assert out[0].consumes == frozenset({"time"})
 
 
@@ -485,4 +488,4 @@ def test_composition_survives_pushdown_past_a_reduce(schema):
     ]
     out = optimize(plan, schema)
     assert [n.name for n in out] == ["isel", "mean"]
-    assert out[0].indexer == frozendict({"time": 2})
+    assert out[0].indexer == _ix(time=2)

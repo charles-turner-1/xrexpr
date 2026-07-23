@@ -20,7 +20,6 @@ import xarray as xr
 from frozendict import frozendict
 from typing_extensions import assert_never
 
-from xrexpr.indexers import classify
 from xrexpr.ir import Op, Opaque, Project, Rechunk, Reduce, Scan, Select
 from xrexpr.operations import spec as op_spec
 
@@ -126,7 +125,7 @@ def apply_schema(schema: SchemaState, node: Op) -> SchemaState:
             # are already gone via ``consumes``).
             for dim, index in indexer.items():
                 if dim not in select.consumes and dim in dims:
-                    dims[dim] = classify(index).size(dims[dim])
+                    dims[dim] = index.size(dims[dim])
         case Project(variables=variables):
             data_vars = {v: data_vars[v] for v in variables if v in data_vars}
         case Scan() | Rechunk() | Opaque():

@@ -30,7 +30,7 @@ from typing import Any, Literal
 
 from frozendict import frozendict
 
-from xrexpr.indexers import classify
+from xrexpr.indexers import Indexer, classify
 
 __all__ = [
     "Op",
@@ -69,6 +69,11 @@ class Reduce:
 class Select:
     """An ``isel``/``sel`` selection, described by its ``{dim: indexer}`` mapping.
 
+    Each indexer value is an :data:`~xrexpr.indexers.Indexer` — the closed value sum type
+    the optimiser reasons about — normalised from its raw ``isel``/``sel`` form by
+    ``__post_init__`` (via :func:`~xrexpr.indexers.classify`), so a value is *always* a
+    modelled variant regardless of whether the node was recorded or hand-built.
+
     ``consumes`` is a *derived* view of ``indexer`` (the scalar-indexed dims, which
     drop) — a ``@property``, never a stored field — so a merged select cannot disagree
     with itself the way a separately-accumulated ``consumes`` could.
@@ -77,17 +82,26 @@ class Select:
     name: Literal["isel", "sel"]  # closed set → Literal (rejects Select(name="mean"))
     args: tuple[Any, ...] = ()
     kwargs: frozendict[str, Any] = field(default_factory=frozendict)
-    indexer: frozendict[Hashable, Any] = field(default_factory=frozendict)
+    indexer: frozendict[Hashable, Indexer] = field(default_factory=frozendict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "args", tuple(self.args))
         object.__setattr__(self, "kwargs", frozendict(self.kwargs))
-        object.__setattr__(self, "indexer", frozendict(self.indexer))
+        object.__setattr__(
+            self,
+            "indexer",
+            frozendict(
+                {
+                    dim: v if isinstance(v, Indexer) else classify(v)
+                    for dim, v in self.indexer.items()
+                }
+            ),
+        )
 
     @property
     def consumes(self) -> frozenset[Hashable]:
         """Dims this select drops: the scalar-indexed ones (slices/sequences keep theirs)."""
-        return frozenset(d for d, v in self.indexer.items() if classify(v).drops_dim)
+        return frozenset(d for d, v in self.indexer.items() if v.drops_dim)
 
 
 @dataclass(frozen=True)
