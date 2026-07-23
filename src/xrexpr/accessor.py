@@ -71,6 +71,14 @@ class LazyDatasetProxy:
             apply_schema(self._schema, node),
         )
 
+    def _base_schema(self) -> SchemaState:
+        """The schema of the *base* dataset, which is what the optimiser plans against.
+
+        Not ``self._schema``: that is the schema left at the *end* of recording, whereas
+        the optimiser rewrites from the front and folds the base forward itself.
+        """
+        return SchemaState.from_dataset(self._base_ds)
+
     def _is_method_callable_on_dataset(self, name: str) -> bool:
         return callable(getattr(self._base_ds, name, None))
 
@@ -118,7 +126,7 @@ class LazyDatasetProxy:
         Raises :class:`~xrexpr.exceptions.InvalidExpressionError` if the plan cannot be
         optimised (e.g. a select on a dim a preceding reduce removed).
         """
-        return self._replay(optimize(self._ops)).compute()
+        return self._replay(optimize(self._ops, self._base_schema())).compute()
 
     def compute(self) -> xr.Dataset | xr.DataArray:
         """Alias for :meth:`collect`, for xarray users who reach for ``.compute()``."""
@@ -132,7 +140,7 @@ class LazyDatasetProxy:
         :class:`~xrexpr.exceptions.InvalidExpressionError` as :meth:`collect` when the
         plan is invalid.
         """
-        plan = optimize(self._ops)
+        plan = optimize(self._ops, self._base_schema())
         if not plan:
             return Explanation("plan (0 ops)")
         body = "\n".join(

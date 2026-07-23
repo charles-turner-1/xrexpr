@@ -36,6 +36,7 @@ dev = [
     "black",  # formatting
     "coverage",  # testing
     "dask",  # testing: rechunk rewrites need a chunk manager to replay
+    "hypothesis",  # testing (property-based)
     "mypy",  # linting
     "pytest",  # testing
     "ruff",  # linting
@@ -166,6 +167,7 @@ test-py313 = { features = ["py313", "test"] }
 [tool.pixi.feature.test.dependencies]
 pytest = ">=8.4.2,<9"
 coverage = "*"
+hypothesis = "*"
 # not a runtime dependency: xrexpr must keep working dask-free. The rechunk tests
 # skip themselves without it (``pytest.importorskip``).
 dask = "*"

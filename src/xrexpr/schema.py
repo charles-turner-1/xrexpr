@@ -21,7 +21,7 @@ import xarray as xr
 from frozendict import frozendict
 from typing_extensions import assert_never
 
-from xrexpr.ir import Op, Opaque, Rechunk, Reduce, Scan, Select
+from xrexpr.ir import Op, Opaque, Project, Rechunk, Reduce, Scan, Select
 from xrexpr.operations import spec as op_spec
 
 __all__ = ["SchemaState", "apply_schema", "to_opnode"]
@@ -31,22 +31,58 @@ __all__ = ["SchemaState", "apply_schema", "to_opnode"]
 class SchemaState:
     """An immutable snapshot of a dataset's logical shape at one point in a plan.
 
-    Holds only metadata — ``dims`` (name → size) and ``coords`` (coordinate names)
-    — never array data. ``dims``/``coords`` are coerced to immutable containers on
-    construction, so a snapshot is hashable and safe to thread through the plan.
+    Holds only metadata — ``dims`` (name → size), ``coords`` (coordinate names) and
+    ``data_vars`` (variable name → its dims) — never array data. All three are coerced
+    to immutable containers on construction, so a snapshot is hashable and safe to
+    thread through the plan.
+
+    ``data_vars`` is what makes *variable*-level reasoning possible: whether a
+    projection may hop left past an op depends on whether the projected subset still
+    carries the dims that op names.
     """
 
     dims: frozendict[Hashable, int] = field(default_factory=frozendict)
     coords: frozenset[Hashable] = frozenset()
+    data_vars: frozendict[Hashable, tuple[Hashable, ...]] = field(
+        default_factory=frozendict
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "dims", frozendict(self.dims))
         object.__setattr__(self, "coords", frozenset(self.coords))
+        object.__setattr__(
+            self,
+            "data_vars",
+            frozendict({k: tuple(v) for k, v in self.data_vars.items()}),
+        )
 
     @classmethod
     def from_dataset(cls, ds: xr.Dataset | xr.DataArray) -> "SchemaState":
-        """Snapshot ``ds``'s logical schema, reading only ``.sizes``/``.coords``."""
-        return cls(dims=frozendict(ds.sizes), coords=frozenset(ds.coords))
+        """Snapshot ``ds``'s logical schema, reading only ``.sizes``/``.coords``/dims."""
+        data_vars = (
+            {k: tuple(v.dims) for k, v in ds.data_vars.items()}
+            if isinstance(ds, xr.Dataset)
+            else {}  # a DataArray has no data_vars to project over
+        )
+        return cls(
+            dims=frozendict(ds.sizes),
+            coords=frozenset(ds.coords),
+            data_vars=frozendict(data_vars),
+        )
+
+    def var_dims(self, names: Iterable[Hashable]) -> frozenset[Hashable] | None:
+        """The dims carried by ``names`` collectively, or ``None`` if any is unknown.
+
+        ``None`` is the *don't know* answer — a name that isn't a tracked data
+        variable (a coordinate, or something an unmodelled op introduced) — and
+        callers must treat it as "no rewrite", never as "no dims".
+        """
+        dims: set[Hashable] = set()
+        for name in names:
+            if name not in self.data_vars:
+                return None
+            dims.update(self.data_vars[name])
+        return frozenset(dims)
 
     @property
     def dim_names(self) -> frozenset[Hashable]:
@@ -62,14 +98,22 @@ def apply_schema(schema: SchemaState, node: Op) -> SchemaState:
     - :class:`~xrexpr.ir.Reduce` removes its ``consumes`` dims;
     - :class:`~xrexpr.ir.Select` removes the dims it drops (scalar indices) and
       *resizes* the dims it keeps (slice/sequence indices);
+    - :class:`~xrexpr.ir.Project` restricts the variables, leaving dims alone;
     - :class:`~xrexpr.ir.Scan`/:class:`~xrexpr.ir.Rechunk`/:class:`~xrexpr.ir.Opaque`
       leave dims untouched (a rechunk changes only chunk topology);
-    - a coordinate sharing a name with a removed dim disappears (all cases).
+    - a coordinate sharing a name with a removed dim disappears (all cases), and a
+      removed dim likewise disappears from every variable's dim tuple.
+
+    An :class:`~xrexpr.ir.Opaque` is assumed variable-preserving, which is *not* true
+    in general (``rename``/``drop_vars``/``assign``). That makes the schema exact only
+    up to the first opaque op — a trust boundary the optimiser enforces rather than
+    this function (see ``optimize._trusted_prefix``).
 
     ``assert_never`` on the final arm makes the union exhaustive: a new variant fails
     type-check here until handled.
     """
     dims = dict(schema.dims)
+    data_vars = dict(schema.data_vars)
 
     match node:
         case Reduce(consumes=consumes):
@@ -83,6 +127,8 @@ def apply_schema(schema: SchemaState, node: Op) -> SchemaState:
             for dim, index in indexer.items():
                 if dim not in select.consumes and dim in dims:
                     dims[dim] = _indexer_size(index, dims[dim])
+        case Project(variables=variables):
+            data_vars = {v: data_vars[v] for v in variables if v in data_vars}
         case Scan() | Rechunk() | Opaque():
             pass
         case _:
@@ -90,7 +136,13 @@ def apply_schema(schema: SchemaState, node: Op) -> SchemaState:
 
     removed = frozenset(schema.dims) - frozenset(dims)
     coords = frozenset(c for c in schema.coords if c not in removed)
-    return SchemaState(dims=frozendict(dims), coords=coords)
+    data_vars = {
+        name: tuple(d for d in var_dims if d not in removed)
+        for name, var_dims in data_vars.items()
+    }
+    return SchemaState(
+        dims=frozendict(dims), coords=coords, data_vars=frozendict(data_vars)
+    )
 
 
 def _indexer_size(indexer: Any, current: int) -> int:
@@ -152,6 +204,10 @@ def to_opnode(
     - **select** (``isel``/``sel``): the indexer (a positional dict and/or kwargs,
       minus option kwargs like ``drop``) becomes ``indexer``; a dim given a *scalar*
       index is dropped and so also lands in ``consumes`` (a slice/list/array keeps it).
+    - **project** (``ds["tas"]`` / ``ds[["tas", "pr"]]``): the key's variable names
+      become ``variables``. This is the one kind the ``OP_TABLE`` can't settle —
+      ``__getitem__`` is a projection only when its key *names variables*, so a
+      mask-style key (a boolean ``DataArray``, a dict) stays ``Opaque``.
     - **rechunk** (``chunk``): the *mapping* form (a positional dict and/or dim kwargs,
       minus option kwargs like ``token``) becomes ``chunks``. The uniform forms
       (``chunk()``, ``chunk(100)``, ``chunk("auto")``) name no dim, so ``chunks`` is
@@ -195,7 +251,31 @@ def to_opnode(
             kwargs=kw,
             chunks=_chunk_spec(args, kwargs),
         )
+    if name == "__getitem__" and (variables := _projected_names(args)) is not None:
+        return Project(name="__getitem__", args=args, kwargs=kw, variables=variables)
     return Opaque(name=name, args=args, kwargs=kw)
+
+
+def _projected_names(args: tuple[Any, ...]) -> tuple[Hashable, ...] | None:
+    """The variable names a ``__getitem__`` key selects, or ``None`` if it isn't one.
+
+    Recognises the two projection spellings, splitting them exactly where xarray's own
+    ``Dataset.__getitem__`` does: a **hashable** key is one variable name
+    (``ds["tas"]``, and a tuple counts — xarray reads it as a single name, not a list),
+    while a **list** is a sequence of them (``ds[["tas", "pr"]]``). Everything else — a
+    dict-like key (which xarray routes to ``isel``), a boolean ``DataArray`` mask —
+    returns ``None`` and so falls through to :class:`~xrexpr.ir.Opaque`, never to be
+    reordered. Names are taken verbatim; they are checked against the schema's
+    ``data_vars`` by the rule that would move the node, not here.
+    """
+    if len(args) != 1:
+        return None
+    key = args[0]
+    if isinstance(key, Hashable):
+        return (key,)
+    if isinstance(key, list) and all(isinstance(k, Hashable) for k in key):
+        return tuple(key)
+    return None
 
 
 def _reduce_dims(

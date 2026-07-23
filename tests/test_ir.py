@@ -1,9 +1,10 @@
-"""Tests for the expression IR: the ``Op`` sum type (``Reduce``/``Select``/``Scan``/``Opaque``).
+"""Tests for the expression IR: the ``Op`` sum type (``Reduce``/``Select``/``Scan``/``Project``/``Opaque``).
 
 ``kwargs``/``indexer`` are backed by the third-party ``frozendict``, so we don't
 re-test that library's internals — only that each variant coerces to it, stays
-frozen/hashable, and that ``Select.consumes`` is *derived* from ``indexer`` (never a
-stored field that could drift from it).
+frozen/hashable, and that the derived properties really are derived: ``Select.consumes``
+from ``indexer``, and ``Project.single`` from the verbatim key (never stored fields that
+could drift from what replay does).
 """
 
 import dataclasses
@@ -11,7 +12,7 @@ import dataclasses
 import pytest
 from frozendict import frozendict as _pkg_frozendict
 
-from xrexpr.ir import Opaque, Rechunk, Reduce, Scan, Select, frozendict
+from xrexpr.ir import Opaque, Project, Rechunk, Reduce, Scan, Select, frozendict
 
 
 def test_ir_reexports_third_party_frozendict():
@@ -110,3 +111,38 @@ def test_variants_hashable_and_value_equal():
 def test_distinct_variants_are_unequal():
     # a Select and an Opaque with the same name are different nodes
     assert Opaque(name="isel") != Select(name="isel")
+
+
+def test_project_minimal_defaults():
+    node = Project(name="__getitem__")
+    assert node.args == ()
+    assert node.kwargs == frozendict()
+    assert node.variables == ()
+
+
+def test_project_coerces_variables_to_a_tuple():
+    node = Project(name="__getitem__", args=(["tas", "pr"],), variables=["tas", "pr"])
+    assert node.variables == ("tas", "pr")
+
+
+def test_project_is_frozen_and_hashable():
+    node = Project(name="__getitem__", args=("tas",), variables=("tas",))
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        node.variables = ("pr",)
+    assert hash(node) == hash(
+        Project(name="__getitem__", args=("tas",), variables=("tas",))
+    )
+
+
+def test_project_single_is_derived_from_the_key():
+    # a bare (hashable) key selects one variable -> DataArray; a list -> Dataset.
+    # Derived from ``args``, so it can never disagree with what replay does.
+    assert Project(name="__getitem__", args=("tas",), variables=("tas",)).single
+    assert not Project(name="__getitem__", args=(["tas"],), variables=("tas",)).single
+
+
+def test_project_tuple_key_is_a_single_name():
+    # xarray reads a hashable key as *one* name, tuples included -- mirror that
+    assert Project(
+        name="__getitem__", args=(("a", "b"),), variables=(("a", "b"),)
+    ).single
