@@ -260,6 +260,111 @@ def test_projection_and_select_pushdown_compose(schema):
     assert [n.name for n in out] == ["__getitem__", "isel", "mean"]
 
 
+def test_scalar_isel_past_rechunk_drops_the_spent_rechunk(schema):
+    # the headline (#57): chunk({time: 100}).isel(time=0) -> isel(time=0). The rechunk's
+    # only named dim is gone, and chunk({}) would buy nothing but a single-chunk array
+    plan = [_node(schema, "chunk", {"time": 100}), _node(schema, "isel", time=0)]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["isel"]
+    assert out[0].indexer == frozendict({"time": 0})
+
+
+def test_scalar_isel_past_rechunk_strips_only_the_dropped_dim(schema):
+    # lat survives the select, so the rechunk stays -- minus the dim that no longer exists
+    plan = [
+        _node(schema, "chunk", {"time": 100, "lat": 50}),
+        _node(schema, "isel", time=0),
+    ]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["isel", "chunk"]
+    assert out[1].chunks == frozendict({"lat": 50})
+    assert out[1].args == ({"lat": 50},)  # replayable: no stale ``time`` key
+
+
+def test_slice_isel_pushes_with_the_spec_intact(schema):
+    # a slice keeps its dim, so nothing is stripped; pushing means the rechunk sees
+    # less data *and* lands on regular blocks instead of ragged ones
+    plan = [
+        _node(schema, "chunk", {"time": 100}),
+        _node(schema, "isel", time=slice(0, 2)),
+    ]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["isel", "chunk"]
+    assert out[1].chunks == frozendict({"time": 100})
+
+
+def test_select_on_unchunked_dim_is_a_plain_swap(schema):
+    plan = [_node(schema, "chunk", {"lat": 2}), _node(schema, "isel", time=0)]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["isel", "chunk"]
+    assert out[1].chunks == frozendict({"lat": 2})
+
+
+def test_rechunk_kwarg_form_pushes(schema):
+    plan = [_node(schema, "chunk", time=100), _node(schema, "isel", lat=0)]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["isel", "chunk"]
+    assert out[1].chunks == frozendict({"time": 100})
+
+
+def test_uniform_rechunk_forms_push_and_are_kept(schema):
+    # chunk() / chunk(100) / chunk("auto") name no dim: nothing to strip, nothing spent.
+    # "auto" simply re-picks block sizes against whatever survives the select
+    for args in ((), (100,), ("auto",)):
+        plan = [_node(schema, "chunk", *args), _node(schema, "isel", time=0)]
+        out = optimize(plan, schema)
+        assert [n.name for n in out] == ["isel", "chunk"]
+        assert out[1].args == args
+
+
+def test_explicit_block_tuple_is_a_barrier(schema):
+    # blocks must sum to the dim length, so a select must never cross -- not even a
+    # scalar one, though that case would merely strip the key
+    for indexer in ({"time": 0}, {"time": slice(0, 2)}):
+        plan = [
+            _node(schema, "chunk", {"time": (1, 1, 2)}),
+            _node(schema, "isel", **indexer),
+        ]
+        out = optimize(plan, schema)
+        assert [n.name for n in out] == ["chunk", "isel"]
+
+
+def test_rechunk_option_kwarg_is_a_barrier(schema):
+    # a rebuilt spec couldn't carry the option faithfully -> leave the call alone
+    plan = [
+        _node(schema, "chunk", {"time": 100}, chunked_array_type="dask"),
+        _node(schema, "isel", time=0),
+    ]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["chunk", "isel"]
+
+
+def test_rechunk_never_raises_on_a_reduced_dim(schema):
+    # unlike a reduce, a rechunk can't make a select unreplayable
+    plan = [_node(schema, "chunk", {"time": 100}), _node(schema, "sel", time=0)]
+    assert [n.name for n in optimize(plan, schema)] == ["sel"]
+
+
+def test_select_reaches_the_front_past_rechunk_and_reduce(schema):
+    # the fixpoint composes both pushdown rules
+    plan = [
+        _node(schema, "chunk", {"time": 100}),
+        _node(schema, "mean", "lat"),
+        _node(schema, "isel", time=0),
+    ]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["isel", "mean"]
+
+
+def test_rechunk_pushdown_is_idempotent(schema):
+    plan = [
+        _node(schema, "chunk", {"time": 100, "lat": 50}),
+        _node(schema, "isel", time=0),
+    ]
+    once = optimize(plan, schema)
+    assert optimize(once, schema) == once
+
+
 def test_empty_plan(schema):
     assert optimize([], schema) == []
 
