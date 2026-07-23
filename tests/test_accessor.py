@@ -173,7 +173,6 @@ def test_explain_repr_is_unescaped_text(ds):
     assert "\\n" not in repr(text)
 
 
-
 @pytest.fixture
 def chunky_ds() -> xr.Dataset:
     """A dataset big enough along ``time`` for chunk topology to be observable."""
