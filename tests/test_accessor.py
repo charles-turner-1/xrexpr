@@ -351,6 +351,23 @@ def test_unregistered_terminal_is_not_routed(ds):
     assert type(attr) is type(getattr(chain.collect(), term))
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="groupby/resample/rolling/coarsen/weighted are mis-modelled: the grouped "
+    "``mean()`` is recorded as a Dataset-level reduce over every current dim, so a "
+    "following ``isel`` on a dim the group kept is wrongly rejected. Fixing it needs the "
+    "IR to model a grouped/windowed context (a new Op variant or sub-plan). See "
+    "``__getattr__``'s known-limitation note and the plan-accessor memory.",
+)
+def test_groupby_then_reduce_then_select_matches_eager(ds):
+    # Valid *eagerly* -- ``groupby('time').mean()`` reduces within groups, leaving ``lat``
+    # for the later ``isel(lat=0)``. But the proxy records the grouped ``mean()`` as a
+    # full-dataset reduce (no dim -> every current dim), so its schema drops ``lat`` and
+    # ``collect()`` raises InvalidExpressionError instead of matching eager.
+    chain = ds.plan.groupby("time").mean().isel(lat=0)
+    assert_equal(chain.collect(), ds.groupby("time").mean().isel(lat=0))
+
+
 def test_terminal_to_dataframe_triggers_collect_and_delegates(ds):
     # regression: ``.to_dataframe()`` used to return a proxy (recorded, never run). It
     # must now materialise -- proving the rewrite ran and delegation reached xarray.
