@@ -214,8 +214,12 @@ def _isel_value(draw, n):
         return draw(st.integers(-n, n - 1))
     if kind == "forward":
         bound = st.one_of(st.none(), st.integers(0, n))
-        return slice(draw(bound), draw(bound), draw(st.one_of(st.none(), st.integers(1, 3))))
-    if kind == "general":  # a negative bound or reversed step — keeps the dim, uncomposable
+        return slice(
+            draw(bound), draw(bound), draw(st.one_of(st.none(), st.integers(1, 3)))
+        )
+    if (
+        kind == "general"
+    ):  # a negative bound or reversed step — keeps the dim, uncomposable
         return draw(
             st.sampled_from([slice(-n, None), slice(None, -1), slice(None, None, -1)])
         )
@@ -229,7 +233,9 @@ def _composable_outer(draw, n):
     """An ``isel`` value the composer actually handles as *outer*: a forward slice or positions."""
     if draw(st.booleans()):
         bound = st.one_of(st.none(), st.integers(0, n))
-        return slice(draw(bound), draw(bound), draw(st.one_of(st.none(), st.integers(1, 3))))
+        return slice(
+            draw(bound), draw(bound), draw(st.one_of(st.none(), st.integers(1, 3)))
+        )
     return draw(st.lists(st.integers(0, n - 1), min_size=1, max_size=n))
 
 
