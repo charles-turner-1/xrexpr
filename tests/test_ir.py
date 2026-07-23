@@ -11,7 +11,7 @@ import dataclasses
 import pytest
 from frozendict import frozendict as _pkg_frozendict
 
-from xrexpr.ir import Opaque, Reduce, Scan, Select, frozendict
+from xrexpr.ir import Opaque, Rechunk, Reduce, Scan, Select, frozendict
 
 
 def test_ir_reexports_third_party_frozendict():
@@ -36,6 +36,19 @@ def test_select_minimal_defaults():
 def test_scan_and_opaque_minimal_defaults():
     assert Scan(name="cumsum").args == ()
     assert Opaque(name="where").kwargs == frozendict()
+
+
+def test_rechunk_minimal_defaults():
+    node = Rechunk(name="chunk")
+    assert node.args == ()
+    assert node.kwargs == frozendict()
+    assert node.chunks == frozendict()
+
+
+def test_rechunk_coerces_containers():
+    node = Rechunk(name="chunk", args=[{"time": 100}], chunks={"time": 100})
+    assert node.args == ({"time": 100},)
+    assert isinstance(node.chunks, frozendict)
 
 
 def test_reduce_coerces_containers():

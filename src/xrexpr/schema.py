@@ -21,7 +21,7 @@ import xarray as xr
 from frozendict import frozendict
 from typing_extensions import assert_never
 
-from xrexpr.ir import Op, Opaque, Reduce, Scan, Select
+from xrexpr.ir import Op, Opaque, Rechunk, Reduce, Scan, Select
 from xrexpr.operations import spec as op_spec
 
 __all__ = ["SchemaState", "apply_schema", "to_opnode"]
@@ -62,7 +62,8 @@ def apply_schema(schema: SchemaState, node: Op) -> SchemaState:
     - :class:`~xrexpr.ir.Reduce` removes its ``consumes`` dims;
     - :class:`~xrexpr.ir.Select` removes the dims it drops (scalar indices) and
       *resizes* the dims it keeps (slice/sequence indices);
-    - :class:`~xrexpr.ir.Scan`/:class:`~xrexpr.ir.Opaque` leave dims untouched;
+    - :class:`~xrexpr.ir.Scan`/:class:`~xrexpr.ir.Rechunk`/:class:`~xrexpr.ir.Opaque`
+      leave dims untouched (a rechunk changes only chunk topology);
     - a coordinate sharing a name with a removed dim disappears (all cases).
 
     ``assert_never`` on the final arm makes the union exhaustive: a new variant fails
@@ -82,7 +83,7 @@ def apply_schema(schema: SchemaState, node: Op) -> SchemaState:
             for dim, index in indexer.items():
                 if dim not in select.consumes and dim in dims:
                     dims[dim] = _indexer_size(index, dims[dim])
-        case Scan() | Opaque():
+        case Scan() | Rechunk() | Opaque():
             pass
         case _:
             assert_never(node)
@@ -120,6 +121,18 @@ def _indexer_size(indexer: Any, current: int) -> int:
 #: ``isel``/``sel`` keyword arguments that are *options*, not dim indexers.
 _SELECT_OPTION_KWARGS = frozenset({"drop", "missing_dims", "method", "tolerance"})
 
+#: ``chunk`` keyword arguments that are *options*, not per-dim chunk specs.
+_CHUNK_OPTION_KWARGS = frozenset(
+    {
+        "name_prefix",
+        "token",
+        "lock",
+        "inline_array",
+        "chunked_array_type",
+        "from_array_kwargs",
+    }
+)
+
 
 def to_opnode(
     schema: SchemaState,
@@ -139,6 +152,10 @@ def to_opnode(
     - **select** (``isel``/``sel``): the indexer (a positional dict and/or kwargs,
       minus option kwargs like ``drop``) becomes ``indexer``; a dim given a *scalar*
       index is dropped and so also lands in ``consumes`` (a slice/list/array keeps it).
+    - **rechunk** (``chunk``): the *mapping* form (a positional dict and/or dim kwargs,
+      minus option kwargs like ``token``) becomes ``chunks``. The uniform forms
+      (``chunk()``, ``chunk(100)``, ``chunk("auto")``) name no dim, so ``chunks`` is
+      empty and the spec stays in ``args``.
     - **scan** / untabulated ops: no dims resolved (name/args/kwargs only).
 
     ``args``/``kwargs`` are kept verbatim for faithful replay; ``consumes``/``indexer``
@@ -170,6 +187,13 @@ def to_opnode(
             name=cast(Literal["cumsum", "cumprod", "diff"], name),
             args=args,
             kwargs=kw,
+        )
+    if kind == "rechunk":
+        return Rechunk(
+            name=cast(Literal["chunk"], name),
+            args=args,
+            kwargs=kw,
+            chunks=_chunk_spec(args, kwargs),
         )
     return Opaque(name=name, args=args, kwargs=kw)
 
@@ -207,3 +231,22 @@ def _select_indexer(
         if key not in _SELECT_OPTION_KWARGS:
             indexer[key] = value
     return frozendict(indexer)
+
+
+def _chunk_spec(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> frozendict[Hashable, Any]:
+    """The ``{dim: chunksize}`` mapping of a ``chunk()`` call (option kwargs dropped).
+
+    Only the mapping form contributes. A uniform positional spec (``chunk(100)``,
+    ``chunk("auto")``) names no dim, so it yields an empty mapping and is left to be
+    replayed verbatim from ``args`` — which is exactly right, since a uniform spec has
+    no dim key that a later select could invalidate.
+    """
+    chunks: dict[Hashable, Any] = {}
+    if args and isinstance(args[0], dict):
+        chunks.update(args[0])
+    for key, value in kwargs.items():
+        if key not in _CHUNK_OPTION_KWARGS:
+            chunks[key] = value
+    return frozendict(chunks)
