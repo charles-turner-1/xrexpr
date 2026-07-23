@@ -28,6 +28,7 @@ label sequence) is genuinely open and cannot be reasoned about positionally — 
 ``Opaque`` plays for op kinds.
 """
 
+import numbers
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -164,32 +165,54 @@ class Label:
 Indexer = Scalar | ForwardSlice | GeneralSlice | Positions | Mask | Label
 
 
+def _is_int(x: Any) -> bool:
+    """Whether ``x`` is an integer *position*, numpy-typed or not.
+
+    ``isinstance(x, int)`` is too narrow: numpy integers fall out of ``argmin``, ``np.where``
+    and ``arr.values[i]`` routinely, and a ``np.int64`` bound misfiled as a label makes its
+    slice both mis-sized and uncomposable. ``numbers.Integral`` covers every numpy width;
+    ``bool`` is excluded because it is an ``int`` subclass but means a *mask*, not a position.
+    (``np.bool_`` is not ``Integral``, so it needs no exclusion.)
+    """
+    return isinstance(x, numbers.Integral) and not isinstance(x, bool)
+
+
 def _is_forward(s: slice) -> bool:
     """Whether ``s`` steps forward from non-negative integer bounds (no dim length needed)."""
-    if s.step is not None and (not isinstance(s.step, int) or s.step < 1):
+    if s.step is not None and (not _is_int(s.step) or s.step < 1):
         return False
-    return all(b is None or (isinstance(b, int) and b >= 0) for b in (s.start, s.stop))
+    return all(b is None or (_is_int(b) and b >= 0) for b in (s.start, s.stop))
 
 
 def _classify_slice(s: slice) -> ForwardSlice | GeneralSlice | Label:
     bounds = (s.start, s.stop, s.step)
-    if not all(b is None or isinstance(b, int) for b in bounds):
+    if not all(b is None or _is_int(b) for b in bounds):
         return Label(s)  # a label slice (e.g. sel) — not positional
     if _is_forward(s):
-        return ForwardSlice(s.start, s.stop, s.step)
+        # normalise to plain ``int`` so the variant's declared field types stay honest and a
+        # numpy-bounded slice compares equal to the same slice written by hand
+        return ForwardSlice(*(None if b is None else int(b) for b in bounds))
     return GeneralSlice(s)
 
 
 def classify(value: Any) -> Indexer:
     """Sort a raw ``isel``/``sel`` indexer value into its :data:`Indexer` variant.
 
-    The single place the value taxonomy is decided. Order matters: a boolean sequence is a
+    The single place the value taxonomy is decided. Order matters twice: a boolean sequence is a
     :class:`Mask`, not :class:`Positions`, even though ``bool`` is an ``int`` subclass, so the
-    all-boolean test runs before the all-integer one.
+    all-boolean test runs before the all-integer one; and a 0-d array is a :class:`Scalar`
+    rather than an enumeration, so the rank check runs before the dtype dispatch.
+
+    Integer-ness is decided by :func:`_is_int` throughout, so numpy-typed positions and bounds
+    classify the same way their Python equivalents do.
     """
     if isinstance(value, slice):
         return _classify_slice(value)
     if isinstance(value, np.ndarray):
+        if value.ndim == 0:
+            return Scalar(
+                value
+            )  # a 0-d array indexes like the bare value: drops the dim
         if value.dtype == bool:
             return Mask(value)
         if np.issubdtype(value.dtype, np.integer):
@@ -198,7 +221,7 @@ def classify(value: Any) -> Indexer:
     if isinstance(value, (list | tuple)):
         if value and all(isinstance(x, (bool | np.bool_)) for x in value):
             return Mask(value)
-        if all(isinstance(x, int) for x in value):  # pure-bool already handled above
+        if all(_is_int(x) for x in value):  # pure-bool already handled above
             return Positions(tuple(int(x) for x in value))
-        return Label(value)  # a label sequence, or a mixed/empty-of-labels one
+        return Label(value)  # a label sequence, or a mixed one
     return Scalar(value)  # anything else drops its dim

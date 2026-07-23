@@ -7,12 +7,15 @@ round-trips back to a value replay can hand to xarray. Composition is *not* test
 is an ``optimize.py`` policy over these variants, not an intrinsic fact of a value.
 """
 
+from typing import get_args
+
 import numpy as np
 import pytest
 
 from xrexpr.indexers import (
     ForwardSlice,
     GeneralSlice,
+    Indexer,
     Label,
     Mask,
     Positions,
@@ -71,25 +74,44 @@ def test_label_list_classifies_as_label():
     assert classify(["2020", "2021"]) == Label(["2020", "2021"])
 
 
+# Numpy-typed positions are not an exotic case: ``argmin``, ``np.where`` and ``arr.values[i]``
+# all hand back ``np.int64``, so an ``isinstance(x, int)`` test would misfile them as labels --
+# mis-sizing the dim *and* silently making the indexer uncomposable.
+
+
+def test_zero_dim_integer_array_classifies_as_scalar():
+    # indexes exactly like the bare int -- xarray drops the dim -- so it must not be read as a
+    # one-element enumeration
+    assert classify(np.array(0)) == Scalar(np.array(0))
+
+
+def test_numpy_int_slice_bounds_classify_as_forward_slice():
+    assert classify(slice(np.int64(0), np.int64(3))) == ForwardSlice(0, 3, None)
+
+
+def test_numpy_int_list_classifies_as_positions():
+    assert classify([np.int64(0), np.int64(2)]) == Positions((0, 2))
+
+
+def test_numpy_bool_list_still_classifies_as_mask():
+    # the counterweight to the three above: ``np.bool_`` is *not* ``numbers.Integral``, and
+    # Python ``bool`` is explicitly excluded, so widening to integers must not swallow masks
+    assert isinstance(classify([np.True_, np.False_]), Mask)
+
+
 # --- drops_dim: only a scalar removes its dim ---------------------------------------------
 
 
-def test_scalar_drops_its_dim():
-    assert Scalar(0).drops_dim is True
+def test_exactly_one_variant_drops_its_dim():
+    # Asserted by reflection over the union rather than variant by variant: enumerating the
+    # variants by hand only ever checks the ones that already exist, so a *new* variant added
+    # without a ``drops_dim`` would slip through. Walking ``Indexer`` makes the union itself
+    # the checklist -- the test fails the moment a variant is added and left undeclared.
+    dropping = [v for v in get_args(Indexer) if getattr(v, "drops_dim", None) is True]
+    keeping = [v for v in get_args(Indexer) if getattr(v, "drops_dim", None) is False]
 
-
-@pytest.mark.parametrize(
-    "indexer",
-    [
-        ForwardSlice(0, 5),
-        GeneralSlice(slice(-3, None)),
-        Positions((0, 2, 4)),
-        Mask(np.array([True, False])),
-        Label(slice("a", "z")),
-    ],
-)
-def test_non_scalar_keeps_its_dim(indexer):
-    assert indexer.drops_dim is False
+    assert dropping == [Scalar]
+    assert len(dropping) + len(keeping) == len(get_args(Indexer))
 
 
 # --- size: reproduces the old _indexer_size branches --------------------------------------
