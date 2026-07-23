@@ -11,6 +11,9 @@ makes the union exhaustive under mypy.
 The union tracks structural **kinds**, not xarray methods: ``mean``/``std``/``sum`` are
 all one :class:`Reduce`, told apart by ``name`` (the method table lives in
 ``operations.py``). A new *variant* is earned only by genuinely new structural data.
+Kinds are usually settled by the method name, but not always: ``__getitem__`` is a
+:class:`Project` when its key names variables and an :class:`Opaque` otherwise, so the
+table can't decide it — the shape of the *key* does.
 
 ``to_opnode`` (in ``schema.py``) builds these at record time; the optimiser
 (``optimize.py``) rewrites the list and the ``.plan`` accessor replays it.
@@ -28,7 +31,7 @@ from typing import Any, Literal
 import numpy as np
 from frozendict import frozendict
 
-__all__ = ["Op", "Opaque", "Reduce", "Scan", "Select", "frozendict"]
+__all__ = ["Op", "Opaque", "Project", "Reduce", "Scan", "Select", "frozendict"]
 
 
 def _is_scalar_index(value: Any) -> bool:
@@ -106,6 +109,37 @@ class Scan:
 
 
 @dataclass(frozen=True)
+class Project:
+    """A variable projection — ``ds["tas"]`` or ``ds[["tas", "pr"]]``.
+
+    The one op recognised by the *shape of its key* rather than by a method name:
+    ``__getitem__`` isn't in ``OP_TABLE`` because the same call is a projection only
+    when its key names variables (a boolean-mask key stays :class:`Opaque`).
+
+    ``variables`` is the requested names in order. ``single`` — whether the call
+    returns a ``DataArray`` (a bare name) rather than a ``Dataset`` (a list of them)
+    — is *derived* from the verbatim key, never stored, so it cannot disagree with
+    what replay will actually do. The list/hashable split mirrors xarray's own
+    ``Dataset.__getitem__``, so a tuple key reads as one name rather than several.
+    """
+
+    name: Literal["__getitem__"]  # closed set → Literal
+    args: tuple[Any, ...] = ()
+    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    variables: tuple[Hashable, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "args", tuple(self.args))
+        object.__setattr__(self, "kwargs", frozendict(self.kwargs))
+        object.__setattr__(self, "variables", tuple(self.variables))
+
+    @property
+    def single(self) -> bool:
+        """Whether this projects *one* variable to a ``DataArray`` (``ds["tas"]``)."""
+        return bool(self.args) and not isinstance(self.args[0], list)
+
+
+@dataclass(frozen=True)
 class Opaque:
     """Any op the optimiser doesn't model — replayed verbatim, never reordered."""
 
@@ -121,4 +155,4 @@ class Opaque:
 #: The optimiser's IR node: a sum over the structural op *kinds*. ``match`` over this
 #: binds different fields per arm; ``typing.assert_never`` on the ``case _`` arm makes
 #: the union exhaustive (adding a variant fails type-check at every unhandled site).
-Op = Reduce | Select | Scan | Opaque
+Op = Reduce | Select | Scan | Project | Opaque

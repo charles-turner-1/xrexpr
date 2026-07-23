@@ -63,15 +63,32 @@ plan (3 ops):
 
 The `isel` has been hoisted to the front — that's the reorder that buys the speed-up.
 
+Picking variables out of a dataset moves too, so the work is never done on variables you
+were about to discard:
+
+```python
+>>> print(ds.plan.mean(dim="time")[["temperature"]].explain())
+plan (2 ops):
+  1. [['temperature']]
+  2. mean(dim='time')
+```
+
 ## How it optimises
 
 `xrexpr` records each call as a normalised operation against a cheap *logical schema*
-(dims and sizes, never the array data), then rewrites the plan to a fixpoint with a few
-local, result-preserving rules:
+(dims, sizes and which variables carry which dims — never the array data), then rewrites
+the plan to a fixpoint with a few local, result-preserving rules:
 
 - **merge** consecutive `isel`/`sel` selections into a single indexer;
 - **push** a selection left past any reduction (`mean`, `sum`, `std`, ...) whose dims it
-  doesn't touch, so the reduction scans a smaller array.
+  doesn't touch, so the reduction scans a smaller array;
+- **push** a variable projection (`ds[["tas"]]`, `ds["tas"]`) left past reductions and
+  selections, so only the variables you asked for flow through the plan.
+
+A projection only moves while the variables it keeps still carry the dimensions the
+operations it crosses name. If `elevation` has no `time` dimension, then
+`ds.plan.mean(dim="time")[["elevation"]]` is left exactly as written — reordering it
+would leave `mean(dim="time")` with no `time` to reduce.
 
 A selection that indexes a dimension a reduction has already removed can never run — for
 example `ds.plan.mean(dim="lon").isel(lon=0)` — so `xrexpr` raises

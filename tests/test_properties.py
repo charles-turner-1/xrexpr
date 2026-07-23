@@ -269,8 +269,9 @@ def test_optimize_is_idempotent(case):
     """
     ds, calls = case
     plan, _ = _build_plan(ds, calls)
-    once = optimize(plan)
-    assert optimize(once) == once
+    schema = SchemaState.from_dataset(ds)
+    once = optimize(plan, schema)
+    assert optimize(once, schema) == once
 
 
 @SETTINGS
@@ -283,7 +284,7 @@ def test_adjacent_selects_collapse_without_changing_meaning(case):
     """
     ds, calls = case
     plan, _ = _build_plan(ds, calls)
-    optimised = optimize(plan)
+    optimised = optimize(plan, SchemaState.from_dataset(ds))
 
     assert len(optimised) == 1, "a run of selects on distinct dims should fold to one"
     assert_equal(_apply(ds.plan, calls).collect(), _apply(ds, calls))

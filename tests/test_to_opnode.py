@@ -10,7 +10,7 @@ reorder bug downstream.
 
 from frozendict import frozendict
 
-from xrexpr.ir import Opaque, Reduce, Scan, Select
+from xrexpr.ir import Opaque, Project, Reduce, Scan, Select
 from xrexpr.schema import apply_schema, to_opnode
 
 
@@ -114,10 +114,32 @@ def test_scan_carries_no_resolved_dims(schema):
     assert node.args == ("time",)  # dim kept in args for replay
 
 
-def test_untabulated_op_is_opaque(schema):
+def test_getitem_of_a_name_is_a_projection(schema):
     node = to_opnode(schema, "__getitem__", ("temperature",), {})
+    assert isinstance(node, Project)
+    assert node.variables == ("temperature",)
+    assert node.single  # ``ds["temperature"]`` -> DataArray
+    assert node.args == ("temperature",)  # key kept verbatim for replay
+
+
+def test_getitem_of_a_list_is_a_multi_projection(schema):
+    node = to_opnode(schema, "__getitem__", (["temperature", "elevation"],), {})
+    assert isinstance(node, Project)
+    assert node.variables == ("temperature", "elevation")
+    assert not node.single  # ``ds[[...]]`` -> Dataset
+
+
+def test_getitem_names_are_not_validated_at_record_time(schema):
+    # an unknown name still records as a projection; whether it may *move* is the
+    # optimiser's call, made against ``data_vars`` at that point in the plan
+    node = to_opnode(schema, "__getitem__", (["nope"],), {})
+    assert isinstance(node, Project) and node.variables == ("nope",)
+
+
+def test_mask_style_getitem_is_opaque(schema):
+    # a dict key is xarray's ``isel`` spelling, not a projection
+    node = to_opnode(schema, "__getitem__", ({"lat": 0},), {})
     assert isinstance(node, Opaque)
-    assert node.args == ("temperature",)
 
 
 def test_unknown_method_is_opaque(schema):

@@ -7,12 +7,37 @@ in ``tests/test_optimize.py`` (it owns ``optimize``); here we only care that the
 accessor records ``Op`` nodes, threads the schema, and replays to the right result.
 """
 
+import numpy as np
 import pytest
+import xarray as xr
 from xarray.testing import assert_equal
 
 import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
 from xrexpr.accessor import Explanation, LazyDatasetProxy
 from xrexpr.exceptions import InvalidExpressionError
+
+
+# A richer dataset than the shared ``conftest.ds``: this module shadows it to add an
+# auxiliary (non-dimension) ``area`` coord, exercising that projection pushdown preserves
+# aux coords when it reorders the plan.
+@pytest.fixture
+def ds() -> xr.Dataset:
+    rng = np.random.default_rng(0)
+    return xr.Dataset(
+        {
+            "temperature": (("time", "lat", "lon"), rng.random((4, 3, 5))),
+            # no ``time`` dim: projecting it can't hop past a ``time`` reduction
+            "elevation": (("lat", "lon"), rng.random((3, 5))),
+        },
+        coords={
+            "time": np.arange(4),
+            "lat": np.arange(3),
+            "lon": np.arange(5),
+            # an auxiliary (non-dim) coord: reordering must not silently drop or keep
+            # it differently from the eager chain
+            "area": (("lat", "lon"), rng.random((3, 5))),
+        },
+    )
 
 
 def test_plan_accessor_returns_proxy(ds):
@@ -62,11 +87,12 @@ def test_schema_threads_as_ops_are_recorded(ds):
     assert dict(ds.plan.mean("lat").isel(time=0)._schema.dims) == {"lon": 5}
 
 
-def test_getitem_records_opaque_node(ds):
-    from xrexpr.ir import Opaque
+def test_getitem_records_projection_node(ds):
+    from xrexpr.ir import Project
 
     node = ds.plan["temperature"]._ops[0]
-    assert node.name == "__getitem__" and isinstance(node, Opaque)
+    assert node.name == "__getitem__" and isinstance(node, Project)
+    assert node.variables == ("temperature",)
 
 
 def test_readme_pipeline_positional_equal(ds):
@@ -116,6 +142,37 @@ def test_cumsum_then_select_computes(ds):
     # cumsum is a scan (order matters): left in place, not reordered and not raised
     got = ds.plan.cumsum("time").isel(time=2).collect()
     assert_equal(got, ds.cumsum("time").isel(time=2))
+
+
+def test_projection_pushdown_equal(ds):
+    # the rewrite reduces only ``temperature``; the result must still match the eager
+    # chain -- coords included, which is what ``assert_equal`` checks
+    got = ds.plan.mean("time")[["temperature"]].collect()
+    assert_equal(got, ds.mean("time")[["temperature"]])
+
+
+def test_single_variable_projection_pushdown_equal(ds):
+    # ``ds["temperature"]`` yields a DataArray; pushing it down must not change that
+    got = ds.plan.mean("time")["temperature"].collect()
+    assert isinstance(got, xr.DataArray)
+    assert_equal(got, ds.mean("time")["temperature"])
+
+
+def test_projection_pushdown_past_select_equal(ds):
+    got = ds.plan.isel(time=0).mean("lat")[["temperature"]].collect()
+    assert_equal(got, ds.isel(time=0).mean("lat")[["temperature"]])
+
+
+def test_blocked_projection_still_replays(ds):
+    # ``elevation`` has no ``time``, so the projection can't move -- but the plan is
+    # perfectly valid eagerly and must still replay to the same result
+    got = ds.plan.mean("time")[["elevation"]].collect()
+    assert_equal(got, ds.mean("time")[["elevation"]])
+
+
+def test_explain_shows_projection_pushdown(ds):
+    text = ds.plan.mean("time")[["temperature"]].explain()
+    assert text.index("temperature") < text.index("mean")
 
 
 def test_explain_shows_optimised_plan(ds):
