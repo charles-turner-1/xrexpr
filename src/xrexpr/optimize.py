@@ -39,9 +39,18 @@ from collections.abc import Callable, Hashable, Mapping
 from typing import TypeGuard
 
 from frozendict import frozendict
+from typing_extensions import assert_never
 
 from xrexpr.exceptions import InvalidExpressionError
-from xrexpr.indexers import ForwardSlice, GeneralSlice, Indexer, Positions, Scalar
+from xrexpr.indexers import (
+    ForwardSlice,
+    GeneralSlice,
+    Indexer,
+    Label,
+    Mask,
+    Positions,
+    Scalar,
+)
 from xrexpr.ir import Op, Opaque, Project, Rechunk, Reduce, Select
 from xrexpr.schema import SchemaState, apply_schema
 
@@ -227,14 +236,23 @@ def _compose_indexer(outer: Indexer, inner: Indexer) -> Indexer | None:
     Every other ``outer`` yields ``None``: a ``GeneralSlice`` (negative/reversed bounds
     index from the end, needing the length), a ``Mask`` or ``Label`` (no positional
     arithmetic), and a ``Scalar`` (drops the dim, so ``inner`` cannot apply at all).
+
+    Those four are spelled out rather than caught by a wildcard, and ``assert_never`` closes
+    the match: this is the *policy* site — which shapes the optimiser is willing to prove a
+    composition for — so a seventh :data:`~xrexpr.indexers.Indexer` variant should fail
+    type-check here until someone decides which side of that line it falls on, rather than
+    defaulting to "uncomposable" unnoticed. The same discipline ``apply_schema`` uses over
+    ``Op``.
     """
     match outer:
         case Positions(values=values):
             return _index_sequence(values, inner)
         case ForwardSlice():
             return _compose_slice(outer, inner)
-        case _:
+        case Scalar() | GeneralSlice() | Mask() | Label():
             return None
+        case _:
+            assert_never(outer)
 
 
 def _index_sequence(positions: tuple[int, ...], inner: Indexer) -> Indexer | None:
