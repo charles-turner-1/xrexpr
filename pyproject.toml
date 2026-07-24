@@ -141,6 +141,9 @@ known-first-party = ["xrexpr"]
 
 [tool.pytest.ini_options]
 asyncio_default_fixture_loop_scope = "function"
+# Hypothesis's own end-of-run report: per-property example counts, how many were
+# discarded by ``assume``, and how long generation took.
+addopts = "--hypothesis-show-statistics"
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
