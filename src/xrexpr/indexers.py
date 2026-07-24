@@ -53,6 +53,17 @@ class Scalar:
     value: Any
     drops_dim: ClassVar[bool] = True
 
+    @property
+    def position(self) -> int | None:
+        """The integer position this scalar selects, or ``None`` if it is a coordinate label.
+
+        The one question the composer asks of a scalar — ``isel(time=3)`` composes
+        arithmetically, ``sel(time="2020")`` cannot — so it lives here rather than being
+        re-decided by ``isinstance`` at each composition site, the same way
+        :attr:`drops_dim` replaced ``ir.py``'s hand-rolled scalar test.
+        """
+        return self.value if _is_int(self.value) else None
+
     def size(self, current: int) -> int:
         raise AssertionError("a scalar indexer drops its dim; its size is undefined")
 
@@ -177,6 +188,18 @@ def _is_int(x: Any) -> bool:
     return isinstance(x, numbers.Integral) and not isinstance(x, bool)
 
 
+def _scalar(value: Any) -> Scalar:
+    """Build a :class:`Scalar`, narrowing an integer position to plain ``int``.
+
+    The same normalisation :class:`Positions` and :class:`ForwardSlice` already apply, for the
+    same two reasons: an ``np.int64`` position must compare equal to the ``int`` spelling of
+    the same selection (golden plan assertions, and plan equality in general), and a variant
+    holding a numpy *array* is unhashable — which would silently make the enclosing ``Select``
+    unhashable too. Labels pass through untouched: they are open by nature (§3.2).
+    """
+    return Scalar(int(value) if _is_int(value) else value)
+
+
 def _is_forward(s: slice) -> bool:
     """Whether ``s`` steps forward from non-negative integer bounds (no dim length needed)."""
     if s.step is not None and (not _is_int(s.step) or s.step < 1):
@@ -209,10 +232,10 @@ def classify(value: Any) -> Indexer:
     if isinstance(value, slice):
         return _classify_slice(value)
     if isinstance(value, np.ndarray):
-        if value.ndim == 0:
-            return Scalar(
-                value
-            )  # a 0-d array indexes like the bare value: drops the dim
+        if value.ndim == 0:  # a 0-d array indexes like the bare value: drops the dim
+            return _scalar(
+                value.item() if np.issubdtype(value.dtype, np.integer) else value
+            )
         if value.dtype == bool:
             return Mask(value)
         if np.issubdtype(value.dtype, np.integer):
@@ -224,4 +247,4 @@ def classify(value: Any) -> Indexer:
         if all(_is_int(x) for x in value):  # pure-bool already handled above
             return Positions(tuple(int(x) for x in value))
         return Label(value)  # a label sequence, or a mixed one
-    return Scalar(value)  # anything else drops its dim
+    return _scalar(value)  # anything else drops its dim

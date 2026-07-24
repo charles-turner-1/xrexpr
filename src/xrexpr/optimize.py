@@ -36,12 +36,12 @@ inside it.
 """
 
 from collections.abc import Callable, Hashable, Mapping
-from typing import Any, TypeGuard
+from typing import TypeGuard
 
-import numpy as np
 from frozendict import frozendict
 
 from xrexpr.exceptions import InvalidExpressionError
+from xrexpr.indexers import ForwardSlice, GeneralSlice, Indexer, Positions, Scalar
 from xrexpr.ir import Op, Opaque, Project, Rechunk, Reduce, Select
 from xrexpr.schema import SchemaState, apply_schema
 
@@ -157,7 +157,7 @@ def merge_adjacent_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
             out.append(
                 Select(
                     name=node.name,
-                    args=(dict(indexer),),
+                    args=({dim: v.to_raw() for dim, v in indexer.items()},),
                     indexer=frozendict(indexer),
                 )
             )
@@ -180,9 +180,9 @@ def _mergeable_select(node: Op) -> TypeGuard[Select]:
 
 def _compose_into(
     name: str,
-    outer: dict[Hashable, Any],
-    inner: Mapping[Hashable, Any],
-) -> dict[Hashable, Any] | None:
+    outer: dict[Hashable, Indexer],
+    inner: Mapping[Hashable, Indexer],
+) -> dict[Hashable, Indexer] | None:
     """Merge ``inner``'s indexers into ``outer``'s, composing where dims collide.
 
     A dim in only one of the two carries over untouched. A dim in **both** is the case
@@ -206,106 +206,94 @@ def _compose_into(
             merged[dim] = index
             continue
         composed = _compose_indexer(merged[dim], index)
-        if composed is _UNCOMPOSABLE:
+        if composed is None:  # no statically provable composition — end the run
             return None
         merged[dim] = composed
     return merged
 
 
-#: Sentinel for "these two indexers have no statically-known composition" — distinct
-#: from ``None``, which is itself a legitimate slice bound.
-_UNCOMPOSABLE: Any = object()
-
-
-def _compose_indexer(outer: Any, inner: Any) -> Any:
+def _compose_indexer(outer: Indexer, inner: Indexer) -> Indexer | None:
     """Compose two positional indexers applied to the same dim, ``outer`` then ``inner``.
 
-    Returns the single equivalent indexer, or :data:`_UNCOMPOSABLE` when no composition
-    is provable without the dim's length (which the optimiser doesn't carry). Handled:
+    Returns the single equivalent :data:`~xrexpr.indexers.Indexer`, or ``None`` when no
+    composition is provable without the dim's length (which the optimiser doesn't carry).
+    Only two ``outer`` shapes compose:
 
-    - **sequence then anything** — ``outer`` is a concrete list of positions, so the
+    - **:class:`~xrexpr.indexers.Positions`** — a concrete list of positions, so the
       answer is just indexing it: ``[10, 20, 30]`` then ``1`` is ``20``.
-    - **forward slice then forward slice / non-negative scalar** — arithmetic on the
-      bounds, e.g. ``slice(100, 1000)`` then ``slice(10, 20)`` → ``slice(110, 120)``.
+    - **:class:`~xrexpr.indexers.ForwardSlice`** — arithmetic on the bounds, e.g.
+      ``slice(100, 1000)`` then ``slice(10, 20)`` → ``slice(110, 120)``.
 
-    Deliberately *not* handled (all yield :data:`_UNCOMPOSABLE`): negative starts, stops
-    or steps, which index from the end and so need the length; boolean masks; and a
-    scalar ``outer``, which drops the dim entirely so that ``inner`` cannot be replayed
-    against it at all.
+    Every other ``outer`` yields ``None``: a ``GeneralSlice`` (negative/reversed bounds
+    index from the end, needing the length), a ``Mask`` or ``Label`` (no positional
+    arithmetic), and a ``Scalar`` (drops the dim, so ``inner`` cannot apply at all).
     """
-    if isinstance(outer, np.ndarray) and outer.dtype != bool:
-        outer = outer.tolist()
-    if isinstance(outer, list | tuple) and all(isinstance(x, int) for x in outer):
-        return _index_sequence(list(outer), inner)
-    if isinstance(outer, slice):
-        return _compose_slice(outer, inner)
-    return _UNCOMPOSABLE
+    match outer:
+        case Positions(values=values):
+            return _index_sequence(values, inner)
+        case ForwardSlice():
+            return _compose_slice(outer, inner)
+        case _:
+            return None
 
 
-def _index_sequence(positions: list[int], inner: Any) -> Any:
-    """Apply ``inner`` to a concrete list of positions, i.e. ``positions[inner]``.
+def _index_sequence(positions: tuple[int, ...], inner: Indexer) -> Indexer | None:
+    """Apply ``inner`` to a concrete tuple of positions, i.e. ``positions[inner]``.
 
     Exact by construction — the outer selection is already fully enumerated, so there
     is nothing to reason about. An out-of-range ``inner`` would raise here; that is
-    reported as uncomposable so the error surfaces from xarray at replay, in its own
-    words, rather than from the optimiser.
+    reported as uncomposable (``None``) so the error surfaces from xarray at replay, in
+    its own words, rather than from the optimiser.
     """
+    seq = list(positions)
     try:
-        if isinstance(inner, slice):
-            return positions[inner]
-        if isinstance(inner, int) and not isinstance(inner, bool):
-            return positions[inner]
-        if isinstance(inner, list | tuple) and all(isinstance(x, int) for x in inner):
-            return [positions[i] for i in inner]
+        match inner:
+            case Scalar() as s if s.position is not None:
+                return Scalar(seq[s.position])
+            case ForwardSlice() | GeneralSlice() as s:
+                # ``seq`` is already concrete, so a reversed/negative slice is fine here.
+                return Positions(tuple(seq[s.to_raw()]))
+            case Positions(values=idx):
+                return Positions(tuple(seq[i] for i in idx))
+            case _:
+                return None
     except IndexError:
-        return _UNCOMPOSABLE
-    return _UNCOMPOSABLE
+        return None
 
 
-def _compose_slice(outer: slice, inner: Any) -> Any:
+def _compose_slice(outer: ForwardSlice, inner: Indexer) -> Indexer | None:
     """Compose a forward, non-negative ``outer`` slice with ``inner``.
 
     Element ``k`` of the result is ``outer_start + (inner_start + k * inner_step) *
     outer_step``, which is itself an arithmetic progression — so a slice composed with a
     slice is a slice, and with a scalar is a scalar. The stop bound is the *tighter* of
     the two constraints: ``inner`` cannot run past its own stop, nor past the end of
-    what ``outer`` produced.
+    what ``outer`` produced. ``outer`` needs no forward-check — it is a
+    :class:`~xrexpr.indexers.ForwardSlice`, forward by construction.
     """
-    if not _is_forward_slice(outer):
-        return _UNCOMPOSABLE
     start, step = outer.start or 0, outer.step or 1
 
-    if isinstance(inner, int) and not isinstance(inner, bool):
-        if inner < 0:
-            return _UNCOMPOSABLE
-        position = start + inner * step
-        # Out of ``outer``'s range: xarray raises, but the composed scalar might well
-        # be a valid position in the full dim, which would silently return data instead.
-        if outer.stop is not None and position >= outer.stop:
-            return _UNCOMPOSABLE
-        return position
+    match inner:
+        case Scalar() as s if s.position is not None and s.position >= 0:
+            position = start + s.position * step
+            # Out of ``outer``'s range: xarray raises, but the composed scalar might well
+            # be a valid position in the full dim, which would silently return data instead.
+            if outer.stop is not None and position >= outer.stop:
+                return None
+            return Scalar(position)
 
-    if isinstance(inner, slice) and _is_forward_slice(inner):
-        inner_start, inner_step = inner.start or 0, inner.step or 1
-        candidates = (outer.stop, _scaled_stop(inner.stop, start, step))
-        stops = [s for s in candidates if s is not None]
-        return slice(
-            start + inner_start * step,
-            min(stops) if stops else None,
-            step * inner_step,
-        )
-    return _UNCOMPOSABLE
+        case ForwardSlice(start=inner_start, stop=inner_stop, step=inner_step):
+            inner_start, inner_step = inner_start or 0, inner_step or 1
+            candidates = (outer.stop, _scaled_stop(inner_stop, start, step))
+            stops = [s for s in candidates if s is not None]
+            return ForwardSlice(
+                start + inner_start * step,
+                min(stops) if stops else None,
+                step * inner_step,
+            )
 
-
-def _is_forward_slice(s: slice) -> bool:
-    """Whether ``s`` steps forward from non-negative bounds, so it needs no dim length.
-
-    A negative bound or step counts from the end of the dim, which the optimiser cannot
-    resolve without knowing how long the dim is.
-    """
-    if s.step is not None and (not isinstance(s.step, int) or s.step < 1):
-        return False
-    return all(b is None or (isinstance(b, int) and b >= 0) for b in (s.start, s.stop))
+        case _:
+            return None
 
 
 def _scaled_stop(inner_stop: int | None, start: int, step: int) -> int | None:
