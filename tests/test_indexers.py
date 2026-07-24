@@ -282,11 +282,24 @@ def _isel_value(draw, n):
 
 
 @st.composite
+def _concrete_outer(draw, n):
+    """An ``isel`` value whose selected positions are knowable without the dim length.
+
+    ``Positions`` and ``Mask`` both enumerate their selection outright — one as indices, the
+    other as flags — so neither needs to know how long the dim is. That is the exact property
+    the composer requires, which is why these two must *always* compose.
+    """
+    if draw(st.booleans()):
+        return draw(st.lists(_positions(0, n - 1), min_size=1, max_size=n))
+    return np.array(draw(st.lists(st.booleans(), min_size=n, max_size=n)))
+
+
+@st.composite
 def _composable_outer(draw, n):
-    """An ``isel`` value the composer actually handles as *outer*: a forward slice or positions."""
+    """An ``isel`` value the composer handles as *outer*: a forward slice, or a concrete one."""
     if draw(st.booleans()):
         return _forward_slice(draw, n)
-    return draw(st.lists(_positions(0, n - 1), min_size=1, max_size=n))
+    return draw(_concrete_outer(n))
 
 
 @st.composite
@@ -302,6 +315,16 @@ def _same_dim_pair(draw):
     outer = draw(_composable_outer(n))
     m = int(_da(n).isel(x=outer).sizes["x"])
     assume(m > 0)  # nothing legal to index into an emptied dim
+    return n, outer, draw(_isel_value(m))
+
+
+@st.composite
+def _concrete_pair(draw):
+    """Like :func:`_same_dim_pair`, but ``outer`` is one of the two fully concrete shapes."""
+    n = draw(st.integers(1, 8))
+    outer = draw(_concrete_outer(n))
+    m = int(_da(n).isel(x=outer).sizes["x"])
+    assume(m > 0)
     return n, outer, draw(_isel_value(m))
 
 
@@ -417,5 +440,33 @@ def test_composed_indexer_replays_like_sequential_isel(case):
     n, outer, inner = case
     composed = _compose_indexer(classify(outer), classify(inner))
     assume(composed is not None)
+    da = _da(n)
+    assert_equal(da.isel(x=composed.to_raw()), da.isel(x=outer).isel(x=inner))
+
+
+@_SETTINGS
+@given(_concrete_pair())
+def test_a_concrete_outer_always_composes(case):
+    """A refusal is a *failure* here, not something to ``assume`` away.
+
+    The property above can only check compositions that happen: its ``assume`` discards
+    every refusal, so an indexer the optimiser *could* merge but doesn't is invisible to it —
+    the plan stays correct, just larger, and nothing says so. That blind spot has now cost
+    twice: it hid a numpy-scalar bug, and it hid the three missed compositions this commit
+    adds.
+
+    This closes it for the case where refusal is never justified. ``Positions`` and ``Mask``
+    both enumerate their selection outright, so ``outer``'s positions are known without the
+    dim length — the one thing the composer lacks. Given a chain that replays at all, there
+    is therefore nothing left to prove and no honest reason to decline, whatever ``inner``
+    turns out to be.
+    """
+    n, outer, inner = case
+    composed = _compose_indexer(classify(outer), classify(inner))
+
+    assert composed is not None, (
+        f"refused {classify(outer)} then {classify(inner)}, but a concrete outer leaves "
+        "nothing to prove — this is a missed merge, not an uncomposable pair"
+    )
     da = _da(n)
     assert_equal(da.isel(x=composed.to_raw()), da.isel(x=outer).isel(x=inner))

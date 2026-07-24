@@ -35,7 +35,7 @@ the schema each node sees. :func:`~xrexpr.schema.apply_schema` models
 inside it.
 """
 
-from collections.abc import Callable, Hashable, Mapping
+from collections.abc import Callable, Hashable, Iterable, Mapping
 from typing import TypeGuard
 
 from frozendict import frozendict
@@ -226,18 +226,22 @@ def _compose_indexer(outer: Indexer, inner: Indexer) -> Indexer | None:
 
     Returns the single equivalent :data:`~xrexpr.indexers.Indexer`, or ``None`` when no
     composition is provable without the dim's length (which the optimiser doesn't carry).
-    Only two ``outer`` shapes compose:
+    The dividing line is whether ``outer``'s selected positions are knowable *without* that
+    length, which three shapes satisfy:
 
-    - **:class:`~xrexpr.indexers.Positions`** — a concrete list of positions, so the
-      answer is just indexing it: ``[10, 20, 30]`` then ``1`` is ``20``.
+    - **:class:`~xrexpr.indexers.Positions`** — already a concrete list, so the answer is
+      just indexing it: ``[10, 20, 30]`` then ``1`` is ``20``.
+    - **:class:`~xrexpr.indexers.Mask`** — the same thing spelled differently; the kept
+      positions are the indices of its ``True`` flags.
     - **:class:`~xrexpr.indexers.ForwardSlice`** — arithmetic on the bounds, e.g.
       ``slice(100, 1000)`` then ``slice(10, 20)`` → ``slice(110, 120)``.
 
-    Every other ``outer`` yields ``None``: a ``GeneralSlice`` (negative/reversed bounds
-    index from the end, needing the length), a ``Mask`` or ``Label`` (no positional
-    arithmetic), and a ``Scalar`` (drops the dim, so ``inner`` cannot apply at all).
+    The rest yield ``None`` for reasons that are *not* interchangeable: a ``GeneralSlice``
+    has negative or reversed bounds that count from an end the composer cannot locate; a
+    ``Label`` is not positional at all (§3.2); and a ``Scalar`` drops the dim outright, so
+    ``inner`` has nothing left to apply to.
 
-    Those four are spelled out rather than caught by a wildcard, and ``assert_never`` closes
+    Those three are spelled out rather than caught by a wildcard, and ``assert_never`` closes
     the match: this is the *policy* site — which shapes the optimiser is willing to prove a
     composition for — so a seventh :data:`~xrexpr.indexers.Indexer` variant should fail
     type-check here until someone decides which side of that line it falls on, rather than
@@ -247,9 +251,16 @@ def _compose_indexer(outer: Indexer, inner: Indexer) -> Indexer | None:
     match outer:
         case Positions(values=values):
             return _index_sequence(values, inner)
+        case Mask(values=flags):
+            # A mask is a position enumeration written differently: the elements it keeps
+            # are ``[k for k, flag in enumerate(flags) if flag]``, known without the dim
+            # length. So it composes exactly as ``Positions`` does, via the same helper.
+            return _index_sequence(
+                tuple(k for k, flag in enumerate(flags) if flag), inner
+            )
         case ForwardSlice():
             return _compose_slice(outer, inner)
-        case Scalar() | GeneralSlice() | Mask() | Label():
+        case Scalar() | GeneralSlice() | Label():
             return None
         case _:
             assert_never(outer)
@@ -273,6 +284,14 @@ def _index_sequence(positions: tuple[int, ...], inner: Indexer) -> Indexer | Non
                 return Positions(tuple(seq[s.to_raw()]))
             case Positions(values=idx):
                 return Positions(tuple(seq[i] for i in idx))
+            case Mask(values=flags):
+                # Both sides are concrete, so this is the same exactness as the arm above.
+                # A length mismatch is not ours to diagnose: xarray requires a boolean mask
+                # to match the dim it indexes, so a wrong length would raise at replay —
+                # refuse, and let it say so.
+                if len(flags) != len(seq):
+                    return None
+                return Positions(tuple(p for p, keep in zip(seq, flags) if keep))
             case _:
                 return None
     except IndexError:
@@ -310,8 +329,54 @@ def _compose_slice(outer: ForwardSlice, inner: Indexer) -> Indexer | None:
                 step * inner_step,
             )
 
+        case Positions(values=idx):
+            # ``outer`` is an arithmetic progression, so its element ``k`` sits at
+            # ``start + k * step`` — the ``Scalar`` arm's arithmetic, mapped over ``idx``.
+            # A *negative* entry counts back from the end of what ``outer`` produced, which
+            # is the length the composer does not carry, so it disqualifies the whole merge.
+            if any(k < 0 for k in idx):
+                return None
+            return _mapped_positions(outer, start, step, addressed=idx, kept=idx)
+
+        case Mask(values=flags):
+            # Sound because of a fact xarray enforces rather than one the composer carries:
+            # a boolean mask must be exactly as long as the dim it indexes, so ``len(flags)``
+            # *is* how many elements ``outer`` produced — the very length the optimiser
+            # otherwise refuses to guess. That makes the positions computable without knowing
+            # the dim size, which is precisely what ``GeneralSlice`` cannot offer.
+            return _mapped_positions(
+                outer,
+                start,
+                step,
+                addressed=range(len(flags)),
+                kept=[k for k, keep in enumerate(flags) if keep],
+            )
+
         case _:
             return None
+
+
+def _mapped_positions(
+    outer: ForwardSlice,
+    start: int,
+    step: int,
+    addressed: Iterable[int],
+    kept: Iterable[int],
+) -> Positions | None:
+    """Map ``inner``'s element indices onto ``outer``'s positions, or refuse.
+
+    ``addressed`` is every element of ``outer`` that ``inner`` reads; ``kept`` is the subset
+    it actually selects (they differ only for a mask). The check runs over *addressed*
+    because it is the same trap the ``Scalar`` arm guards: reaching past ``outer``'s stop
+    made the original two-step chain raise, but the composed position is often still valid
+    in the full dim and would quietly return data instead. Reading is what raises, so
+    reading is what has to be in range — whether or not the element is then kept.
+    """
+    if outer.stop is not None and any(
+        start + k * step >= outer.stop for k in addressed
+    ):
+        return None
+    return Positions(tuple(start + k * step for k in kept))
 
 
 def _scaled_stop(inner_stop: int | None, start: int, step: int) -> int | None:
