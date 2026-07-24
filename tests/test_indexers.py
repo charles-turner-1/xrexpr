@@ -24,6 +24,7 @@ from typing import get_args
 import numpy as np
 import pytest
 import xarray as xr
+from frozendict import frozendict
 from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 from xarray.testing import assert_equal
@@ -39,6 +40,7 @@ from xrexpr.indexers import (
     _is_int,
     classify,
 )
+from xrexpr.ir import Select
 from xrexpr.optimize import _compose_indexer
 
 # --- classify: each raw shape lands in exactly one variant --------------------------------
@@ -130,6 +132,37 @@ def test_numpy_bool_list_still_classifies_as_mask():
     # the counterweight to the three above: ``np.bool_`` is *not* ``numbers.Integral``, and
     # Python ``bool`` is explicitly excluded, so widening to integers must not swallow masks
     assert isinstance(classify([np.True_, np.False_]), Mask)
+
+
+# --- Mask: normalised so the node containing it stays comparable --------------------------
+
+
+def test_mask_normalises_every_spelling_to_one_value():
+    # array, list and numpy-bool list are the same selection, so they must be the same value --
+    # otherwise a plan's identity depends on how the user happened to write the mask
+    expected = Mask((True, False, True))
+    assert classify(np.array([True, False, True])) == expected
+    assert classify([True, False, True]) == expected
+    assert classify([np.True_, np.False_, np.True_]) == expected
+
+
+def test_mask_bearing_node_compares_and_hashes():
+    # The reason this variant is normalised at all. Held verbatim, ``Mask(arr) == Mask(arr)``
+    # returns an *array*, so the enclosing Select raised ``ValueError: truth value ...
+    # ambiguous`` rather than answering -- and plan equality is real: test_properties.py's
+    # idempotence property asserts ``optimize(once) == once``.
+    mask = np.array([True, False, True])
+    nodes = [
+        Select(name="isel", indexer=frozendict({"x": classify(mask)})) for _ in range(2)
+    ]
+    assert nodes[0] == nodes[1]
+    assert len({*nodes}) == 1
+
+
+def test_multidimensional_bool_array_is_not_a_mask():
+    # xarray rejects a higher-rank boolean array as a single-dim indexer, so no valid plan
+    # contains one -- it is Label (the can't-reason-about-it variant), not a flattened Mask
+    assert isinstance(classify(np.array([[True, False], [True, False]])), Label)
 
 
 # --- drops_dim: only a scalar removes its dim ---------------------------------------------
@@ -296,10 +329,9 @@ def test_drops_dim_matches_whether_isel_removes_the_dim(case):
 @_SETTINGS
 @given(_sized_value())
 def test_classify_to_raw_round_trips_to_the_same_variant(case):
-    """``classify`` is stable across a ``to_raw`` round trip (masks compare by identity, skip)."""
+    """``classify`` is stable across a ``to_raw`` round trip — every variant, masks included."""
     _, value = case
     indexer = classify(value)
-    assume(not isinstance(indexer, Mask))  # ndarray-backed, so ``==`` is ill-defined
     assert classify(indexer.to_raw()) == indexer
 
 

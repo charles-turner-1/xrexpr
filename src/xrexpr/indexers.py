@@ -134,18 +134,27 @@ class Positions:
 
 @dataclass(frozen=True)
 class Mask:
-    """A boolean mask (``isel(time=[True, False, ...])`` or a bool array) — sizes by True count."""
+    """A boolean mask (``isel(time=[True, False, ...])`` or a bool array) — sizes by True count.
 
-    values: Any
+    Stored as a ``tuple`` for the same reason :class:`Positions` is, and it matters more here.
+    Held verbatim, an ndarray-backed mask makes the *node containing it* compare and hash
+    wrongly: ``Mask(arr) == Mask(arr)`` returns an array rather than a bool, so
+    ``Select(...) == Select(...)`` raises ``ValueError: truth value ... is ambiguous`` instead of
+    answering. Plan equality is a real operation (the idempotence property in
+    ``test_properties.py`` asserts it), so a variant that breaks it is a landmine, not a
+    curiosity.
+    """
+
+    values: tuple[bool, ...]
     drops_dim: ClassVar[bool] = False
 
     def size(self, current: int) -> int:
-        if isinstance(self.values, np.ndarray):
-            return int(self.values.sum())
-        return int(sum(bool(x) for x in self.values))
+        return sum(self.values)
 
-    def to_raw(self) -> Any:
-        return self.values
+    def to_raw(self) -> list[bool]:
+        # a ``list``, not the stored tuple: xarray rejects a tuple indexer outright
+        # (``Could not convert tuple of form (dims, data[, ...])``). Same as ``Positions``.
+        return list(self.values)
 
 
 @dataclass(frozen=True)
@@ -237,13 +246,20 @@ def classify(value: Any) -> Indexer:
                 value.item() if np.issubdtype(value.dtype, np.integer) else value
             )
         if value.dtype == bool:
-            return Mask(value)
+            # Only a 1-d mask is a mask. xarray rejects a higher-rank boolean array as a
+            # single-dim indexer outright ("Unlabeled multi-dimensional array cannot be used
+            # for indexing"), so there is no valid plan containing one — it goes to ``Label``,
+            # the variant for values the optimiser cannot reason about, and the error still
+            # surfaces from xarray at replay in its own words.
+            if value.ndim != 1:
+                return Label(value)
+            return Mask(tuple(bool(x) for x in value.tolist()))
         if np.issubdtype(value.dtype, np.integer):
             return Positions(tuple(int(x) for x in value.tolist()))
         return Label(value)
     if isinstance(value, (list | tuple)):
         if value and all(isinstance(x, (bool | np.bool_)) for x in value):
-            return Mask(value)
+            return Mask(tuple(bool(x) for x in value))
         if all(_is_int(x) for x in value):  # pure-bool already handled above
             return Positions(tuple(int(x) for x in value))
         return Label(value)  # a label sequence, or a mixed one
