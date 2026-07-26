@@ -28,9 +28,12 @@ Three gaps, in decreasing order of urgency:
 
 1. **A live correctness gap: grouped ops.** `groupby`/`resample`/`rolling`/`coarsen`/
    `weighted` record as `Opaque`, but the *next* call (`.mean()`) records as a
-   Dataset-level `Reduce` (`accessor.py:127-133`), so `pushdown_selects` can silently
-   reorder a select behind a groupby. Documented as "do not chain", but it fails
-   silently rather than loudly.
+   Dataset-level `Reduce` (`accessor.py:127-133`), so `pushdown_selects` reorders
+   valid chains — the swap is silent, though replay then fails loudly (verified
+   2026-07: builder objects have no `isel`, so the misordered replay raises
+   `AttributeError` rather than returning wrong data; see
+   [`01-grouped-barrier.md`](./01-grouped-barrier.md)). Documented as "do not chain",
+   but valid chains crash with baffling errors rather than being refused.
 2. **The chunk-spec half of the value sum type** (`structural-dispatch-2.md` §3) is
    still `Any`: `Rechunk.chunks: frozendict[Hashable, Any]` (`ir.py:174`) and the
    `isinstance` ladder in `_pushable_rechunk` (`optimize.py:486`) — the last one in the
@@ -58,13 +61,13 @@ Three gaps, in decreasing order of urgency:
 ### Revision (2026-07, after the IR-architecture discussion)
 
 Decisions 1 and 3 stand. **Decision 2's implementation is reversed**, and the roadmap
-re-folded, by [`08-lowering.md`](./08-lowering.md).
+re-folded, by [`02-lowering.md`](./02-lowering.md).
 
-The root cause of the grouped-op problem is narrower than W5 assumed: `to_opnode`
+The root cause of the grouped-op problem is narrower than W9 assumed: `to_opnode`
 (`schema.py:163`) is a *per-call* function, and xarray spells some single semantic
 operations as two calls via builder objects (`DatasetGroupBy`, `DatasetRolling`,
 `DatasetWeighted`). No per-call function can model those. W1 works around it with a
-downstream barrier; W5 worked around it with a stateful recorder.
+downstream barrier; W9 worked around it with a stateful recorder.
 
 A **lowering stage** between recording and optimisation has lookahead over the finished
 plan and removes the constraint instead. The pipeline gains two pure stages:
@@ -76,56 +79,60 @@ xarray calls → to_opnode → fluent IR → to_lower_ir → lowered IR → opti
 The fluent IR is kept as-is — where the fluent API is one-to-one with semantics
 (`ds.mean()` really is a `Reduce`), the recorded IR is already right. Lowering's only job
 is fusing the builder chains into flat semantic nodes (`GroupedReduce`, `WindowedReduce`,
-`WeightedReduce`) and owning the single schema fold. W5's `Contextual(inner: Op)` sub-plan
+`WeightedReduce`) and owning the single schema fold. W9's `Contextual(inner: Op)` sub-plan
 shape is rejected; the tree stays deferred where `ir.py:21-24` left it, rather than being
 approached obliquely through grouped ops.
 
 ## The workstreams
 
+The numbering is the reading order: workstreams are numbered by phase (below), so the
+files read linearly — the keystone right after the safety fix, the superseded memo last
+as an appendix.
+
 | # | spec | what | size |
 |---|---|---|---|
 | W1 | [`01-grouped-barrier.md`](./01-grouped-barrier.md) | opaque-context barrier for accessor-returning ops (correctness) | ~50 LOC, 1 PR |
-| W2 | [`02-chunk-taxonomy.md`](./02-chunk-taxonomy.md) | the chunk-spec value sum type — closes doc 2 §3 | 1–2 PRs |
-| W3 | [`03-elementwise.md`](./03-elementwise.md) | reintroduce `Elementwise` + selects/projections cross it | 2–3 PRs |
-| W4 | [`04-scan-dims.md`](./04-scan-dims.md) | `Scan` gains its dims + scan-aware select pushdown | 1 PR |
-| ~~W5~~ | [`05-grouped-contexts.md`](./05-grouped-contexts.md) | **superseded by W8**; kept for the record, §4 moved to W9 | — |
-| W6 | [`06-small-wins.md`](./06-small-wins.md) | independent small rules & cleanups, pick up between workstreams | ~1 PR each |
-| W7 | [`07-rust-gate.md`](./07-rust-gate.md) | the Rust gate conditions and the PyO3 spike spec | timeboxed spike |
-| W8 | [`08-lowering.md`](./08-lowering.md) | the lowering stage + the three fused builder nodes (design memo) | memo + 8 PRs |
-| W9 | [`09-schema-sizes.md`](./09-schema-sizes.md) | `SchemaState` sizes → `int \| None` (salvaged from W5 §4) | 1 PR |
+| W2 | [`02-lowering.md`](./02-lowering.md) | the lowering stage + the three fused builder nodes (design memo) | memo + 8 PRs |
+| W3 | [`03-schema-sizes.md`](./03-schema-sizes.md) | `SchemaState` sizes → `int \| None` (salvaged from W9 §4) | 1 PR |
+| W4 | [`04-chunk-taxonomy.md`](./04-chunk-taxonomy.md) | the chunk-spec value sum type — closes doc 2 §3 | 1–2 PRs |
+| W5 | [`05-elementwise.md`](./05-elementwise.md) | reintroduce `Elementwise` + selects/projections cross it | 2–3 PRs |
+| W6 | [`06-scan-dims.md`](./06-scan-dims.md) | `Scan` gains its dims + scan-aware select pushdown | 1 PR |
+| W7 | [`07-small-wins.md`](./07-small-wins.md) | independent small rules & cleanups, pick up between workstreams | ~1 PR each |
+| W8 | [`08-rust-gate.md`](./08-rust-gate.md) | the Rust gate conditions and the PyO3 spike spec | timeboxed spike |
+| ~~W9~~ | [`09-grouped-contexts.md`](./09-grouped-contexts.md) | **superseded by W2**; kept for the record, §4 moved to W3 | — |
 
 ## Sequencing
 
 Shown as phases rather than a flat order, because the dependency structure is the
 honest thing to show: only phase 1 blocks anything.
 
-- **Phase 0 — correctness now.** W1. Unchanged and still first: ~50 LOC against a
-  *silently* wrong reorder, while W8 is a multi-PR refactor. W8 later reuses its
+- **Phase 0 — correctness now.** W1. Unchanged and still first: ~50 LOC against wrong
+  reorders of valid chains, while W2 is a multi-PR refactor. W2 later reuses its
   `_CONTEXT_METHODS` table and retires its trailing barrier.
-- **Phase 1 — the keystone.** W8 PRs 1–2 (`AllDims`, then `to_lower_ir`/`emit` and the
+- **Phase 1 — the keystone.** W2 PRs 1–2 (`AllDims`, then `to_lower_ir`/`emit` and the
   pipeline rewiring). Behaviour-identical, no user-visible payoff, and blocks all of
   phase 2 — build a fused node before this lands and you build it twice.
-- **Phase 2 — what lowering unlocks.** W9, then W8 PRs 3–8: `GroupedReduce`,
+- **Phase 2 — what lowering unlocks.** W3, then W2 PRs 3–8: `GroupedReduce`,
   `WindowedReduce`, `WeightedReduce`, their pushdown rules, and `explain()` moving to the
   lowered plan.
-- **Phase 3 — independent, any order.** W2, W3, W4, W6. Each sharpens the structure the
+- **Phase 3 — independent, any order.** W4, W5, W6, W7. Each sharpens the structure the
   optimiser reasons over and none depends on lowering; they slot in opportunistically,
   including alongside phase 1.
 - **Phase 4 — gated.** The weighted pushdown rule and data-touching rewrites generally
-  (W8 §8.1); the dim-effect unification (W8 §11); the Rust spike (W7).
+  (W2 §8.1); the dim-effect unification (W2 §11); the Rust spike (W8).
 
 ## The Rust position, restated
 
 `structural-dispatch-2.md` §7 named three triggers for the port: a second consumer of
 the IR, a contributor to own the Rust, or the value-and-schema layers modelled to the
-point where the port is a transliteration. The third is one workstream (W2) from being
+point where the port is a transliteration. The third is one workstream (W4) from being
 met **for today's IR** — but the IR is about to gain a level. Porting the optimiser
 before lowering lands means porting against a plan shape that is not the one the rules
 will finally see.
 
 The gate is therefore unchanged in spirit and re-pointed in fact: it now opens after
-**W2 and W8 phase 1**, not after W5. Lowering also *improves* the port surface it gates
-on — with `emit` owning payload reconstruction (W8 §7), rules touch semantic fields only,
+**W4 and W2 phase 1**, not after W9. Lowering also *improves* the port surface it gates
+on — with `emit` owning payload reconstruction (W2 §7), rules touch semantic fields only,
 which is exactly the clean seam `structural-dispatch-2.md` §5 sets as the precondition.
 The structural work is the payoff either way: each workstream above improves the
 optimisations we can apply whether or not any Rust is ever written.

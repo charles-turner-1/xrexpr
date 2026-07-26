@@ -1,4 +1,4 @@
-# W6 — Small independent wins
+# W7 — Small independent wins
 
 Each item is self-contained, sized at roughly one small PR, and can be picked up
 between the numbered workstreams. Ordered by value. Each spec here is deliberately
@@ -24,12 +24,12 @@ later-wins (`{**r1.chunks, **r2.chunks}`). Fire only when **both** nodes pass
 `_pushable_rechunk` (`optimize.py:486`) *and* both are pure mapping-form (empty
 positional `args`) — a uniform positional spec (`chunk(100)`) rechunks every dim and
 does not compose by dict union. Rebuild `args` from the merged mapping the way
-`pushdown_selects_past_rechunks` does (`optimize.py:471-479`). Do after W2 so the
+`pushdown_selects_past_rechunks` does (`optimize.py:471-479`). Do after W4 so the
 values are `ChunkSpec`s.
 
 ## 3. `pushdown_projections` across `Scan` and `Rechunk`
 
-Two new arms in the `match crossed` (`optimize.py:413-419`), after W4 gives `Scan`
+Two new arms in the `match crossed` (`optimize.py:413-419`), after W6 gives `Scan`
 its dims:
 
 - `case Scan(dims=dims): needed = dims` — a scan is per-variable, so projecting first
@@ -48,11 +48,11 @@ Goldens plus equality-vs-eager per arm.
 ## 4. Symbolic `AllCurrentDims` for bare reduces
 
 > **Promoted out of small-wins** (2026-07) — this is now **PR 1 of
-> [`08-lowering.md`](./08-lowering.md)** (see its §6). Lowering gives the same change a
+> [`02-lowering.md`](./02-lowering.md)** (see its §6). Lowering gives the same change a
 > second, independent motivation: deferring the bare-reduce expansion is the *mechanism*
 > by which `to_opnode` becomes schema-free, which is what lets `to_lower_ir` own the
 > single schema fold. The spec below is unchanged and is what should be implemented; only
-> its priority and its "do after W4" sequencing note have moved. Keep the sentinel
+> its priority and its "do after W6" sequencing note have moved. Keep the sentinel
 > spelling rather than a bare `None` — `None` already means *don't know* in this codebase
 > (`var_dims`, `schema.py:72-84`), whereas this means something definite.
 
@@ -73,9 +73,9 @@ sites: `_reduce_dims` (returns the sentinel for the bare case), `pushdown_select
 (any select intersects `AllDims` → the raise leg, which is always right: after an
 all-dims reduce nothing is left to select), `pushdown_projections` (`needed = AllDims`
 resolves against the entering folded schema, inside the trusted prefix where it *is*
-exact), `apply_schema`'s `Reduce` arm (`AllDims` → clear all dims). W4's `Scan.dims`
+exact), `apply_schema`'s `Reduce` arm (`AllDims` → clear all dims). W6's `Scan.dims`
 should adopt the same type. This is design-note grade — model it on the derived-
-property discipline and write a short paragraph in `ir.py`'s docstring. Do after W4
+property discipline and write a short paragraph in `ir.py`'s docstring. Do after W6
 so both kinds convert together.
 
 ## 5. Register `.plan` for `DataArray`
@@ -106,7 +106,7 @@ Pick one and write down which: **narrow the claim** in `ir.py`'s docstrings to
 payload hash-safe**, for which `indexers.Mask` (`indexers.py:135`) is the precedent — it
 stores booleans as a tuple precisely so the enclosing `Select` stays comparable, since an
 ndarray would make `==` return an array. Worth closing before
-[`08-lowering.md`](./08-lowering.md) PR 5, which introduces a *modelled* node
+[`02-lowering.md`](./02-lowering.md) PR 5, which introduces a *modelled* node
 (`WeightedReduce`) that routinely carries weights.
 
 ## 7. Property-suite widening schedule
@@ -117,12 +117,12 @@ PR that lands the feature, or immediately after:
 
 | after | widen |
 |---|---|
-| W2 | add `chunk` calls (mapping and uniform forms) to generated chains |
-| W3 | add elementwise ops with scalar args |
-| W4 | add `cumsum`/`cumprod`/`diff` |
-| W8 phase 1 | assert `emit(to_lower_ir(p))` replays equal to eager, and that `to_lower_ir` is idempotent, over the existing generated chains |
-| W9 | assert rewrites survive unknown dim sizes |
-| W8 PRs 3–5 | add `groupby`/`resample`/`rolling`/`coarsen`/`weighted` builder chains |
+| W4 | add `chunk` calls (mapping and uniform forms) to generated chains |
+| W5 | add elementwise ops with scalar args |
+| W6 | add `cumsum`/`cumprod`/`diff` |
+| W2 phase 1 | assert `emit(to_lower_ir(p))` replays equal to eager, and that `to_lower_ir` is idempotent, over the existing generated chains |
+| W3 | assert rewrites survive unknown dim sizes |
+| W2 PRs 3–5 | add `groupby`/`resample`/`rolling`/`coarsen`/`weighted` builder chains |
 
 One narrowing has no workstream and should get one: `.reduce` is excluded
 (`test_properties.py:28-30`) because its first positional argument is a *function*, which

@@ -1,9 +1,9 @@
-# W9 — `SchemaState` sizes become `int | None`
+# W3 — `SchemaState` sizes become `int | None`
 
-*(Salvaged intact from [`05-grouped-contexts.md`](./05-grouped-contexts.md) §4, which is
-otherwise superseded by [`08-lowering.md`](./08-lowering.md). The sub-design survives the
+*(Salvaged intact from [`09-grouped-contexts.md`](./09-grouped-contexts.md) §4, which is
+otherwise superseded by [`02-lowering.md`](./02-lowering.md). The sub-design survives the
 change of surrounding architecture unaltered — it was always about the schema layer, not
-about how grouped ops get recorded. It **gates `GroupedReduce`** (`08` PR 3).)*
+about how grouped ops get recorded. It **gates `GroupedReduce`** (`02` PR 3).)*
 
 **Goal:** give `SchemaState` a way to say *I don't know this dim's size*, so that a fused
 grouped reduce can mint a dim whose extent isn't statically evident without the schema
@@ -26,7 +26,7 @@ reads `.sizes`/`.coords`/`.dims` (`schema.py:58-70`); reading `ds.indexes[dim]` 
 same class of metadata access, and the no-materialisation promise in `schema.py`'s module
 docstring survives it.
 
-So, resolved during lowering (`08` §3), where the schema fold lives:
+So, resolved during lowering (`02` §3), where the schema fold lives:
 
 - `groupby("time.month")` → `new_dim="month"`, size
   `len(np.unique(ds.indexes["time"].month))`.
@@ -35,7 +35,7 @@ So, resolved during lowering (`08` §3), where the schema fold lives:
   count isn't statically evident → **size unknown**.
 
 `WindowedReduce` needs the same escape hatch: `coarsen`'s output size depends on the
-`boundary` kwarg (`08` §5.2), and the cases that aren't statically resolvable should mark
+`boundary` kwarg (`02` §5.2), and the cases that aren't statically resolvable should mark
 the size unknown rather than guess.
 
 ## 3. The change
@@ -66,7 +66,7 @@ silently coerce:
   dim that exists.
 
 No optimiser rule consults sizes today — every rule reasons about dim *names* — which is
-what makes this PR self-contained and why the headline rewrites in `08` §8 survive unknown
+what makes this PR self-contained and why the headline rewrites in `02` §8 survive unknown
 sizes untouched. That deserves an explicit property test rather than being left as a
 remark.
 
@@ -80,7 +80,7 @@ remark.
    mode the `var_dims` docstring warns about.
 4. **Rewrites survive unknown sizes.** A property test: plans whose schema carries an
    unknown dim size still optimise to the same result as eager evaluation. This is the
-   test that lets `08`'s select/projection rules be trusted post-`GroupedReduce`.
+   test that lets `02`'s select/projection rules be trusted post-`GroupedReduce`.
 5. The existing `xfail(strict=True)` on
    `test_sel_label_slice_size_is_tracked_correctly` (`test_properties.py:342`) should be
    revisited in this PR — an integer-labelled `sel` slice currently under-reports its

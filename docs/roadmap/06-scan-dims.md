@@ -1,4 +1,4 @@
-# W4 — `Scan` grows its dims; scan-aware select pushdown
+# W6 — `Scan` grows its dims; scan-aware select pushdown
 
 **Goal:** deliver the metadata `Scan`'s own docstring promises ("its scanned-dim
 metadata arrives with the first scan-aware rule", `ir.py:112-113`) and the rule that
@@ -9,11 +9,11 @@ barrier — even though `isel(lat=0)` is trivially safe to move in front.
 **Size:** 1 PR.
 
 > **Unaffected in substance by the lowering re-fold** (2026-07,
-> [`08-lowering.md`](./08-lowering.md)). Scans are single-call ops needing no fusion; this
+> [`02-lowering.md`](./02-lowering.md)). Scans are single-call ops needing no fusion; this
 > is lowered-IR node work and independent of lowering in either order. One convergence to
-> watch: `08` PR 1 promotes [`06-small-wins.md`](./06-small-wins.md) §4's `AllDims`
+> watch: `02` PR 1 promotes [`07-small-wins.md`](./07-small-wins.md) §4's `AllDims`
 > sentinel for bare reduces, and §4 already asks that `Scan.dims` adopt the same type. If
-> `08` PR 1 lands first, resolve `dims` to `AllDims` for a bare `cumsum()` here rather
+> `02` PR 1 lands first, resolve `dims` to `AllDims` for a bare `cumsum()` here rather
 > than expanding it against the record-time schema — which is also the shared `_dim_spec`
 > helper this memo introduces, so it is one change in one place.
 

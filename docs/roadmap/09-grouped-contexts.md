@@ -1,22 +1,22 @@
-# W5 — Grouped and windowed contexts: the first sub-plan variant
+# W9 — Grouped and windowed contexts: the first sub-plan variant
 
-> **SUPERSEDED (2026-07) by [`08-lowering.md`](./08-lowering.md).** The problem this memo
+> **SUPERSEDED (2026-07) by [`02-lowering.md`](./02-lowering.md).** The problem this memo
 > attacks is real and its statement of it stands; its *solution* does not. A lowering
 > stage between recording and optimisation gives the pass lookahead over the whole plan,
 > which removes the constraint this memo works around with a stateful `_ContextProxy`
-> recorder. Three specific reversals, argued in `08`:
+> recorder. Three specific reversals, argued in `02`:
 >
 > - **The `Contextual(inner: Op)` sub-plan shape is rejected** in favour of flat semantic
->   nodes (`08` §5.4). A context wrapping a call is a fact about how xarray *spells* a
+>   nodes (`02` §5.4). A context wrapping a call is a fact about how xarray *spells* a
 >   grouped reduction, not what one *is*.
 > - **§6's claim that `weighted` "composes with a reduce" rather than closing its context
 >   is factually wrong.** `DatasetWeighted.mean("time")` returns a `Dataset` with `time`
 >   gone, exactly like `groupby` and `rolling`. `weighted` is in scope as a node from the
->   start; only its pushdown *rule* is deferred, and for an unrelated reason (`08` §8.1).
+>   start; only its pushdown *rule* is deferred, and for an unrelated reason (`02` §8.1).
 > - **§2's scoping of `rolling`/`coarsen` as too hard is also wrong.** Rolling keeps its
->   dim at the same size, which makes its dim algebra *simpler* than groupby's (`08` §5.2).
+>   dim at the same size, which makes its dim algebra *simpler* than groupby's (`02` §5.2).
 >
-> **§4 survives intact** and has moved to [`09-schema-sizes.md`](./09-schema-sizes.md) as
+> **§4 survives intact** and has moved to [`03-schema-sizes.md`](./03-schema-sizes.md) as
 > its own workstream. The text below is kept for the record; do not implement from it.
 
 *(A design memo in the tradition of `structural-dispatch.md` — this settles a shape,
@@ -132,7 +132,7 @@ The W1 barrier is *replaced for the modelled names* and kept for the rest:
 ## 4. Schema: what `apply_schema` may know post-group
 
 > *This section survives the supersession and has moved to
-> [`09-schema-sizes.md`](./09-schema-sizes.md). Implement from there.*
+> [`03-schema-sizes.md`](./03-schema-sizes.md). Implement from there.*
 
 The hard question. `groupby("time.month").mean()` removes `time` and mints `month`
 with **size = number of distinct groups** — knowable only from coordinate *values*.
@@ -184,7 +184,7 @@ keeping the eventual FFI seam clean (`structural-dispatch-2.md` §5).
   stay barriered. Each needs its own memo section when its turn comes (rolling keeps
   its dim like a scan; coarsen divides sizes; weighted composes with a reduce).
 
-  > **Incorrect — see [`08-lowering.md`](./08-lowering.md) §5.2–§5.3.** "Weighted composes
+  > **Incorrect — see [`02-lowering.md`](./02-lowering.md) §5.2–§5.3.** "Weighted composes
   > with a reduce" is simply not true: `DatasetWeighted` closes after one call like every
   > other builder object. And rolling keeping its dim makes it *easier* to model than
   > groupby, not harder. All three are in scope from the start under lowering.

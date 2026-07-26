@@ -1,4 +1,4 @@
-# W2 — The chunk-spec value sum type
+# W4 — The chunk-spec value sum type
 
 **Goal:** finish `structural-dispatch-2.md` §3. The indexer half of the value sum type
 shipped in #66–#71; the chunk half is still `Any`: `Rechunk.chunks:

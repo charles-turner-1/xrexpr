@@ -1,8 +1,8 @@
-# W8 — A lowering stage: fuse the builder chains, then optimise
+# W2 — A lowering stage: fuse the builder chains, then optimise
 
 *(A design memo in the tradition of `structural-dispatch.md` — this settles a shape,
 records the reasoning, and ends with a staged PR plan. It should be reviewed before any
-implementation starts. It **supersedes [`05-grouped-contexts.md`](./05-grouped-contexts.md)**
+implementation starts. It **supersedes [`09-grouped-contexts.md`](./09-grouped-contexts.md)**
 and reshapes the sequencing in [`00-assessment.md`](./00-assessment.md). Origin: the
 compiler-architecture discussion in [`../xrexpr_ir_discussion.md`](../xrexpr_ir_discussion.md)
 and [`../xrexpr_ir_discussion_expanded.md`](../xrexpr_ir_discussion_expanded.md).)*
@@ -30,7 +30,7 @@ dissected in [`01-grouped-barrier.md`](./01-grouped-barrier.md), whose silent fa
 
 Both prior answers work *around* the constraint rather than removing it. W1 installs a
 downstream barrier: once a context op is seen, everything after it records as `Opaque`
-forever. W5 proposed a stateful `_ContextProxy` recorder plus a sub-plan-carrying
+forever. W9 proposed a stateful `_ContextProxy` recorder plus a sub-plan-carrying
 `Contextual` node, so that the recorder could hold the context open across two calls.
 
 A pass that runs over the *finished* plan has the lookahead neither of them has. That is
@@ -58,10 +58,10 @@ new pass is a few dozen lines of pattern matching rather than a rewrite of the f
 ```
 xarray calls
     ↓  record          (accessor.py)
-    ↓  to_opnode       (schema.py)      — unchanged
-fluent IR   [Op]
+    ↓  to_opnode       (schema.py)      — gains one arm: typed context openers (§5.5)
+fluent IR   [FluentOp]  =  [Op | ContextOpen]
     ↓  to_lower_ir                      — NEW: fuse builder chains, fold the schema
-lowered IR  [LoweredOp]
+lowered IR  [LoweredOp]  =  [Op | GroupedReduce | WindowedReduce | WeightedReduce]
     ↓  optimize        (optimize.py)    — rules now see fused nodes
 lowered IR  [LoweredOp]
     ↓  emit                             — NEW: back to a call sequence
@@ -97,7 +97,7 @@ Both halves are property-testable, and the second is the direct analogue of the 
 ## 5. The three fusion nodes
 
 One node per builder kind, each flat: semantic fields the rules match on, plus the
-verbatim payload `emit` replays. No node carries another node — the sub-plan shape W5
+verbatim payload `emit` replays. No node carries another node — the sub-plan shape W9
 proposed is rejected in §5.4.
 
 ### 5.1 `GroupedReduce`
@@ -114,7 +114,19 @@ class GroupedReduce:
 ```
 
 `groupby("time.month")` → `group_dim="time"`, `new_dim="month"`. `resample(time="2D")` →
-both `"time"`. A grouped `mean("lat")` also puts `lat` in `consumes`.
+both `"time"`.
+
+**Corrected in review (2026-07, verified against xarray 2026.7.0):** a grouped reduce
+over dims that *exclude* the group dim is not an aggregation at all. With monthly `time`
+and `lat`, `ds.groupby("time.month").mean("lat")` returns dims `{time: 12}` — `lat`
+consumed, `time` **kept**, no `month` minted: a per-group *map*, reassembled along the
+original dim. Only when the closing spec is bare, or names the group dim
+(`mean()`, `mean("time")`, `mean(["time", "lat"])` — all verified to mint `month`), does
+the group-aggregation shape above apply. So the fusion rule (§5.5) fuses **only the
+aggregation case**; the map case falls to the opaque fallback in v1. (A later
+canonicalisation could lower the map case to a plain `Reduce` — grouping partitions the
+group dim, so reducing other dims per group and reassembling is the plain reduction —
+but that equivalence deserves its own legality note, not a v1 assumption.)
 
 ### 5.2 `WindowedReduce`
 
@@ -125,7 +137,7 @@ both `"time"`. A grouped `mean("lat")` also puts `lat` in `consumes`.
 ```
 
 No `new_dim`: rolling **keeps** its dim at the same size (which makes its dim algebra
-simpler than groupby's, not harder — W5 had this backwards); coarsen **divides** it by the
+simpler than groupby's, not harder — W9 had this backwards); coarsen **divides** it by the
 window, with the `boundary` kwarg deciding the rounding. Spell the size effect out per
 kind in `apply_schema`'s arm, and note that coarsen's size depends on a kwarg, so the
 `boundary="exact"`/`"trim"`/`"pad"` cases must be handled or the size marked unknown.
@@ -154,16 +166,16 @@ So §7.4's rule widens: **a variant is earned by data the optimiser must reason 
 by a rewrite it must be kept away from.** The second clause is new, and `WeightedReduce`
 is its first instance.
 
-### 5.4 Why not W5's `Contextual(inner: Op)`
+### 5.4 Why not W9's `Contextual(inner: Op)`
 
-W5 proposed one variant carrying the context call plus a nested inner `Op`, on the grounds
+W9 proposed one variant carrying the context call plus a nested inner `Op`, on the grounds
 that it was the IR's first sub-plan node and a deliberate step toward the eventual tree.
 Rejected, for three reasons:
 
 - **It preserves a surface fact.** "A context wrapping a call" is how *xarray spells*
   a grouped reduction, not what one *is*. Lowering exists to discard exactly that kind of
   fact; carrying it into the lowered IR is the pass declining to do its job.
-- **It makes rules match through a level.** W5's own projection rule reads
+- **It makes rules match through a level.** W9's own projection rule reads
   `case Contextual(inner=Reduce()) as ctx` — every rule touching a grouped node inherits a
   nested pattern and a "what if the inner isn't a Reduce" branch. Flat fields cost nothing
   and read directly.
@@ -172,7 +184,90 @@ Rejected, for three reasons:
   a sub-plan over the *same* input, which is a different thing; it buys no head start on
   the container promotion `ir.py:21-24` defers.
 
-## 6. The one field that must change — and W6 already specified it
+### 5.5 The fusion input, pinned: a typed opener (revised in review, 2026-07)
+
+The memo originally left implicit what the *fluent* IR of a builder chain looks like —
+and PR 3's match pattern depends on it. **Pinned: the opener gets its own fluent-level
+variant, and fusion is a typed composition rule.** A context-opening call is per-call
+decidable — `groupby(...)` is an opener no matter what follows — so `to_opnode` *can*
+type it without violating its per-call constraint:
+
+```python
+@dataclass(frozen=True)
+class ContextOpen:
+    """A builder-returning call (fluent IR only; must not survive lowering)."""
+
+    name: Literal["groupby", "groupby_bins", "resample", "rolling",
+                  "rolling_exp", "coarsen", "weighted", "cumulative"]
+    args: tuple[Any, ...] = ()
+    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+```
+
+One variant, not one per builder: the openers carry identical structure (a verbatim
+header plus the kind tag), and per-builder differentiation belongs to the *fused* nodes —
+five opener variants would each add an empty arm at every `assert_never` site for no
+matching structural data (§7.4's own test). The two IR levels then become **two union
+aliases over shared dataclasses**:
+
+```python
+FluentOp  = Op | ContextOpen
+LoweredOp = Op | GroupedReduce | WindowedReduce | WeightedReduce
+```
+
+which is the payoff of typing the opener: `optimize` takes `list[LoweredOp]`, so *a
+surviving `ContextOpen` is a mypy error, not a convention* — the lowering invariant is
+enforced at the type level, the house exhaustiveness discipline extended across IR
+levels. (`ir.py` still keeps one set of dataclasses; §2's claim stands.)
+
+**The closer records through `to_opnode`, provisionally.** `.mean()` after a `groupby`
+records as `Reduce("mean", consumes=AllDims)` — but fusion treats that node as a
+*parse* (a name plus a parsed dim spec), never as Dataset semantics: the pair is fused
+before `AllDims` resolution ever sees it (§6), and the fused node's schema arm supplies
+the real grouped meaning. This reuses `to_opnode`'s argument parsing instead of
+re-implementing `_dim_spec` inside the lowering pass. Untabulated closers
+(`first`/`last`/`.map(f)`) record `Opaque` as they always did.
+
+The fusion rules are then ordinary typed matches, with a **mandatory fallback that
+closes the type**:
+
+- `(ContextOpen("groupby" | "groupby_bins" | "resample"), Reduce)` → `GroupedReduce`,
+  **only when** the reduce's dim spec is bare (`AllDims`) or names the group dim — the
+  aggregation case; the within-group map case (§5.1's correction) does not fuse in v1;
+- `(ContextOpen("rolling" | "coarsen"), Reduce)` → `WindowedReduce`; and
+  `(ContextOpen("weighted"), Reduce)` → `WeightedReduce`, same treatment;
+- **fallback:** any `ContextOpen` not consumed by a fusion rule is demoted to
+  `Opaque(name, args, kwargs)` *together with its following node* — the pair replays
+  verbatim, exactly W1's behaviour. This is what makes the closer's provisional typing
+  safe: a closer that records under a wrong kind (or an unknown one) simply fails to
+  match and the pair goes opaque — **pessimisation, never wrongness**. It also
+  sequences the PRs cleanly: PR 3 types every opener but adds only the groupby-family
+  rule, so rolling/coarsen/weighted pairs hit the fallback and behave exactly as under
+  W1 until PRs 4–5 add their rules.
+
+**Contexts are pairs, not runs (verified against xarray 2026.7.0).** There is no
+builder→builder middle call to skip: `DatasetGroupBy.__getitem__` selects a *group*
+(`gb[1]` → the matching Dataset subset — it closes the context; it has not selected a
+variable since the API changed), and Rolling/Coarsen/Weighted raise `TypeError` on
+`__getitem__`. So the recorder's in-context test is one line — `self._ops and
+isinstance(self._ops[-1], ContextOpen)` — and fusion matches adjacent pairs only. Two
+consequences: an in-context `__getitem__` must still bypass `_projected_names` (a
+hashable key would classify as `Project`, but `gb[1]` is group selection, not
+projection — record `Opaque`, as W1 §3 already specified); and if a future xarray
+reintroduces variable selection on builders, it surfaces as an unfusable closer → the
+fallback → verbatim replay, correct by construction. Hoisting such a middle projection
+out of the context would be a genuine rewrite with a legality condition (the grouper
+must survive the projection), not something lowering may ignore — future work, noted
+here so it is a decision rather than drift.
+
+**Grouper scope, v1: strings only.** Fuse when the grouper names a dim
+(`groupby("lat")`) or a component of a dim coordinate (`groupby("time.month")`), from
+which `group_dim` reads off directly. Any other grouper — a `DataArray`
+(`ds.groupby(da)`), a non-dim coordinate name, a `Grouper` object — has no single
+`group_dim` and falls to the fallback in v1; the `DataArray` case also trips the
+unhashable-payload wart ([`07-small-wins.md`](./07-small-wins.md) §6), which staying
+unfused sidesteps for `groupby` entirely.
+
+## 6. The one field that must change — and W7 already specified it
 
 For lowering to own semantic resolution it must own the **schema fold**, and today there
 are two: `_record` folds `apply_schema` forward as it records (`accessor.py:96`), and
@@ -189,14 +284,20 @@ Eager expansion is also actively wrong once a builder chain is in play, because 
 
 ```python
 ds.plan.groupby("time.month").mean().mean()
-#                             |      ^ resolved against a schema with no dims left
-#                             ^ records consumes={time, lat, lon}; apply_schema pops all three
+#                             |      ^ under eager expansion: resolved against a stale fold
+#                             |        that still says {time, lat, lon} when the truth is
+#                             |        {month, lat, lon}
+#                             ^ the closer — records Reduce(consumes=AllDims), but that
+#                               typing is provisional (§5.5): fusion consumes the pair
+#                               before AllDims resolution ever reads it
 ```
 
-Lowering cannot repair the second `mean()`, because by then `consumes=frozenset()` is
-indistinguishable from an explicit `mean(dim=[])`. The information is gone.
+Lowering cannot repair the second `mean()`, because an eagerly-expanded
+`consumes={time, lat, lon}` is indistinguishable from an explicit
+`mean(dim=["time", "lat", "lon"])`. The information — *this was a bare `mean()`* — is
+gone.
 
-**[`06-small-wins.md`](./06-small-wins.md) §4 already specifies the fix** — a symbolic
+**[`07-small-wins.md`](./07-small-wins.md) §4 already specifies the fix** — a symbolic
 `consumes: frozenset[Hashable] | AllDims`, where `AllDims` is a singleton sentinel meaning
 "every dim at this point, whatever they are" — and it arrived at it from an entirely
 independent motivation (the `rename` trust-boundary bug, where record-time expansion
@@ -235,7 +336,9 @@ small-wins**: under lowering it is not an optional sharpening but the mechanism 
   `structural-dispatch-2.md` §5 sets for any eventual port.
 
 The round-trip is a property test: for any recorded plan, `emit(to_lower_ir(p))` replays
-equal to eager, and for a plan containing no builder chain it is `p` node-for-node.
+equal to eager, and for a plan containing no builder chain the emitted calls are exactly
+`p`'s call headers, node-for-node (`emit` returns `[Call]`, not `[Op]`, so the equality
+is between call headers, not nodes).
 
 ## 8. The rewrites this unlocks
 
@@ -273,8 +376,8 @@ weighted reduce are modelled again instead of barriered.
 ## 9. What this retires from W1
 
 [`01-grouped-barrier.md`](./01-grouped-barrier.md) should still land first, unchanged: it
-is ~50 LOC against a silent wrongness, and lowering is a multi-PR refactor. But lowering
-retires half of it.
+is ~50 LOC against wrong reorders of valid chains, and lowering is a multi-PR refactor.
+But lowering retires half of it.
 
 W1's `_CONTEXT_METHODS` table is **reused** — lowering needs the same list of builder
 methods, and the recorder still needs it to route attribute lookups for objects that are
@@ -296,13 +399,19 @@ closes the context and returns a Dataset just as `mean` does.
   `GroupedReduce` gets built twice.
 - **Unknown group counts still need `int | None` sizes.**
   `groupby("time.month").mean()` mints a dim whose size comes from coordinate *values*.
-  That sub-design is salvaged intact from W5 §4 into
-  [`09-schema-sizes.md`](./09-schema-sizes.md) and gates `GroupedReduce`.
+  That sub-design is salvaged intact from W9 §4 into
+  [`03-schema-sizes.md`](./03-schema-sizes.md) and gates `GroupedReduce`.
 - **The weighted pushdown rule is deferred** (§8.1), as is anything else needing a
   data-touching rewrite.
 - **The tree is still not here.** Nothing above touches binary ops
   (`merge`/`concat`/`ds1 + ds2`); the container is still a list and the deferral at
   `ir.py:21-24` still stands. This memo deliberately declines to spend that budget.
+  Named specifically because it is the case this project's audience will hit first:
+  **grouped arithmetic** — `ds.groupby("time.month") - clim`, the anomaly idiom — is a
+  *binary* op on the builder itself. The proxy cannot even record it today (it defines
+  no arithmetic dunders), no flat fusion node can express it, and it lands with the
+  container promotion, not with lowering. (It is also a second, independent argument
+  for §5.4's rejection: `Contextual(inner: Op)` could not have expressed it either.)
 - **An unhashable-payload wart becomes prominent.** `xr.DataArray.__hash__ is None`, so
   `Opaque(name="weighted", args=(w,))` is **already** unhashable today — a latent conflict
   with `ir.py`'s "hashable and safe to share between plans" claim and with
@@ -347,9 +456,14 @@ Every rule in `_RULES` today conflates two questions: *may* these ops commute, a
 *should* they. `pushdown_selects` swaps whenever the dim sets are disjoint, on the
 assumption that selecting earlier is always at least as cheap. That assumption is sound
 for the current vocabulary and should stay — but it is an assumption, not a theorem, and
-lowering makes it more visible: `WindowedReduce` is the first node where pushing a select
-in front changes *which elements a window sees at the boundary* rather than merely how
-much data flows, so its rule needs the legality question answered on its own terms.
+lowering makes it more visible: `WindowedReduce` is the first node where a select pushed
+onto the *windowed* dim would change *which elements a window sees at the boundary*
+rather than merely how much data flows. (Resolved in review, 2026-07: this concern does
+not touch PR 6's rule, which moves only selects on dims **disjoint** from the window
+dims — windows run along their own dims independently at each position of the others,
+`center`/`min_periods` included, so disjoint selects cannot change window membership.
+The boundary question becomes live only if someone later proposes moving an
+*intersecting* select, which the rule as specified leaves.)
 
 The position, unchanged from the discussion: **rules decide legality; a cost model would
 only choose among rewrites that are already legal.** With a vocabulary this small, good
@@ -373,13 +487,16 @@ by hand.
 
 ## 12. Staged PR plan (after this memo is reviewed)
 
-1. **`AllDims` for bare reduces** — [`06-small-wins.md`](./06-small-wins.md) §4, promoted
+1. **`AllDims` for bare reduces** — [`07-small-wins.md`](./07-small-wins.md) §4, promoted
    here. `to_opnode` becomes schema-free; `LazyDatasetProxy` sheds `_schema`.
    Behaviour-identical, and the existing suite is the proof.
 2. **`to_lower_ir` + `emit` + pipeline rewiring, with no new node kinds** — an identity
    lowering. The entire existing suite must stay green unmodified apart from the relocated
    `to_opnode` tests. This is the keystone and the least glamorous PR in the roadmap.
-3. **`GroupedReduce`** + its fusion pattern + `apply_schema` arm. No rules yet; behaviour
+3. **`GroupedReduce`** + the `ContextOpen` opener, the `FluentOp`/`LoweredOp` aliases,
+   the groupby-family fusion rule and the mandatory fallback (§5.5 — every opener is
+   typed here, but rolling/coarsen/weighted pairs hit the fallback until PRs 4–5) +
+   `apply_schema` arm. No rules yet; behaviour
    still matches W1's (verbatim replay), proven by W1's regression suite staying green plus
    new goldens on the lowered shape. This is where `assert_never` forces every dispatch
    site to be visited.
@@ -410,13 +527,13 @@ read adversarially. Three claims carry the weight; if any fails, a good deal of 
 goes with it. Listed with what would actually change the answer, so a reviewer isn't left
 guessing what counts as a refutation.
 
-**1. §5.4's rejection of `Contextual(inner: Op)`.** W5 settled on a sub-plan-carrying node
+**1. §5.4's rejection of `Contextual(inner: Op)`.** W9 settled on a sub-plan-carrying node
 and justified it as a deliberate first step toward the eventual tree (`ir.py:21-24`). This
 memo reverses that, and the load-bearing claim is narrow: **a real n-ary node
 (`merge`/`concat`) carries plans with their own *dataset inputs*, whereas `inner: Op` is a
 sub-plan over the *same* input, so it buys no head start on the container promotion.** If
 that is wrong — if there is a plausible tree design in which `inner: Op` really is the
-first increment — then W5's shape is the better one and §5's three flat nodes should
+first increment — then W9's shape is the better one and §5's three flat nodes should
 become one nested variant. The other two arguments in §5.4 (surface-fact preservation,
 rules matching through a level) are real but would not on their own justify reversing a
 settled decision.
@@ -432,6 +549,14 @@ mechanism to avoid loosening a rule that has served well. I think the widening i
 and the second clause is genuinely principled rather than a carve-out, but it is a
 one-instance generalisation and should be treated as such.
 
+*Review note (2026-07):* there is a reading that keeps §7.4 intact rather than widening
+it — treat the discriminant itself as structural data. "This reduce carries a hidden
+data dependency" is a fact the optimiser must reason about; its reasoning output happens
+to be *don't fire*. On that reading §5.3 is subsumption, not widening. Either framing
+licenses the node; what stays rejected either way is the flag-on-`Reduce` alternative
+(the every-field-on-every-node shape the sum type exists to prevent) and the rule-side
+name check (a shadow table waiting to drift).
+
 **3. §10's cost admission.** PRs 1–2 change **no behaviour at all** and churn a large slice
 of a 2,300-line test suite. Every benefit in this memo arrives in PR 3 or later. If a
 reviewer concludes that cost is not worth paying, the memo falls entirely — and that is
@@ -443,12 +568,19 @@ The second is a legitimate answer, and it is cheap. This memo argues for the fir
 the climatology pushdown in §8 is the canonical case the project exists for, but that is a
 product judgement, not a technical one.
 
+*Review note (2026-07), one fact that tilts the judgement further than the memo
+originally credited:* W1's barrier is not "grouped chains stay unoptimised" — it is
+"**everything downstream of the first builder call** stays unoptimised", because the
+barrier is trailing and permanent. In climate workflows `groupby`/`resample` sit at the
+head of most chains, so the leave-it-forever alternative forfeits optimisation for
+essentially the whole plan, for exactly the project's core audience.
+
 Lower-confidence items, flagged rather than defended: `coarsen`'s size effect depends on a
-`boundary` kwarg and may want to be marked unknown rather than modelled (§5.2); `explain()`
-switching to the lowered plan is a UX call made on thin evidence (PR 8); and §11.2's
-observation that `WindowedReduce` is the first node where a pushed select changes *boundary
-semantics* rather than merely data volume deserves checking against xarray's actual rolling
-behaviour before the rule in PR 6 is written.
+`boundary` kwarg and may want to be marked unknown rather than modelled (§5.2), and
+`explain()` switching to the lowered plan is a UX call made on thin evidence (PR 8). A
+third item originally listed here — whether a pushed select changes `WindowedReduce`'s
+*boundary semantics* — was resolved in review (2026-07): it cannot, for the
+disjoint-dims-only rule PR 6 actually specifies (§11.2).
 
 ---
 

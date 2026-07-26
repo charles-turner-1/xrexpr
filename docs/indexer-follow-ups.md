@@ -7,7 +7,7 @@ differs per item and is **not** what it first looks like, so that is called out 
 Status (2026-07-24): **all merged** — #66, #67, #68, #70 and #71 are on `main`. Items 1
 and 3 are done as described below. **Item 2 (the chunk-spec taxonomy) is the only one
 still open**; it is now specified in full as
-[`roadmap/02-chunk-taxonomy.md`](./roadmap/02-chunk-taxonomy.md) — implement from that
+[`roadmap/04-chunk-taxonomy.md`](./roadmap/04-chunk-taxonomy.md) — implement from that
 spec, not from the sketch below. Original status table kept for the record:
 
 | PR | branch | base | item |

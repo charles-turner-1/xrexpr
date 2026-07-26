@@ -1,4 +1,4 @@
-# W3 — Reintroduce `Elementwise`, with the rules that earn it
+# W5 — Reintroduce `Elementwise`, with the rules that earn it
 
 **Goal:** the single biggest optimisation-coverage win available. Today every
 untabulated op is an `Opaque` barrier, so one `fillna(0)` or `astype("float32")` in a
@@ -14,9 +14,9 @@ that trigger.
 change), (2) the two rule changes + goldens, (3) property-suite widening.
 
 > **Unaffected in substance by the lowering re-fold** (2026-07,
-> [`08-lowering.md`](./08-lowering.md)). `Elementwise` is a single-call op, so it needs no
+> [`02-lowering.md`](./02-lowering.md)). `Elementwise` is a single-call op, so it needs no
 > fusion and stays exactly as specified here — it is lowered-IR node work, and this
-> workstream is independent of lowering in either order. One detail shifts if `08` lands
+> workstream is independent of lowering in either order. One detail shifts if `02` lands
 > first: PR 1's classification becomes a *lowering-time* decision rather than a record-time
 > one, since `to_lower_ir` would then own the schema fold. The `_elementwise_safe` guard
 > and everything downstream of it are unchanged either way.

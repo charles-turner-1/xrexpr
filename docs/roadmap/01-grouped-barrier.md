@@ -3,16 +3,22 @@
 **Goal:** make `ds.plan.groupby(...).mean().isel(...)` (and every chain through
 `resample`/`rolling`/`coarsen`/`weighted`/...) *correct* — replayed verbatim, never
 reordered — without yet modelling grouped semantics. This is the safety fix that
-precedes the structural work in [`08-lowering.md`](./08-lowering.md).
+precedes the structural work in [`02-lowering.md`](./02-lowering.md).
 
 > **Still lands first, and unchanged** (2026-07). The structural work that lifts
-> "unoptimised" is now `08`, not the superseded `05`, but nothing here needs revising:
-> this is ~50 LOC against a *silently* wrong reorder, while `08` is a multi-PR refactor.
-> What `08` later does to it:
+> "unoptimised" is now `02`, not the superseded `09`, but nothing here needs revising:
+> this is ~50 LOC against wrong reorders of valid chains, while `02` is a multi-PR
+> refactor. What `02` later does to it:
 >
 > - **Reuses `_CONTEXT_METHODS` (§1)** — lowering needs the same list of builder methods,
 >   and the recorder still needs it to route attribute lookups on objects that are no
 >   longer Datasets (`DatasetGroupBy.first` doesn't exist on `Dataset`).
+> - **Replaces the name-table context test with a typed opener.** Under `02` §5.5,
+>   `to_opnode` mints a fluent-only `ContextOpen` node for these methods, closers record
+>   through `to_opnode` again (provisionally — fusion reinterprets them), and unfusable
+>   pairs are demoted back to exactly this workstream's `Opaque` shape by a mandatory
+>   fallback. The in-context `__getitem__` demotion (§3) survives as-is: a builder
+>   `__getitem__` selects a *group*, not a variable, so it must never classify `Project`.
 > - **Retires the trailing barrier (§2–§3).** With lookahead over the whole plan, an
 >   unfusable pair needs only *itself* made opaque, not everything downstream. So
 >   `ds.plan.groupby("lat").first().mean("time")` gets its `mean` modelled correctly —
@@ -20,7 +26,7 @@ precedes the structural work in [`08-lowering.md`](./08-lowering.md).
 >   returns a Dataset just as `mean` does.
 >
 > The residual limitation this memo asks to be written into the docstring ("correct but
-> never optimised") should point at [`08-lowering.md`](./08-lowering.md).
+> never optimised") should point at [`02-lowering.md`](./02-lowering.md).
 
 **Size:** ~50 LOC in `src/xrexpr/accessor.py` plus tests. One PR.
 
@@ -42,10 +48,18 @@ resolves against the *Dataset* schema, not the group. Both failure modes of
 - `.isel(lat=0)` appended: `lat` intersects that bogus `consumes`, so a perfectly
   valid eager chain **raises** `InvalidExpressionError`;
 - `.isel(month=0)` appended: `month` is disjoint from it, so the select **silently
-  swaps** behind the reduce, replaying `ds.groupby(...).isel(month=0).mean()` — wrong
-  order, wrong (or erroring) result.
+  swaps** behind the reduce, replaying `ds.groupby(...).isel(month=0).mean()`. The swap
+  is visible in `explain()`; replay then fails **loudly** — `getattr` looks `isel` up on
+  the `DatasetGroupBy`, which has no such attribute. (Verified 2026-07: `AttributeError`,
+  not wrong data. No builder object exposes `isel`/`sel`, and projection pushdown is
+  fenced by `_trusted_prefix`, so a silently-wrong replay appears unreachable today —
+  though nothing *guards* that; it is a fact about xarray's current API surface.)
 
-The second mode is silent; that is what makes it urgent.
+Both modes are therefore loud-but-baffling failures on **valid** chains, not silent
+wrong data. (The genuinely silent member of this bug family is the stale-rename
+divergence in [`07-small-wins.md`](./07-small-wins.md) §4 — fixed by `AllDims`,
+`02-lowering.md` PR 1, not by this workstream.) What keeps W1 first is cost, not
+silence: ~50 LOC turns both failure modes into correct verbatim replay.
 
 ## Design
 
@@ -130,7 +144,7 @@ passthrough and replays the chain exactly as written — GroupBy methods include
 State the residual limitation in the docstring: chains through a context are now
 **correct but never optimised**. Update the known-limitation paragraph at
 `accessor.py:127-133` to say exactly that (and point at
-`docs/roadmap/08-lowering.md` for the modelling that lifts it).
+`docs/roadmap/02-lowering.md` for the modelling that lifts it).
 
 ## Tests (`tests/test_accessor.py`)
 
