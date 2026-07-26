@@ -13,6 +13,14 @@ that trigger.
 **Size:** 2–3 PRs — (1) table + variant + record-time classification (no behaviour
 change), (2) the two rule changes + goldens, (3) property-suite widening.
 
+> **Unaffected in substance by the lowering re-fold** (2026-07,
+> [`08-lowering.md`](./08-lowering.md)). `Elementwise` is a single-call op, so it needs no
+> fusion and stays exactly as specified here — it is lowered-IR node work, and this
+> workstream is independent of lowering in either order. One detail shifts if `08` lands
+> first: PR 1's classification becomes a *lowering-time* decision rather than a record-time
+> one, since `to_lower_ir` would then own the schema fold. The `_elementwise_safe` guard
+> and everything downstream of it are unchanged either way.
+
 ## PR 1 — the variant and its guard
 
 ### `operations.py`

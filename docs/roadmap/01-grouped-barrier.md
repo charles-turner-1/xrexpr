@@ -3,7 +3,24 @@
 **Goal:** make `ds.plan.groupby(...).mean().isel(...)` (and every chain through
 `resample`/`rolling`/`coarsen`/`weighted`/...) *correct* — replayed verbatim, never
 reordered — without yet modelling grouped semantics. This is the safety fix that
-precedes the structural work in [`05-grouped-contexts.md`](./05-grouped-contexts.md).
+precedes the structural work in [`08-lowering.md`](./08-lowering.md).
+
+> **Still lands first, and unchanged** (2026-07). The structural work that lifts
+> "unoptimised" is now `08`, not the superseded `05`, but nothing here needs revising:
+> this is ~50 LOC against a *silently* wrong reorder, while `08` is a multi-PR refactor.
+> What `08` later does to it:
+>
+> - **Reuses `_CONTEXT_METHODS` (§1)** — lowering needs the same list of builder methods,
+>   and the recorder still needs it to route attribute lookups on objects that are no
+>   longer Datasets (`DatasetGroupBy.first` doesn't exist on `Dataset`).
+> - **Retires the trailing barrier (§2–§3).** With lookahead over the whole plan, an
+>   unfusable pair needs only *itself* made opaque, not everything downstream. So
+>   `ds.plan.groupby("lat").first().mean("time")` gets its `mean` modelled correctly —
+>   a chain this workstream barriers permanently, since `first` closes the context and
+>   returns a Dataset just as `mean` does.
+>
+> The residual limitation this memo asks to be written into the docstring ("correct but
+> never optimised") should point at [`08-lowering.md`](./08-lowering.md).
 
 **Size:** ~50 LOC in `src/xrexpr/accessor.py` plus tests. One PR.
 
@@ -113,7 +130,7 @@ passthrough and replays the chain exactly as written — GroupBy methods include
 State the residual limitation in the docstring: chains through a context are now
 **correct but never optimised**. Update the known-limitation paragraph at
 `accessor.py:127-133` to say exactly that (and point at
-`docs/roadmap/05-grouped-contexts.md` for the modelling that lifts it).
+`docs/roadmap/08-lowering.md` for the modelling that lifts it).
 
 ## Tests (`tests/test_accessor.py`)
 

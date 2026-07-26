@@ -47,6 +47,15 @@ Goldens plus equality-vs-eager per arm.
 
 ## 4. Symbolic `AllCurrentDims` for bare reduces
 
+> **Promoted out of small-wins** (2026-07) — this is now **PR 1 of
+> [`08-lowering.md`](./08-lowering.md)** (see its §6). Lowering gives the same change a
+> second, independent motivation: deferring the bare-reduce expansion is the *mechanism*
+> by which `to_opnode` becomes schema-free, which is what lets `to_lower_ir` own the
+> single schema fold. The spec below is unchanged and is what should be implemented; only
+> its priority and its "do after W4" sequencing note have moved. Keep the sentinel
+> spelling rather than a bare `None` — `None` already means *don't know* in this codebase
+> (`var_dims`, `schema.py:72-84`), whereas this means something definite.
+
 **The bug it fixes:** `_reduce_dims` resolves a bare `mean()` to "every dim in the
 schema right now" (`schema.py:255-267`), but past the first `Opaque` the schema is a
 guess (`optimize.py:108-118`) — `apply_schema` models `Opaque` as dim-preserving,
@@ -82,7 +91,25 @@ DataArray proxy should record `__getitem__` as `Opaque` (or the accessor gets a 
 the record path consults). Accessor-equality tests over the README-style chains on a
 `DataArray`.
 
-## 6. Property-suite widening schedule
+## 6. Nodes carrying arrays are not hashable
+
+`ir.py`'s variants all promise to be "hashable and safe to share between plans", and
+`test_ir.py` asserts it — but `xr.DataArray.__hash__ is None`, so
+`Opaque(name="weighted", args=(w,))` raises `TypeError` on `hash()` today. Any op whose
+payload holds a `DataArray` is affected: `weighted(w)`, a boolean-mask `__getitem__`, a
+`where(cond)`. Latent, because nothing in the package currently hashes a node — but the
+invariant is written down and untrue, and the hashability tests evidently never exercise
+an array-valued arg.
+
+Pick one and write down which: **narrow the claim** in `ir.py`'s docstrings to
+"hashable when the payload is" and add a test pinning the actual behaviour, or **make the
+payload hash-safe**, for which `indexers.Mask` (`indexers.py:135`) is the precedent — it
+stores booleans as a tuple precisely so the enclosing `Select` stays comparable, since an
+ndarray would make `==` return an array. Worth closing before
+[`08-lowering.md`](./08-lowering.md) PR 5, which introduces a *modelled* node
+(`WeightedReduce`) that routinely carries weights.
+
+## 7. Property-suite widening schedule
 
 `test_properties.py`'s generators are deliberately narrowed
 (`test_properties.py:10-28`); each workstream retires a narrowing — widen in the same
@@ -93,7 +120,14 @@ PR that lands the feature, or immediately after:
 | W2 | add `chunk` calls (mapping and uniform forms) to generated chains |
 | W3 | add elementwise ops with scalar args |
 | W4 | add `cumsum`/`cumprod`/`diff` |
-| W5 | add `groupby(...).reduce` chains; assert rewrites survive unknown sizes |
+| W8 phase 1 | assert `emit(to_lower_ir(p))` replays equal to eager, and that `to_lower_ir` is idempotent, over the existing generated chains |
+| W9 | assert rewrites survive unknown dim sizes |
+| W8 PRs 3–5 | add `groupby`/`resample`/`rolling`/`coarsen`/`weighted` builder chains |
+
+One narrowing has no workstream and should get one: `.reduce` is excluded
+(`test_properties.py:28-30`) because its first positional argument is a *function*, which
+`_reduce_dims` misreads as a dim spec — `operations.py:31` tabulates it as a reduction
+like any other. That is a real latent bug, not just a generator limitation.
 
 The invariant asserted is always the same and is the project's crown jewel:
 `ds.plan.<chain>.collect()` equals the eager chain, for generated datasets and
