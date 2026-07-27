@@ -496,6 +496,24 @@ def test_rolling_closer_that_looks_like_a_dim_spec_still_matches_eager(ds):
     assert_equal(chain.collect(), ds.rolling(time=2).mean("lat"))
 
 
+@pytest.mark.parametrize(
+    "chain",
+    [
+        # an exponential weighting, not a fixed window -- ``window`` cannot describe it
+        lambda o: o.rolling_exp(time=3).mean(),
+        lambda o: o.rolling_exp(time=3).mean().isel(lat=0),
+        # a scan wearing a builder's clothes
+        lambda o: o.cumulative("time").sum(),
+    ],
+)
+def test_deliberately_unfused_openers_still_match_eager(ds, chain):
+    # The other half of a refusal to fuse: it has to *work*. These replay verbatim, so
+    # the pair stays opaque and the ops around it are unaffected.
+    plan = chain(ds.plan)
+    assert [type(n) for n in plan._optimized()[:2]] == [Opaque, Opaque]
+    assert_equal(plan.collect(), chain(ds))
+
+
 def test_ops_after_a_windowed_reduce_are_modelled(ds):
     chain = ds.plan.rolling(time=2).mean().mean("time")
     assert [type(n) for n in chain._optimized()] == [WindowedReduce, Reduce]
