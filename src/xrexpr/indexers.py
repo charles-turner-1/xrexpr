@@ -162,8 +162,14 @@ class Label:
     """A coordinate label, label slice, or label sequence (``sel(time="2020")``) — irreducibly open.
 
     The value-layer counterpart of :class:`~xrexpr.ir.Opaque`: it keeps its dim but the
-    optimiser can't reason about it positionally (no length, no composition), so a label slice
-    conservatively keeps the current size while a label sequence sizes by its length.
+    optimiser can't reason about it positionally (no length, no composition). A label
+    *sequence* still sizes exactly, by its own length.
+
+    A label *slice* cannot be sized here at all — its extent is a fact about coordinate
+    values — and ``apply_schema`` no longer asks: it answers ``None`` (unknown) for any
+    slice under a ``sel``, this variant included. :meth:`size`'s keep-the-current-size
+    fallback is what that replaced, and survives only for a caller reaching past the
+    schema layer.
     """
 
     value: Any

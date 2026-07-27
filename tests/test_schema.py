@@ -116,12 +116,51 @@ def test_boolean_list_isel_resizes_by_true_count(ds):
     assert after.dims["time"] == 3
 
 
-def test_unsizable_sel_slice_keeps_current_size(ds):
-    # a label slice would need coord values to size -> conservatively unchanged
+def test_unsizable_sel_slice_is_unknown(ds):
+    # A label slice needs coord values to size. This used to keep the *current* size --
+    # a guess in the safe direction, but still a guess; "don't know" is now sayable.
     schema = SchemaState.from_dataset(ds)
     node = Select(name="sel", indexer={"time": slice("a", "z")})
     after = apply_schema(schema, node)
-    assert after.dims["time"] == 4
+    assert after.dims["time"] is None
+    assert "time" in after.dims  # unknown extent, but the dim is still there
+
+
+def test_integer_labelled_sel_slice_is_unknown_not_under_reported(ds):
+    # The sharp case: integer bounds are indistinguishable from positional ones, so
+    # ``classify`` mints a ForwardSlice and its size reads them as positions. Against a
+    # length-4 dim, ``sel(time=slice(20, 30))`` sized as **0** -- an under-report, the
+    # direction a size-driven rule could act on. Now unknown.
+    schema = SchemaState.from_dataset(ds)
+    node = Select(name="sel", indexer={"time": slice(20, 30)})
+    after = apply_schema(schema, node)
+    assert after.dims["time"] is None
+
+
+def test_positional_isel_slice_is_still_sized_exactly(ds):
+    # The unknown is confined to ``sel``: an ``isel`` slice really is positional, so it
+    # keeps its exact size and nothing is lost by the change above.
+    schema = SchemaState.from_dataset(ds)
+    after = apply_schema(schema, Select(name="isel", indexer={"time": slice(1, 3)}))
+    assert after.dims["time"] == 2
+
+
+def test_unknown_size_propagates_through_a_later_select(ds):
+    # Unknown in, unknown out -- and never silently coerced to 0, the failure mode the
+    # ``var_dims`` docstring warns about for the variable-level counterpart.
+    unknown = SchemaState(dims={"time": None, "lat": 3}, coords={"time", "lat"})
+    after = apply_schema(unknown, Select(name="isel", indexer={"time": slice(0, 2)}))
+    assert after.dims["time"] is None
+    assert after.dims["time"] != 0
+    assert after.dims["lat"] == 3  # a known size beside it is unaffected
+
+
+def test_scalar_select_still_drops_a_dim_of_unknown_size(ds):
+    # Dropping needs no size at all, so the unknown must not block it.
+    unknown = SchemaState(dims={"time": None, "lat": 3}, coords={"time", "lat"})
+    after = apply_schema(unknown, Select(name="isel", indexer={"time": 0}))
+    assert "time" not in after.dims
+    assert "time" not in after.coords
 
 
 def test_scan_leaves_schema_unchanged(ds):

@@ -23,6 +23,7 @@ import xarray as xr
 from frozendict import frozendict
 from typing_extensions import assert_never
 
+from xrexpr.indexers import Indexer
 from xrexpr.ir import (
     ALL_DIMS,
     AllDims,
@@ -49,12 +50,20 @@ class SchemaState:
     to immutable containers on construction, so a snapshot is hashable and safe to
     thread through the plan.
 
+    A size of ``None`` means **don't know** — the dim exists, but its extent is not
+    statically evident. The same contract ``var_dims`` states, and the same warning
+    applies with one substitution: callers must treat it as "no rewrite", never as
+    *size zero*. Under-reporting a size is the unsafe direction, because it is the one
+    a rewrite could act on. Nothing computes a size but :func:`apply_schema`'s select
+    arm, and no optimiser rule reads one at all — every rule reasons about dim *names*
+    — which is what keeps the unknown from having to propagate anywhere else.
+
     ``data_vars`` is what makes *variable*-level reasoning possible: whether a
     projection may hop left past an op depends on whether the projected subset still
     carries the dims that op names.
     """
 
-    dims: frozendict[Hashable, int] = field(default_factory=frozendict)
+    dims: frozendict[Hashable, int | None] = field(default_factory=frozendict)
     coords: frozenset[Hashable] = frozenset()
     data_vars: frozendict[Hashable, tuple[Hashable, ...]] = field(
         default_factory=frozendict
@@ -151,7 +160,7 @@ def apply_schema(schema: SchemaState, node: Op) -> SchemaState:
             # are already gone via ``consumes``).
             for dim, index in indexer.items():
                 if dim not in select.consumes and dim in dims:
-                    dims[dim] = index.size(dims[dim])
+                    dims[dim] = _selected_size(select.name, index, dims[dim])
         case Project(variables=variables):
             data_vars = {v: data_vars[v] for v in variables if v in data_vars}
         case Scan() | Rechunk() | Opaque():
@@ -168,6 +177,37 @@ def apply_schema(schema: SchemaState, node: Op) -> SchemaState:
     return SchemaState(
         dims=frozendict(dims), coords=coords, data_vars=frozendict(data_vars)
     )
+
+
+def _selected_size(
+    name: Literal["isel", "sel"], index: Indexer, current: int | None
+) -> int | None:
+    """The size a kept dim has after ``index`` is applied to it, or ``None`` if unknown.
+
+    The only place a size is *computed*, and so the only place the unknown has to be
+    handled. Two cases answer ``None``:
+
+    - **an unknown input size.** Every :meth:`~xrexpr.indexers.Indexer.size` bar the
+      concrete enumerations resolves against the current length, so unknown in means
+      unknown out. Guarding here keeps ``Indexer.size``'s signature ``int``-only rather
+      than pushing ``| None`` through six variant implementations, and the uniform rule
+      costs only the exactness ``Positions``/``Mask`` could have kept.
+    - **a label slice.** ``sel(lat=slice(20, 30))`` names *labels*, and both ends are
+      inclusive, so its extent is a fact about coordinate values. Where the bounds happen
+      to be integers :func:`~xrexpr.indexers.classify` cannot tell it from a positional
+      slice and mints a ``ForwardSlice``, whose size then reads the bounds as positions —
+      with labels ``[10, 20, 30, 40]`` that reports **0** where the answer is 2. Sizing a
+      dim *smaller* than it is is the unsafe direction: it is the error a size-driven rule
+      would act on. "Don't know" is the honest answer and is now available, so this stops
+      being an under-report. (Non-integer label slices took ``Label.size``'s
+      keep-the-current-size fallback, an over-report; they answer ``None`` here too, since
+      a guess in the safe direction is still a guess.)
+    """
+    if current is None:
+        return None
+    if name == "sel" and isinstance(index.to_raw(), slice):
+        return None
+    return index.size(current)
 
 
 #: ``isel``/``sel`` keyword arguments that are *options*, not dim indexers.

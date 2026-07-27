@@ -31,6 +31,7 @@ rewrites under test.
 import numpy as np
 import pytest
 import xarray as xr
+from frozendict import frozendict
 from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 from xarray.testing import assert_equal
@@ -375,29 +376,66 @@ def _has_label_slice(call):
 
 
 @pytest.mark.xfail(
-    strict=True, reason="integer-labelled sel slices are sized as if positional"
+    strict=True,
+    reason="a sel label slice is sized 'unknown', not exactly -- deliberate, see the "
+    "docstring: W3 traded an unsafe under-report for an honest None, and computing the "
+    "exact answer needs coordinate values, which is a different decision.",
 )
 def test_sel_label_slice_size_is_tracked_correctly():
-    """A ``sel`` label slice over integer coords is sized with *positional* semantics.
+    """A ``sel`` label slice is sized ``None``, so it is not tracked *exactly*.
 
-    Found by ``test_tracked_schema_agrees_with_evaluation``, which shrank it to a
-    one-op chain. ``_indexer_size`` takes the positional branch whenever a slice's bounds
-    are all ints, but ``sel`` bounds are *labels* and the slice is inclusive of both ends.
-    Its "label slice — needs coords to size" fallback only fires for non-integer bounds
-    (datetimes, strings), so integer coords slip straight past it.
+    Found by ``test_tracked_schema_agrees_with_evaluation``, which shrank it to a one-op
+    chain. ``sel`` bounds are *labels* and the slice is inclusive of both ends, but where
+    the bounds are integers ``classify`` cannot tell them from positions and mints a
+    ``ForwardSlice``. With labels ``[10, 20, 30, 40]``, ``sel(lat=slice(20, 30))`` really
+    yields 2 elements while the positional reading gave **0** — under-reporting, the
+    *unsafe* direction, since it is the error a size-driven rule would act on.
 
-    Here labels ``[10, 20, 30, 40]`` and ``sel(lat=slice(20, 30))`` really yield 2
-    elements, but the schema records 0 — under-reporting, which is the *unsafe*
-    direction. ``_indexer_size``'s docstring argues imprecision is always safe because it
-    is conservative; that argument holds only for over-reporting.
-
-    Latent rather than user-visible today: no rewrite consults tracked sizes yet. It
-    would stop being latent the moment a size-driven rule (a cost model, an empty-result
-    shortcut) lands. Fixing it needs the select's ``name`` at the ``_indexer_size`` call
-    site in ``apply_schema``, which is a source change beyond this test-only PR.
+    **Kept xfail deliberately** (W3, ``docs/roadmap/03-schema-sizes.md`` §5.5). The size
+    is now ``None`` rather than ``0``: the unsafe answer is gone, and this test's stricter
+    claim — that the size is tracked *exactly* — remains unmet, so the marker stays and
+    the reason changes. Reaching the exact 2 means reading ``ds.indexes["lat"]`` at
+    ``apply_schema`` time, which is a separate call about how far the schema layer may
+    consult coordinate values; W3 §2 opens that door for lowering's own use but does not
+    walk through it here. Still latent either way: no rewrite consults tracked sizes.
     """
     ds = xr.Dataset({"t": ("lat", np.arange(4.0))}, coords={"lat": [10, 20, 30, 40]})
     call = Call("sel", lat=slice(20, 30))
 
     _, schema = _build_plan(ds, [call])
     assert dict(schema.dims) == dict(_apply(ds, [call]).sizes)
+
+
+def test_sel_label_slice_size_is_unknown_rather_than_wrong():
+    """The half of the case above that *is* now settled: unknown, never under-reported.
+
+    The companion to the xfail — it pins the improvement so that regressing to a
+    positional reading fails a green test rather than merely leaving an xfail xfailing.
+    """
+    ds = xr.Dataset({"t": ("lat", np.arange(4.0))}, coords={"lat": [10, 20, 30, 40]})
+
+    _, schema = _build_plan(ds, [Call("sel", lat=slice(20, 30))])
+    assert schema.dims["lat"] is None
+    assert schema.dims["lat"] != 0  # the under-report this replaced
+
+
+@SETTINGS
+@given(plans())
+def test_rewrites_survive_unknown_dim_sizes(case):
+    """Optimising against a schema whose sizes are all unknown still matches eager.
+
+    The property W3 exists to license: ``GroupedReduce`` will mint dims whose extent
+    comes from coordinate *values*, so the plans the rules see will carry ``None`` sizes
+    routinely. Every rule reasons about dim *names*, so blanking every size must change
+    nothing — asserted rather than left as a remark, since it is what lets the select and
+    projection rules be trusted once fused nodes arrive.
+    """
+    ds, calls = case
+    plan, _ = _build_plan(ds, calls)
+    base = SchemaState.from_dataset(ds)
+    blanked = SchemaState(
+        dims=frozendict(dict.fromkeys(base.dims)),  # every size -> None
+        coords=base.coords,
+        data_vars=base.data_vars,
+    )
+    assert optimize(plan, blanked) == optimize(plan, base)
