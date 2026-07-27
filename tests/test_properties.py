@@ -36,6 +36,11 @@ from hypothesis import strategies as st
 from xarray.testing import assert_equal
 
 import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
+
+# aliased: this module's own ``Call`` is a generated *recorded* call (name + kwargs),
+# a different thing from the emitted call header ``lower.Call`` denotes.
+from xrexpr.lower import Call as Lowered
+from xrexpr.lower import emit, to_lower_ir
 from xrexpr.operations import OP_TABLE
 from xrexpr.optimize import optimize
 from xrexpr.schema import SchemaState, apply_schema, to_opnode
@@ -273,6 +278,38 @@ def test_optimize_is_idempotent(case):
     schema = SchemaState.from_dataset(ds)
     once = optimize(plan, schema)
     assert optimize(once, schema) == once
+
+
+@SETTINGS
+@given(plans())
+def test_lowering_is_idempotent(case):
+    """Lowering an already-lowered plan returns it unchanged.
+
+    The stage's other contract (the analogue of ``test_optimize_is_idempotent``, and the
+    reason lowering can't be a rewrite rule: it runs *once*, so re-running it must be a
+    no-op rather than keep shrinking a measure).
+    """
+    ds, calls = case
+    plan, _ = _build_plan(ds, calls)
+    once = to_lower_ir(plan)
+    assert to_lower_ir(once) == once
+
+
+@SETTINGS
+@given(plans())
+def test_emit_after_lowering_reproduces_the_recorded_calls(case):
+    """A plan with no builder chain emits exactly the calls that were recorded.
+
+    The round-trip half of lowering's contract, pinned node-for-node rather than only
+    through the result: nothing in the pipeline may quietly re-spell a call it did not
+    need to touch. Compared as ``Call`` headers, not as nodes — emit's output is codegen,
+    and one node need not stay one call once fusion arrives.
+    """
+    ds, calls = case
+    plan, _ = _build_plan(ds, calls)
+    assert emit(to_lower_ir(plan)) == [
+        Lowered(name=node.name, args=node.args, kwargs=node.kwargs) for node in plan
+    ]
 
 
 @SETTINGS

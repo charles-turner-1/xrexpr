@@ -6,12 +6,14 @@ of executing them. Calling :meth:`~LazyDatasetProxy.collect` optimises the
 recorded plan and replays it onto the real dataset (:meth:`~LazyDatasetProxy.explain`
 returns the optimised plan as text without running it).
 
-The recorded plan is a list of :data:`~xrexpr.ir.Op` variants: each call is normalised
-by :func:`~xrexpr.schema.to_opnode`, a pure function of that call, and appended —
-recording holds no schema of its own. ``collect`` runs the plan through
-:func:`~xrexpr.optimize.optimize` (a fixpoint of rewrite rules, which folds the base
-schema forward itself), replays the optimised ``Op`` nodes onto the base dataset, and
-materialises the result. See ``docs/pr-plan.md``.
+The recorded plan is a list of :data:`~xrexpr.ir.FluentOp` variants: each call is
+normalised by :func:`~xrexpr.schema.to_opnode`, a pure function of that call, and
+appended — recording holds no schema of its own. ``collect`` then runs the plan through
+the pipeline in ``lower.py``: :func:`~xrexpr.lower.to_lower_ir` translates what was
+written into what it means, :func:`~xrexpr.optimize.optimize` rewrites that (a fixpoint
+of rules, folding the base schema forward itself), :func:`~xrexpr.lower.emit` turns the
+result back into calls, and :meth:`~LazyDatasetProxy._replay` performs them against the
+base dataset. See ``docs/pr-plan.md``.
 """
 
 from functools import wraps
@@ -19,7 +21,8 @@ from typing import Any
 
 import xarray as xr
 
-from xrexpr.ir import Op, Opaque, frozendict
+from xrexpr.ir import FluentOp, LoweredOp, Opaque, frozendict
+from xrexpr.lower import Call, emit, to_lower_ir
 from xrexpr.optimize import optimize
 from xrexpr.schema import SchemaState, to_opnode
 
@@ -92,9 +95,9 @@ class LazyDatasetProxy:
     untouched) carrying the extended plan and the schema after that op.
     """
 
-    def __init__(self, base_ds: xr.Dataset, ops: list[Op] | None = None):
+    def __init__(self, base_ds: xr.Dataset, ops: list[FluentOp] | None = None):
         self._base_ds = base_ds
-        self._ops: list[Op] = list(ops) if ops else []
+        self._ops: list[FluentOp] = list(ops) if ops else []
 
     def _record(
         self, method_name: str, *args: Any, **kwargs: Any
@@ -196,16 +199,22 @@ class LazyDatasetProxy:
     def collect(self) -> xr.Dataset | xr.DataArray:
         """Optimise the recorded plan, replay it, and materialise the result.
 
-        The Polars-flavoured terminal of the plan: it runs the recorded ops through
-        :func:`~xrexpr.optimize.optimize`, replays the optimised ``Op`` nodes onto the
-        base dataset, and calls xarray's own ``.compute()`` so dask-backed data is
+        The Polars-flavoured terminal of the plan, and the one place the whole pipeline
+        is visible: the recorded (fluent) ops are lowered into what they mean
+        (:func:`~xrexpr.lower.to_lower_ir`), rewritten (:func:`~xrexpr.optimize.optimize`),
+        turned back into calls (:func:`~xrexpr.lower.emit`) and replayed onto the base
+        dataset, then materialised via xarray's own ``.compute()`` so dask-backed data is
         realised. Returns a ``DataArray`` rather than a ``Dataset`` when the chain
         selects a single variable (e.g. ``ds.plan["temperature"]``).
 
         Raises :class:`~xrexpr.exceptions.InvalidExpressionError` if the plan cannot be
         optimised (e.g. a select on a dim a preceding reduce removed).
         """
-        return self._replay(optimize(self._ops, self._base_schema())).compute()
+        return self._replay(emit(self._optimized())).compute()
+
+    def _optimized(self) -> list[LoweredOp]:
+        """The lowered, rewritten plan — what :meth:`collect` will emit and replay."""
+        return optimize(to_lower_ir(self._ops), self._base_schema())
 
     def compute(self) -> xr.Dataset | xr.DataArray:
         """Alias for :meth:`collect`, for xarray users who reach for ``.compute()``."""
@@ -214,12 +223,12 @@ class LazyDatasetProxy:
     def explain(self) -> Explanation:
         """Return the optimised plan as text, without running it (à la Polars ``explain``).
 
-        Shows the ops :meth:`collect` would actually replay — i.e. *after* optimisation
-        — so the rewrite (merged / pushed-down selects) is visible. Raises the same
-        :class:`~xrexpr.exceptions.InvalidExpressionError` as :meth:`collect` when the
-        plan is invalid.
+        Shows the ops :meth:`collect` would actually replay — i.e. *after* lowering and
+        optimisation — so the rewrite (merged / pushed-down selects) is visible. Raises
+        the same :class:`~xrexpr.exceptions.InvalidExpressionError` as :meth:`collect`
+        when the plan is invalid.
         """
-        plan = optimize(self._ops, self._base_schema())
+        plan = self._optimized()
         if not plan:
             return Explanation("plan (0 ops)")
         body = "\n".join(
@@ -228,20 +237,25 @@ class LazyDatasetProxy:
         return Explanation(f"plan ({len(plan)} ops):\n{body}")
 
     @staticmethod
-    def _format_node(node: Op) -> str:
-        """One-line human-readable form of an :data:`~xrexpr.ir.Op` node for :meth:`explain`."""
+    def _format_node(node: LoweredOp) -> str:
+        """One-line human-readable form of a lowered node for :meth:`explain`."""
         if node.name == "__getitem__":
             return f"[{node.args[0]!r}]"
         parts = [repr(a) for a in node.args]
         parts += [f"{k}={v!r}" for k, v in node.kwargs.items()]
         return f"{node.name}({', '.join(parts)})"
 
-    def _replay(self, nodes: list[Op]) -> xr.Dataset | xr.DataArray:
-        """Walk the optimised ``Op`` plan, calling the real xarray methods."""
+    def _replay(self, calls: list[Call]) -> xr.Dataset | xr.DataArray:
+        """Perform each emitted :class:`~xrexpr.lower.Call` against the real dataset.
+
+        Takes calls rather than nodes, so it never needs to know what a node *means* —
+        deciding that is :func:`~xrexpr.lower.emit`'s job, and this stays the short
+        ``getattr`` loop it was when every node was exactly one call.
+        """
         ds: xr.Dataset | xr.DataArray = self._base_ds
-        for node in nodes:
-            if node.name == "__getitem__":
-                ds = ds[node.args[0]]
+        for call in calls:
+            if call.name == "__getitem__":
+                ds = ds[call.args[0]]
             else:
-                ds = getattr(ds, node.name)(*node.args, **node.kwargs)
+                ds = getattr(ds, call.name)(*call.args, **call.kwargs)
         return ds

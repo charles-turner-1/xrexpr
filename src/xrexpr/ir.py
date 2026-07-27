@@ -15,8 +15,11 @@ Kinds are usually settled by the method name, but not always: ``__getitem__`` is
 :class:`Project` when its key names variables and an :class:`Opaque` otherwise, so the
 table can't decide it — the shape of the *key* does.
 
-``to_opnode`` (in ``schema.py``) builds these at record time; the optimiser
-(``optimize.py``) rewrites the list and the ``.plan`` accessor replays it.
+``to_opnode`` (in ``schema.py``) builds these at record time; ``lower.py`` translates
+that recording into what it *means*, the optimiser (``optimize.py``) rewrites the
+result, and ``lower.emit`` turns it back into the calls the ``.plan`` accessor replays.
+:data:`FluentOp` and :data:`LoweredOp` name the two levels — one set of dataclasses,
+two union aliases over them, so the level a function works at is in its signature.
 
 **Dim sets are symbolic where the call is.** A bare ``ds.mean()`` names no dim: it means
 "every dim there is *when this runs*", which is not knowable at record time — past an
@@ -47,6 +50,8 @@ __all__ = [
     "ALL_DIMS",
     "AllDims",
     "DimSet",
+    "FluentOp",
+    "LoweredOp",
     "Op",
     "Opaque",
     "Project",
@@ -237,3 +242,12 @@ class Opaque:
 #: binds different fields per arm; ``typing.assert_never`` on the ``case _`` arm makes
 #: the union exhaustive (adding a variant fails type-check at every unhandled site).
 Op = Reduce | Select | Scan | Project | Rechunk | Opaque
+
+#: What the recorder produces: one node per call, as the fluent API spelled it.
+FluentOp = Op
+
+#: What the optimiser rewrites: the same vocabulary, plus the nodes the fluent API
+#: cannot express in a single call. The two aliases coincide today — ``to_lower_ir`` is
+#: an identity — and diverge as fused nodes arrive, at which point the difference stops
+#: being documentation and starts being a type error on a node that outlived lowering.
+LoweredOp = Op
