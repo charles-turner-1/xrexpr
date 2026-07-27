@@ -62,6 +62,7 @@ __all__ = [
     "Reduce",
     "Scan",
     "Select",
+    "WindowedReduce",
     "frozendict",
 ]
 
@@ -330,6 +331,44 @@ class GroupedReduce:
         object.__setattr__(self, "consumes", frozenset(self.consumes))
 
 
+@dataclass(frozen=True)
+class WindowedReduce:
+    """A windowed aggregation — ``ds.rolling(time=5).mean()`` — as *one* node.
+
+    Simpler than :class:`GroupedReduce`, in the direction that matters: a window consumes
+    no dim and mints none, so there is no ``consumes`` field to get wrong. What changes is
+    only the *size* of the windowed dims, and only for ``coarsen``:
+
+    - **rolling** keeps every dim at its current length — one output position per input
+      position, ``center``/``min_periods`` affecting values but never shape;
+    - **coarsen** divides each windowed dim by its window, rounded according to the
+      ``boundary`` kwarg (``"trim"`` down, ``"pad"`` up, ``"exact"`` requiring
+      divisibility). That is a size effect that depends on an *option*, which is why
+      ``kwargs`` is kept whole rather than reduced to ``window``.
+
+    A windowed closer takes **no dim argument** at all — ``DatasetRolling.mean`` is
+    ``(keep_attrs=None, **kwargs)`` — so ``ds.rolling(time=3).mean("lat")`` passes
+    ``"lat"`` as ``keep_attrs`` and reduces nothing. Only a closer that named no dim is
+    fused (see :func:`~xrexpr.lower.to_lower_ir`), which is what keeps that trap out of
+    this node: if a dim spec was parsed, it was never a dim spec.
+    """
+
+    name: Literal["rolling", "coarsen"]  # closed set → Literal
+    reduce: str  # the closing method: mean/sum/max/... (open set → str)
+    window: frozendict[Hashable, int] = field(default_factory=frozendict)
+    args: tuple[Any, ...] = ()  # the opener's header, verbatim
+    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    reduce_args: tuple[Any, ...] = ()  # the closer's header, verbatim
+    reduce_kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "window", frozendict(self.window))
+        object.__setattr__(self, "args", tuple(self.args))
+        object.__setattr__(self, "kwargs", frozendict(self.kwargs))
+        object.__setattr__(self, "reduce_args", tuple(self.reduce_args))
+        object.__setattr__(self, "reduce_kwargs", frozendict(self.reduce_kwargs))
+
+
 #: The optimiser's IR node: a sum over the structural op *kinds*. ``match`` over this
 #: binds different fields per arm; ``typing.assert_never`` on the ``case _`` arm makes
 #: the union exhaustive (adding a variant fails type-check at every unhandled site).
@@ -343,4 +382,4 @@ FluentOp = Op | ContextOpen
 #: express in a single call, and *minus* the opener, which lowering must have consumed.
 #: The asymmetry is the point — a :class:`ContextOpen` that outlived ``to_lower_ir``
 #: fails type-check at every site downstream of it.
-LoweredOp = Op | GroupedReduce
+LoweredOp = Op | GroupedReduce | WindowedReduce

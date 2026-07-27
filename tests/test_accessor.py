@@ -19,7 +19,15 @@ from xarray.testing import assert_equal
 import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
 from xrexpr.accessor import _EAGER_ATTRS, Explanation, LazyDatasetProxy
 from xrexpr.exceptions import InvalidExpressionError
-from xrexpr.ir import ALL_DIMS, ContextOpen, GroupedReduce, Opaque, Reduce, Select
+from xrexpr.ir import (
+    ALL_DIMS,
+    ContextOpen,
+    GroupedReduce,
+    Opaque,
+    Reduce,
+    Select,
+    WindowedReduce,
+)
 from xrexpr.lower import emit
 from xrexpr.optimize import _schemas
 
@@ -467,7 +475,31 @@ def test_resample_matches_eager(dated_ds):
 
 def test_rolling_then_select_matches_eager(ds):
     chain = ds.plan.rolling(time=2).mean().isel(lat=0)
+    assert [type(n) for n in chain._optimized()] == [WindowedReduce, Select]
     assert_equal(chain.collect(), ds.rolling(time=2).mean().isel(lat=0))
+
+
+@pytest.mark.parametrize("boundary", ["trim", "pad"])
+def test_coarsen_matches_eager(ds, boundary):
+    chain = ds.plan.coarsen(time=2, boundary=boundary).mean().isel(lat=0)
+    assert_equal(
+        chain.collect(), ds.coarsen(time=2, boundary=boundary).mean().isel(lat=0)
+    )
+
+
+def test_rolling_closer_that_looks_like_a_dim_spec_still_matches_eager(ds):
+    # ``DatasetRolling.mean`` takes no dim argument, so this passes "lat" as *keep_attrs*
+    # and reduces nothing. Lowering refuses to fuse it, and the verbatim pair replays as
+    # xarray reads it -- which is the whole point of refusing.
+    chain = ds.plan.rolling(time=2).mean("lat")
+    assert [type(n) for n in chain._optimized()] == [Opaque, Opaque]
+    assert_equal(chain.collect(), ds.rolling(time=2).mean("lat"))
+
+
+def test_ops_after_a_windowed_reduce_are_modelled(ds):
+    chain = ds.plan.rolling(time=2).mean().mean("time")
+    assert [type(n) for n in chain._optimized()] == [WindowedReduce, Reduce]
+    assert_equal(chain.collect(), ds.rolling(time=2).mean().mean("time"))
 
 
 def test_weighted_matches_eager(ds):

@@ -30,9 +30,11 @@ own contract:
 the call sequence that reproduces it, so a node standing for *two* calls is ordinary
 rather than a special case the replay loop has to know about.
 
-The first fused kind is :class:`~xrexpr.ir.GroupedReduce`; ``rolling``/``coarsen``/
-``weighted`` still take the opaque fallback below and so behave exactly as they did under
-the accessor's barrier, until their own nodes land.
+Two fused kinds so far — :class:`~xrexpr.ir.GroupedReduce` and
+:class:`~xrexpr.ir.WindowedReduce`. ``weighted`` still takes the opaque fallback below, as
+do the openers no node describes (``rolling_exp`` is a weighting rather than a window,
+``cumulative`` a scan in a builder's clothes), so those behave exactly as they did under
+the accessor's barrier.
 """
 
 from collections.abc import Hashable
@@ -54,9 +56,16 @@ from xrexpr.ir import (
     Reduce,
     Scan,
     Select,
+    WindowedReduce,
 )
 
 __all__ = ["Call", "emit", "to_lower_ir"]
+
+#: ``rolling``/``coarsen`` keyword arguments that are *options*, not per-dim windows
+#: (xarray 2026.7.0's signatures, unioned — the two share this shape).
+_WINDOW_OPTION_KWARGS = frozenset(
+    {"min_periods", "center", "boundary", "side", "coord_func", "keep_attrs"}
+)
 
 #: ``resample`` keyword arguments that are *options*, not the dim being resampled
 #: (xarray 2026.7.0's signature). Drift is safe in one direction only, and it is the
@@ -120,7 +129,11 @@ def to_lower_ir(nodes: list[FluentOp]) -> list[LoweredOp]:
             continue
 
         closer = nodes[i + 1] if i + 1 < n else None
-        fused = _fuse_grouped(node, closer) if closer is not None else None
+        fused = (
+            _fuse_grouped(node, closer) or _fuse_windowed(node, closer)
+            if closer is not None
+            else None
+        )
         if fused is not None:
             out.append(fused)
             i += 2
@@ -199,6 +212,63 @@ def _fuse_grouped(opener: ContextOpen, closer: FluentOp) -> GroupedReduce | None
     )
 
 
+def _fuse_windowed(opener: ContextOpen, closer: FluentOp) -> WindowedReduce | None:
+    """Fuse a rolling/coarsen pair into a :class:`~xrexpr.ir.WindowedReduce`, or refuse.
+
+    ``rolling_exp`` and ``cumulative`` are deliberately not here: the first is an
+    exponential weighting rather than a fixed window, and the second is a scan wearing a
+    builder's clothes. Neither is described by ``window``, so both keep replaying
+    verbatim rather than being squeezed into a node that would misdescribe them.
+
+    **The closer must have named no dim** — and that is a stronger condition than it
+    looks. ``DatasetRolling.mean`` is ``(keep_attrs=None, **kwargs)``: it takes no dim
+    argument at all, so ``ds.rolling(time=3).mean("lat")`` passes ``"lat"`` as
+    *keep_attrs* and reduces nothing. ``to_opnode``, which cannot know the call is
+    windowed, records that as ``consumes={"lat"}``. Fusing it would import a dim effect
+    invented by a misparse, so a closer carrying any parsed dim spec is refused and the
+    pair replays verbatim.
+    """
+    match opener.name:
+        case "rolling" | "coarsen":
+            kind = opener.name
+        case _:
+            return None
+    if not isinstance(closer, Reduce) or not isinstance(closer.consumes, AllDims):
+        return None
+
+    window = _window_spec(opener)
+    if not window:
+        return None  # no statically-known window: nothing to model
+
+    return WindowedReduce(
+        name=kind,
+        reduce=closer.name,
+        window=window,
+        args=opener.args,
+        kwargs=opener.kwargs,
+        reduce_args=closer.args,
+        reduce_kwargs=closer.kwargs,
+    )
+
+
+def _window_spec(opener: ContextOpen) -> frozendict[Hashable, int]:
+    """The ``{dim: window}`` mapping of a ``rolling``/``coarsen`` call.
+
+    Both spell it the same two ways — a positional mapping or dim keywords — alongside
+    option kwargs that are not dims, exactly as ``isel`` and ``chunk`` do; this is
+    ``schema._select_indexer``'s shape for a third caller. A window that isn't a plain
+    ``int`` is dropped rather than modelled, which (an empty result being a refusal to
+    fuse) means an unrecognised spelling replays verbatim instead of being guessed at.
+    """
+    raw: dict[Hashable, Any] = {}
+    if opener.args and isinstance(opener.args[0], dict):
+        raw.update(opener.args[0])
+    raw.update(
+        {k: v for k, v in opener.kwargs.items() if k not in _WINDOW_OPTION_KWARGS}
+    )
+    return frozendict({dim: size for dim, size in raw.items() if isinstance(size, int)})
+
+
 def _grouper_dims(opener: ContextOpen) -> tuple[Hashable, Hashable] | None:
     """``(group_dim, new_dim)`` for a groupby-family opener, or ``None`` if not statically known.
 
@@ -265,6 +335,15 @@ def _emit_node(node: LoweredOp) -> tuple[Call, ...]:
                     name=grouped.reduce,
                     args=grouped.reduce_args,
                     kwargs=grouped.reduce_kwargs,
+                ),
+            )
+        case WindowedReduce() as windowed:
+            return (
+                Call(name=windowed.name, args=windowed.args, kwargs=windowed.kwargs),
+                Call(
+                    name=windowed.reduce,
+                    args=windowed.reduce_args,
+                    kwargs=windowed.reduce_kwargs,
                 ),
             )
         case Reduce() | Select() | Scan() | Project() | Rechunk() | Opaque():

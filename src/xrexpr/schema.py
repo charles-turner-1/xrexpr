@@ -39,6 +39,7 @@ from xrexpr.ir import (
     Reduce,
     Scan,
     Select,
+    WindowedReduce,
 )
 from xrexpr.operations import CONTEXT_METHODS
 from xrexpr.operations import spec as op_spec
@@ -177,6 +178,10 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
             # The minted dim's extent is the number of groups -- a fact about coordinate
             # *values*, which this layer does not read. ``None`` rather than a guess.
             dims[grouped.new_dim] = None
+        case WindowedReduce() as windowed:
+            for dim, window in windowed.window.items():
+                if dim in dims:
+                    dims[dim] = _windowed_size(windowed, dims[dim], window)
         case Scan() | Rechunk() | Opaque():
             pass
         case _:
@@ -202,6 +207,32 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
     return SchemaState(
         dims=frozendict(dims), coords=coords, data_vars=frozendict(data_vars)
     )
+
+
+def _windowed_size(
+    node: WindowedReduce, current: int | None, window: int
+) -> int | None:
+    """The length of a windowed dim after ``node``, or ``None`` if not statically known.
+
+    ``rolling`` yields one output position per input position, so its dims keep their
+    length outright — ``center`` and ``min_periods`` change values, never shape.
+
+    ``coarsen`` divides, and how it rounds is an *option* rather than a property of the
+    op: ``boundary="trim"`` discards the short final block (floor), ``"pad"`` fills it
+    (ceil), and the default ``"exact"`` requires divisibility — so where it is exact the
+    two agree, and where it is not, xarray raises at replay rather than producing the
+    size computed here. A ``boundary`` this does not recognise answers ``None``: a
+    future spelling should cost precision, not correctness.
+    """
+    if current is None or node.name == "rolling":
+        return current
+    match node.kwargs.get("boundary", "exact"):
+        case "trim" | "exact":
+            return current // window
+        case "pad":
+            return -(-current // window)  # ceil
+        case _:
+            return None
 
 
 def _selected_size(
