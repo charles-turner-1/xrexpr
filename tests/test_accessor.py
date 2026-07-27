@@ -25,8 +25,9 @@ from xrexpr.accessor import (
 )
 from xrexpr.exceptions import InvalidExpressionError
 from xrexpr.ir import ALL_DIMS, Opaque
+from xrexpr.lower import emit
 from xrexpr.operations import spec
-from xrexpr.optimize import _schemas, optimize
+from xrexpr.optimize import _schemas
 
 #: xrexpr itself never needs dask, but replaying a ``chunk()`` call does -- without a
 #: chunk manager xarray raises ``ImportError``. Only the rechunk tests below need it.
@@ -259,7 +260,7 @@ def chunky_ds() -> xr.Dataset:
 
 def _replayed(proxy) -> xr.Dataset:
     """The optimised plan replayed but *not* computed, so ``.chunks`` survives."""
-    return proxy._replay(optimize(proxy._ops, proxy._base_schema()))
+    return proxy._replay(emit(proxy._optimized()))
 
 
 @requires_dask
@@ -470,10 +471,7 @@ def test_terminal_after_context_matches_eager(ds):
 def test_plans_without_a_context_still_optimise(ds):
     # The barrier must not leak: an ordinary chain is still rewritten.
     chain = ds.plan.mean("lat").isel(time=0)
-    assert [n.name for n in optimize(chain._ops, chain._base_schema())] == [
-        "isel",
-        "mean",
-    ]
+    assert [n.name for n in chain._optimized()] == ["isel", "mean"]
 
 
 @pytest.mark.parametrize("name", sorted(_CONTEXT_METHODS))

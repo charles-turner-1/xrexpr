@@ -1,4 +1,4 @@
-"""The plan optimiser: rewrite a linear :data:`~xrexpr.ir.Op` plan to a cheaper equivalent.
+"""The plan optimiser: rewrite a linear :data:`~xrexpr.ir.LoweredOp` plan to a cheaper equivalent.
 
 :func:`optimize` runs a set of local rewrite *rules* to a **fixpoint** — each rule
 maps a plan to an equivalent plan, and the loop reapplies the whole set until the
@@ -53,12 +53,26 @@ from xrexpr.indexers import (
     Positions,
     Scalar,
 )
-from xrexpr.ir import AllDims, DimSet, Op, Opaque, Project, Rechunk, Reduce, Select
+from xrexpr.ir import (
+    AllDims,
+    DimSet,
+    LoweredOp,
+    Op,
+    Opaque,
+    Project,
+    Rechunk,
+    Reduce,
+    Select,
+)
 from xrexpr.schema import SchemaState, apply_schema
 
 __all__ = ["optimize"]
 
-Plan = list[Op]
+#: What the rules rewrite: a **lowered** plan. Spelled with
+#: :data:`~xrexpr.ir.LoweredOp` rather than :data:`~xrexpr.ir.Op` because that is the
+#: level ``optimize`` is contracted to run at — a node that should have been fused away
+#: by ``lower.to_lower_ir`` becomes a type error here rather than a convention.
+Plan = list[LoweredOp]
 #: A rule maps a plan (and the schema its first node sees) to a rewritten plan, or
 #: returns ``None`` when it changes nothing (letting :func:`optimize` detect the fixpoint
 #: without a full-plan equality compare). Dim-level rules ignore the schema argument.
