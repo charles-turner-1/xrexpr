@@ -49,8 +49,11 @@ from xrexpr.indexers import Indexer, classify
 __all__ = [
     "ALL_DIMS",
     "AllDims",
+    "ContextOpen",
+    "ContextOpenName",
     "DimSet",
     "FluentOp",
+    "GroupedReduce",
     "LoweredOp",
     "Op",
     "Opaque",
@@ -238,16 +241,106 @@ class Opaque:
         object.__setattr__(self, "kwargs", frozendict(self.kwargs))
 
 
+@dataclass(frozen=True)
+class ContextOpen:
+    """A builder-returning call — ``groupby``/``rolling``/``weighted``/... .
+
+    **Fluent IR only.** xarray spells some single semantic operations as two calls via a
+    builder object, and this is the first of the pair: it says *a context opens here*,
+    which is decidable from the call alone (``groupby(...)`` opens one no matter what
+    follows), so ``to_opnode`` can type it without needing the lookahead it hasn't got.
+    What the pair *means* is :func:`~xrexpr.lower.to_lower_ir`'s job.
+
+    One variant rather than one per builder: the openers carry identical structure — a
+    verbatim header plus which builder it is — and per-builder differentiation belongs to
+    the fused nodes, where it comes with structural data to match on. Five empty arms at
+    every ``assert_never`` site would earn nothing.
+
+    It must not survive lowering, and does not have to be trusted to: it is absent from
+    :data:`LoweredOp`, so one that outlives ``to_lower_ir`` is a type error rather than a
+    convention.
+    """
+
+    name: "ContextOpenName"
+    args: tuple[Any, ...] = ()
+    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "args", tuple(self.args))
+        object.__setattr__(self, "kwargs", frozendict(self.kwargs))
+
+
+#: The builder-returning methods, as a type. The runtime set lives in
+#: ``operations.CONTEXT_METHODS``; a test pins the two against each other, so neither can
+#: drift from the other or from ``xr.Dataset``.
+ContextOpenName = Literal[
+    "groupby",
+    "groupby_bins",
+    "resample",
+    "rolling",
+    "rolling_exp",
+    "coarsen",
+    "weighted",
+    "cumulative",
+]
+
+
+@dataclass(frozen=True)
+class GroupedReduce:
+    """A grouped aggregation — ``ds.groupby("time.month").mean()`` — as *one* node.
+
+    Flat, not nested: the semantic fields rules match on, plus the two verbatim call
+    headers :func:`~xrexpr.lower.emit` replays. "A context wrapping a call" is how xarray
+    *spells* this, not what it is, and discarding that spelling is what lowering is for.
+
+    The dim algebra, verified against xarray 2026.7.0 and less obvious than it looks:
+
+    - ``group_dim`` is consumed and ``new_dim`` minted — ``groupby("time.month")`` groups
+      along ``time`` and yields ``month``; ``groupby("lat")`` and ``resample(time="2D")``
+      mint the dim they group over; ``groupby_bins("lat", 2)`` yields ``lat_bins``.
+    - ``consumes`` is what the closing reduction removes **in addition**, which for a bare
+      ``mean()`` is *nothing*: unlike a Dataset-level bare reduce, a grouped one reduces
+      only along the group dim, leaving the rest —
+      ``ds.groupby("time.month").mean()`` keeps ``lat`` and ``lon``.
+    - every variable ends up carrying ``new_dim``, including ones that never carried
+      ``group_dim`` (``elevation(lat, lon)`` comes back as ``(month, lat, lon)``).
+
+    ``new_dim`` is not optional here, though a grouped reduce in general may mint nothing:
+    ``ds.groupby("time.month").mean("lat")`` is a per-group *map* that keeps ``time`` and
+    mints no ``month``. That case deliberately does not fuse (see
+    :func:`~xrexpr.lower.to_lower_ir`), so every node of this type is an aggregation and
+    every aggregation mints.
+    """
+
+    name: Literal["groupby", "groupby_bins", "resample"]  # closed set → Literal
+    group_dim: Hashable
+    new_dim: Hashable
+    reduce: str  # the closing method: mean/sum/std/... (open set → str)
+    args: tuple[Any, ...] = ()  # the opener's header, verbatim
+    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    reduce_args: tuple[Any, ...] = ()  # the closer's header, verbatim
+    reduce_kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    consumes: frozenset[Hashable] = frozenset()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "args", tuple(self.args))
+        object.__setattr__(self, "kwargs", frozendict(self.kwargs))
+        object.__setattr__(self, "reduce_args", tuple(self.reduce_args))
+        object.__setattr__(self, "reduce_kwargs", frozendict(self.reduce_kwargs))
+        object.__setattr__(self, "consumes", frozenset(self.consumes))
+
+
 #: The optimiser's IR node: a sum over the structural op *kinds*. ``match`` over this
 #: binds different fields per arm; ``typing.assert_never`` on the ``case _`` arm makes
 #: the union exhaustive (adding a variant fails type-check at every unhandled site).
 Op = Reduce | Select | Scan | Project | Rechunk | Opaque
 
-#: What the recorder produces: one node per call, as the fluent API spelled it.
-FluentOp = Op
+#: What the recorder produces: one node per call, as the fluent API spelled it —
+#: including the half-operations (:class:`ContextOpen`) that only mean something paired.
+FluentOp = Op | ContextOpen
 
-#: What the optimiser rewrites: the same vocabulary, plus the nodes the fluent API
-#: cannot express in a single call. The two aliases coincide today — ``to_lower_ir`` is
-#: an identity — and diverge as fused nodes arrive, at which point the difference stops
-#: being documentation and starts being a type error on a node that outlived lowering.
-LoweredOp = Op
+#: What the optimiser rewrites: the same vocabulary, plus the nodes the fluent API cannot
+#: express in a single call, and *minus* the opener, which lowering must have consumed.
+#: The asymmetry is the point — a :class:`ContextOpen` that outlived ``to_lower_ir``
+#: fails type-check at every site downstream of it.
+LoweredOp = Op | GroupedReduce

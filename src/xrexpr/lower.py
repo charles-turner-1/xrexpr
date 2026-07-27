@@ -26,13 +26,16 @@ own contract:
     the same result as ``p`` — and **idempotent**: applied to an already-lowered plan it
     returns it unchanged.
 
-**Today both stages are identities**, because no fused node kinds exist yet: this module
-is the seam they will arrive through, and the pipeline is rewired around it first so that
-each fused node is built once rather than twice. :func:`emit` is the piece that makes that
-possible — a lowered node may stand for *several* calls, which a one-node-one-call replay
-loop could never express.
+:func:`emit` is what makes a fused node expressible at all: it maps one lowered node to
+the call sequence that reproduces it, so a node standing for *two* calls is ordinary
+rather than a special case the replay loop has to know about.
+
+The first fused kind is :class:`~xrexpr.ir.GroupedReduce`; ``rolling``/``coarsen``/
+``weighted`` still take the opaque fallback below and so behave exactly as they did under
+the accessor's barrier, until their own nodes land.
 """
 
+from collections.abc import Hashable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -40,7 +43,10 @@ from frozendict import frozendict
 from typing_extensions import assert_never
 
 from xrexpr.ir import (
+    AllDims,
+    ContextOpen,
     FluentOp,
+    GroupedReduce,
     LoweredOp,
     Opaque,
     Project,
@@ -51,6 +57,13 @@ from xrexpr.ir import (
 )
 
 __all__ = ["Call", "emit", "to_lower_ir"]
+
+#: ``resample`` keyword arguments that are *options*, not the dim being resampled
+#: (xarray 2026.7.0's signature). Drift is safe in one direction only, and it is the
+#: right one: an option this misses leaves two candidate keys, which refuses to fuse.
+_RESAMPLE_OPTION_KWARGS = frozenset(
+    {"closed", "label", "offset", "origin", "restore_coord_dims", "skipna"}
+)
 
 
 @dataclass(frozen=True)
@@ -75,17 +88,139 @@ class Call:
 def to_lower_ir(nodes: list[FluentOp]) -> list[LoweredOp]:
     """Translate a recorded plan into what it means, fusing builder chains.
 
-    Where the fluent API is one-to-one with semantics the recorded node is already
-    right, so it passes through untouched — this is the *same* vocabulary plus the nodes
-    a single call cannot express, not a translation into a poorer language. Only the
-    multi-call spellings need rewriting, and there are none yet, so this is currently the
-    identity.
+    Where the fluent API is one-to-one with semantics the recorded node is already right,
+    so it passes through untouched — this is the *same* vocabulary plus the nodes a single
+    call cannot express, not a translation into a poorer language. Only the multi-call
+    spellings are rewritten.
 
-    Idempotent and semantics-preserving (see the module docstring). The identity trivially
-    satisfies both; the property tests assert them anyway, so the contract is already
-    pinned when the first fusion rule lands.
+    Contexts are **pairs, not runs** (verified against xarray 2026.7.0): there is no
+    builder→builder middle call to skip, because ``DatasetGroupBy.__getitem__`` selects a
+    *group* and closes the context, and Rolling/Coarsen/Weighted reject ``__getitem__``
+    outright. So this matches adjacent pairs only.
+
+    Every :class:`~xrexpr.ir.ContextOpen` must leave, and one that no fusion rule claims
+    is **demoted to** :class:`~xrexpr.ir.Opaque` together with its closer — the pair then
+    replays verbatim and no rule can fire on it. That fallback is what makes the closer's
+    provisional typing safe: a closer recorded under a shape no rule expects simply fails
+    to match, so the failure mode is pessimisation, never wrongness. It is also why
+    rolling/coarsen/weighted behave exactly as they did under the accessor's barrier until
+    their own fusion rules land.
+
+    Idempotent and semantics-preserving (see the module docstring). Idempotence is not
+    incidental: the output contains no ``ContextOpen`` at all, so a second pass has
+    nothing left to match.
     """
-    return list(nodes)
+    out: list[LoweredOp] = []
+    i, n = 0, len(nodes)
+    while i < n:
+        node = nodes[i]
+        if not isinstance(node, ContextOpen):
+            out.append(node)
+            i += 1
+            continue
+
+        closer = nodes[i + 1] if i + 1 < n else None
+        fused = _fuse_grouped(node, closer) if closer is not None else None
+        if fused is not None:
+            out.append(fused)
+            i += 2
+            continue
+
+        # The mandatory fallback. The *closer* must be demoted with the opener, not just
+        # the opener: a closer left as the node ``to_opnode`` provisionally typed it is a
+        # Dataset-level reading of a call that was never Dataset-level --
+        # ``rolling(time=2).mean()`` would keep a ``Reduce`` whose bare dim spec means
+        # "every dim", and a following select would be rejected against dims the grouped
+        # mean never removed. Demoting the pair is what makes the provisional typing safe.
+        out.append(Opaque(name=node.name, args=node.args, kwargs=node.kwargs))
+        if closer is not None:
+            out.append(Opaque(name=closer.name, args=closer.args, kwargs=closer.kwargs))
+            i += 2
+        else:
+            i += 1  # an unclosed context: the opener is the whole of it
+    return out
+
+
+def _fuse_grouped(opener: ContextOpen, closer: FluentOp) -> GroupedReduce | None:
+    """Fuse a groupby-family pair into a :class:`~xrexpr.ir.GroupedReduce`, or refuse.
+
+    Refusing is always safe (the caller demotes to ``Opaque``), so every condition below
+    is a *narrowing* of what v1 claims to understand rather than a correctness risk.
+
+    - **The opener must be groupby-family.** ``rolling``/``coarsen``/``weighted`` get
+      their own nodes in later PRs; until then they refuse here and replay verbatim.
+    - **The grouper must be a string** — a dim name (``groupby("lat")``) or a component
+      of a dim coordinate (``groupby("time.month")``), from which ``group_dim`` reads
+      off directly. A ``DataArray`` grouper, a non-dim coordinate or a ``Grouper`` object
+      has no single ``group_dim``, so it refuses.
+    - **The closer must be an aggregating reduce.** This is the subtle one, and it is a
+      correction to the obvious reading: a grouped reduce over dims that *exclude* the
+      group dim is not an aggregation at all. ``ds.groupby("time.month").mean("lat")``
+      returns dims ``{time, lon}`` — a per-group *map*, reassembled along the original
+      dim, minting no ``month``. Only a bare closer or one naming the group dim
+      aggregates, and only that case fuses.
+    """
+    match opener.name:
+        # Spelled as a match rather than a set membership so mypy narrows the opener's
+        # name to ``GroupedReduce``'s own (narrower) Literal -- the set would need a cast,
+        # and a cast is exactly the check being skipped.
+        case "groupby" | "groupby_bins" | "resample":
+            kind = opener.name
+        case _:
+            return None
+    if not isinstance(closer, Reduce):
+        return None
+
+    dims = _grouper_dims(opener)
+    if dims is None:
+        return None
+    group_dim, new_dim = dims
+
+    # A bare closer consumes nothing extra: unlike a Dataset-level ``mean()``, a grouped
+    # one reduces only along the group dim, so ``lat``/``lon`` survive.
+    match closer.consumes:
+        case AllDims():
+            extra: frozenset[Hashable] = frozenset()
+        case frozenset() as named if group_dim in named:
+            extra = named - {group_dim}
+        case _:
+            return None  # names dims but not the group dim: the map case
+
+    return GroupedReduce(
+        name=kind,
+        group_dim=group_dim,
+        new_dim=new_dim,
+        reduce=closer.name,
+        args=opener.args,
+        kwargs=opener.kwargs,
+        reduce_args=closer.args,
+        reduce_kwargs=closer.kwargs,
+        consumes=extra,
+    )
+
+
+def _grouper_dims(opener: ContextOpen) -> tuple[Hashable, Hashable] | None:
+    """``(group_dim, new_dim)`` for a groupby-family opener, or ``None`` if not statically known.
+
+    Read off the call, since v1 fuses only string groupers:
+
+    - ``groupby("time.month")`` groups along ``time`` and mints ``month``;
+    - ``groupby("lat")`` mints the dim it grouped over, now holding the distinct values;
+    - ``groupby_bins("lat", 2)`` mints ``lat_bins`` — xarray's own naming convention;
+    - ``resample(time="2D")`` takes its dim from the (single) keyword, and mints it back.
+    """
+    if opener.name == "resample":
+        keys = [k for k in opener.kwargs if k not in _RESAMPLE_OPTION_KWARGS]
+        if len(keys) != 1:
+            return None
+        return keys[0], keys[0]
+
+    if not opener.args or not isinstance(grouper := opener.args[0], str):
+        return None
+    if opener.name == "groupby_bins":
+        return grouper, f"{grouper}_bins"
+    group_dim, _, component = grouper.partition(".")
+    return group_dim, (component or group_dim)
 
 
 def emit(nodes: list[LoweredOp]) -> list[Call]:
@@ -104,19 +239,34 @@ def emit(nodes: list[LoweredOp]) -> list[Call]:
 def _emit_node(node: LoweredOp) -> tuple[Call, ...]:
     """The calls one lowered node stands for.
 
-    Every node in today's vocabulary is one call, and reproduces it from the verbatim
-    header the recorder kept — so an unmodified plan emits exactly the calls the user
-    wrote, spelling included. A rule that *synthesises* a node is responsible for its
-    header, as ``merge_adjacent_selects`` already is; moving that reconstruction here is
-    a follow-up (``docs/roadmap/02-lowering.md`` §7), deliberately not taken in the PR
-    that rewires the pipeline, since it would change rewrite output rather than leave it
-    identical.
+    Most nodes are one call and reproduce it from the verbatim header the recorder kept,
+    so an unmodified plan emits exactly the calls the user wrote, spelling included. A
+    :class:`~xrexpr.ir.GroupedReduce` is the case the whole design is for: one node, two
+    calls, reassembled from the headers it fused. Rebuilding them from the *semantic*
+    fields instead would re-spell calls the pipeline never needed to touch (and would
+    have to invent ``groupby("time.month")`` back out of ``group_dim``/``new_dim``), so
+    the headers are kept and replayed as recorded.
+
+    A rule that *synthesises* a node is still responsible for its own header, as
+    ``merge_adjacent_selects`` is; moving that reconstruction here is a follow-up
+    (``docs/roadmap/02-lowering.md`` §7).
 
     ``assert_never`` closes the match: a new lowered variant fails type-check here until
     someone says what it replays as, which is exactly the question a fused node exists to
-    answer.
+    answer. A :class:`~xrexpr.ir.ContextOpen` cannot reach this function at all — it is
+    not in :data:`~xrexpr.ir.LoweredOp` — so lowering's central invariant is enforced by
+    the type checker rather than by a runtime check here.
     """
     match node:
+        case GroupedReduce() as grouped:
+            return (
+                Call(name=grouped.name, args=grouped.args, kwargs=grouped.kwargs),
+                Call(
+                    name=grouped.reduce,
+                    args=grouped.reduce_args,
+                    kwargs=grouped.reduce_kwargs,
+                ),
+            )
         case Reduce() | Select() | Scan() | Project() | Rechunk() | Opaque():
             return (Call(name=node.name, args=node.args, kwargs=node.kwargs),)
         case _:
