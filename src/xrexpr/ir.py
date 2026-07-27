@@ -32,6 +32,17 @@ expansion is deferred to a reader that has an exact schema. It is a *sentinel*, 
 narrow it with a match arm rather than an ``assert``, so the two cases are handled where
 the field is used.
 
+**Dim sets are symbolic where the call is.** A bare ``ds.mean()`` names no dim: it means
+"every dim there is *when this runs*", which is not knowable at record time — past an
+unmodelled op the recorder's schema is a guess, so expanding it eagerly bakes in names
+that may already be wrong (``rename`` is the case that bites). :data:`DimSet` therefore
+admits the sentinel :data:`ALL_DIMS` alongside a concrete ``frozenset``, and the
+expansion is deferred to a reader that has an exact schema. It is a *sentinel*, not
+``None``: ``None`` already means **don't know** in this codebase
+(``SchemaState.var_dims``), whereas ``ALL_DIMS`` means something definite. Readers
+narrow it with a match arm rather than an ``assert``, so the two cases are handled where
+the field is used.
+
 Only **unary** ops are modelled here. Binary/n-ary ops (``merge``/``concat``/``where``)
 would add their own variants carrying plan-typed children and promote the container from
 a list to a tree — an additive, orthogonal change deferred until such an op is in scope.
