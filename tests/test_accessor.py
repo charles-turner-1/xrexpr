@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
+from frozendict import frozendict
 from xarray.testing import assert_equal
 
 import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
@@ -23,9 +24,9 @@ from xrexpr.accessor import (
     LazyDatasetProxy,
 )
 from xrexpr.exceptions import InvalidExpressionError
-from xrexpr.ir import Opaque
+from xrexpr.ir import ALL_DIMS, Opaque
 from xrexpr.operations import spec
-from xrexpr.optimize import optimize
+from xrexpr.optimize import _schemas, optimize
 
 #: xrexpr itself never needs dask, but replaying a ``chunk()`` call does -- without a
 #: chunk manager xarray raises ``ImportError``. Only the rechunk tests below need it.
@@ -102,11 +103,26 @@ def test_record_builds_op_variants(ds):
     assert isinstance(isel_node, Select) and isel_node.consumes == frozenset({"time"})
 
 
-def test_schema_threads_as_ops_are_recorded(ds):
-    # each recorded op evolves the proxy's logical schema, no materialisation
-    assert dict(ds.plan._schema.dims) == {"time": 4, "lat": 3, "lon": 5}
-    assert dict(ds.plan.mean("lat")._schema.dims) == {"time": 4, "lon": 5}
-    assert dict(ds.plan.mean("lat").isel(time=0)._schema.dims) == {"lon": 5}
+def test_recording_holds_no_schema_and_the_optimiser_folds_it(ds):
+    # Recording is a pure append -- the proxy carries the base dataset and the plan and
+    # nothing else. The single logical-schema fold belongs to the optimiser, which plans
+    # from the front and so is the reader whose fold is exact.
+    chain = ds.plan.mean("lat").isel(time=0)
+    assert not hasattr(chain, "_schema")
+
+    entering = _schemas(chain._ops, chain._base_schema())
+    assert [dict(s.dims) for s in entering] == [
+        {"time": 4, "lat": 3, "lon": 5},  # what mean("lat") sees
+        {"time": 4, "lon": 5},  # what isel(time=0) sees
+    ]
+
+
+def test_bare_reduce_records_all_dims_symbolically(ds):
+    # No dim named -> no dim set frozen in at record time. The expansion happens against
+    # the optimiser's fold, so it can't bake in names an unmodelled op has since changed.
+    node = ds.plan.mean()._ops[0]
+    assert node.consumes is ALL_DIMS
+    assert node.args == () and node.kwargs == frozendict()  # replays as bare mean()
 
 
 def test_getitem_records_projection_node(ds):

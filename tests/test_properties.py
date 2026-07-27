@@ -94,15 +94,16 @@ def _apply(obj, calls):
 
 
 def _build_plan(ds, calls):
-    """Normalise ``calls`` into a plan the way the recorder would, threading the schema.
+    """Normalise ``calls`` into a plan the way the recorder would, folding the schema.
 
     Returns the plan and the *final* schema, so a caller can compare tracked metadata
-    against what evaluation actually produced.
+    against what evaluation actually produced. ``to_opnode`` needs no schema — the fold
+    here exists only for that returned snapshot.
     """
     schema = SchemaState.from_dataset(ds)
     plan = []
     for call in calls:
-        node = to_opnode(schema, call.name, (), dict(call))
+        node = to_opnode(call.name, (), dict(call))
         plan.append(node)
         schema = apply_schema(schema, node)
     return plan, schema

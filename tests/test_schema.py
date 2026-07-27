@@ -11,7 +11,7 @@ a non-scalar select leaves the dim in ``indexer`` only. ``data_vars`` (variable 
 import numpy as np
 import pytest
 
-from xrexpr.ir import Project, Reduce, Scan, Select
+from xrexpr.ir import ALL_DIMS, Project, Reduce, Scan, Select
 from xrexpr.schema import SchemaState, apply_schema
 
 
@@ -43,6 +43,25 @@ def test_reduce_removes_dim_and_its_coord(ds):
     after = apply_schema(schema, node)
     assert after.dims == {"time": 4, "lon": 5}
     assert after.coords == {"time", "lon"}
+
+
+def test_bare_reduce_removes_every_dim_and_coord(ds):
+    # ``apply_schema`` is where the deferred ALL_DIMS expansion is finally cashed in,
+    # against a schema that is exact rather than the recorder's guess.
+    schema = SchemaState.from_dataset(ds)
+    after = apply_schema(schema, Reduce(name="mean", consumes=ALL_DIMS))
+    assert after.dims == {}
+    assert after.coords == set()
+    assert all(dims == () for dims in after.data_vars.values())
+
+
+def test_bare_reduce_expands_against_the_schema_it_is_given(ds):
+    # "every dim *at this point*": fold a select in first and the sentinel resolves to
+    # what is left, not to the original dataset's dims.
+    schema = apply_schema(
+        SchemaState.from_dataset(ds), Select(name="isel", indexer={"time": 0})
+    )
+    assert apply_schema(schema, Reduce(name="mean", consumes=ALL_DIMS)).dims == {}
 
 
 def test_scalar_isel_removes_dim(ds):

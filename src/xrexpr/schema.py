@@ -1,15 +1,18 @@
 """Record-time logical schema tracking (no data materialisation).
 
-The ``.plan`` proxy starts from the *real* ``self._base_ds``, so as it records a
-chain it can maintain a cheap **logical** schema — the current dims, their sizes,
-and the coordinate names — and evolve it after each op **without ever touching
-array data**. That is the record-time win the CST path could never have: it lets
-``to_opnode`` (PR 5) resolve, e.g., a no-dim ``mean()`` to "every dim that exists
-*right now*" rather than blindly against the original dataset.
+The ``.plan`` proxy starts from the *real* base dataset, so a cheap **logical** schema
+— the current dims, their sizes, and the coordinate names — can be folded forward
+through a plan **without ever touching array data**. That is what lets a rule know the
+shape each node sees, and what a dim set like ``ds.mean()``'s
+:data:`~xrexpr.ir.ALL_DIMS` is finally resolved against.
+
+The fold is owned by the *optimiser* (``optimize._schemas``), not by recording:
+:func:`to_opnode` is a pure function of one call, so nothing is resolved against a
+schema that is only a guess about where the op will run.
 
 :class:`SchemaState` is an immutable snapshot; :func:`apply_schema` returns the
 next snapshot after an :data:`~xrexpr.ir.Op` node is applied; :func:`to_opnode`
-normalises a raw recorded call into that ``Op`` variant against the current schema.
+normalises a raw recorded call into that ``Op`` variant.
 """
 
 from collections.abc import Hashable, Iterable, Mapping
@@ -20,7 +23,18 @@ import xarray as xr
 from frozendict import frozendict
 from typing_extensions import assert_never
 
-from xrexpr.ir import Op, Opaque, Project, Rechunk, Reduce, Scan, Select
+from xrexpr.ir import (
+    ALL_DIMS,
+    AllDims,
+    DimSet,
+    Op,
+    Opaque,
+    Project,
+    Rechunk,
+    Reduce,
+    Scan,
+    Select,
+)
 from xrexpr.operations import spec as op_spec
 
 __all__ = ["SchemaState", "apply_schema", "to_opnode"]
@@ -94,7 +108,9 @@ def apply_schema(schema: SchemaState, node: Op) -> SchemaState:
 
     Each variant affects the schema differently, so this dispatches with ``match``:
 
-    - :class:`~xrexpr.ir.Reduce` removes its ``consumes`` dims;
+    - :class:`~xrexpr.ir.Reduce` removes its ``consumes`` dims — *every* dim when that
+      is :data:`~xrexpr.ir.ALL_DIMS`, which is where the deferred bare-reduce expansion
+      is finally cashed in against a schema that is exact;
     - :class:`~xrexpr.ir.Select` removes the dims it drops (scalar indices) and
       *resizes* the dims it keeps (slice/sequence indices);
     - :class:`~xrexpr.ir.Project` restricts the variables, leaving dims alone;
@@ -116,8 +132,18 @@ def apply_schema(schema: SchemaState, node: Op) -> SchemaState:
 
     match node:
         case Reduce(consumes=consumes):
-            for dim in consumes:
-                dims.pop(dim, None)
+            # Nested rather than two ``Reduce`` arms: splitting the variant across arms
+            # leaves mypy unable to see it as exhausted, and this way ``DimSet`` gets an
+            # ``assert_never`` of its own -- a third dim-set shape fails type-check here
+            # too, not just a seventh ``Op``.
+            match consumes:
+                case AllDims():
+                    dims.clear()  # a bare ``mean()`` -- whatever is here now, it goes
+                case frozenset() as named:
+                    for dim in named:
+                        dims.pop(dim, None)
+                case _:
+                    assert_never(consumes)
         case Select(indexer=indexer) as select:
             for dim in select.consumes:
                 dims.pop(dim, None)
@@ -161,20 +187,22 @@ _CHUNK_OPTION_KWARGS = frozenset(
 
 
 def to_opnode(
-    schema: SchemaState,
     name: str,
     args: tuple[Any, ...],
     kwargs: Mapping[str, Any],
 ) -> Op:
     """Normalise one recorded call into a resolved :data:`~xrexpr.ir.Op` variant.
 
-    Resolution is against the *current* ``schema`` (not the original dataset) — the
-    record-time win the proxy unlocks:
+    A pure function of the call itself: every kind below is settled by the method name
+    and the shape of its arguments, so nothing here reads a schema. That is deliberate
+    — the one case that used to need one, a bare ``mean()``, now records the symbolic
+    :data:`~xrexpr.ir.ALL_DIMS` instead of an eagerly expanded dim set, leaving the
+    expansion to a reader whose schema is exact.
 
     - **reduce** (``mean``/``sum``/...): the dim spec — positional (``mean("lat")``),
       keyword (``mean(dim="lat")``) or tuple (``mean(("lat", "lon"))``) — collapses to
-      one ``consumes`` frozenset; a **no-dim ``mean()`` consumes every dim in the
-      schema right now**, fixing the empty-dim reorder bug (``ds.mean().isel(...)``).
+      one ``consumes`` frozenset; a **no-dim ``mean()`` consumes** :data:`~xrexpr.ir.ALL_DIMS`,
+      which is what fixes the empty-dim reorder bug (``ds.mean().isel(...)``).
     - **select** (``isel``/``sel``): the indexer (a positional dict and/or kwargs,
       minus option kwargs like ``drop``) becomes ``indexer``; a dim given a *scalar*
       index is dropped and so also lands in ``consumes`` (a slice/list/array keeps it).
@@ -203,7 +231,7 @@ def to_opnode(
             name=name,
             args=args,
             kwargs=kw,
-            consumes=_reduce_dims(schema, args, kwargs),
+            consumes=_reduce_dims(args, kwargs),
         )
     if kind == "select":
         return Select(
@@ -252,18 +280,21 @@ def _projected_names(args: tuple[Any, ...]) -> tuple[Hashable, ...] | None:
     return None
 
 
-def _reduce_dims(
-    schema: SchemaState, args: tuple[Any, ...], kwargs: Mapping[str, Any]
-) -> frozenset[Hashable]:
-    """Dims a reduction removes: its ``dim`` spec, or *all* current dims if unspecified."""
+def _reduce_dims(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> DimSet:
+    """Dims a reduction removes: its ``dim`` spec, or :data:`~xrexpr.ir.ALL_DIMS`.
+
+    An unspecified ``dim`` is left symbolic rather than expanded here: which dims exist
+    depends on where in the plan the reduce ends up running, and this function is not
+    the place that knows.
+    """
     if "dim" in kwargs:
         dim = kwargs["dim"]
     elif args:
         dim = args[0]  # reductions take ``dim`` first (``.reduce(func, dim)`` aside)
     else:
         dim = None
-    if dim is None:  # bare ``mean()`` / ``mean(dim=None)`` → every current dim
-        return frozenset(schema.dim_names)
+    if dim is None:  # bare ``mean()`` / ``mean(dim=None)`` → every dim, resolved later
+        return ALL_DIMS
     return _as_dim_set(dim)
 
 
