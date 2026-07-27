@@ -9,9 +9,11 @@ a non-scalar select leaves the dim in ``indexer`` only. ``data_vars`` (variable 
 """
 
 import numpy as np
+import pandas as pd
 import pytest
+import xarray as xr
 
-from xrexpr.ir import ALL_DIMS, Project, Reduce, Scan, Select
+from xrexpr.ir import ALL_DIMS, GroupedReduce, Project, Reduce, Scan, Select
 from xrexpr.schema import SchemaState, apply_schema
 
 
@@ -161,6 +163,100 @@ def test_scalar_select_still_drops_a_dim_of_unknown_size(ds):
     after = apply_schema(unknown, Select(name="isel", indexer={"time": 0}))
     assert "time" not in after.dims
     assert "time" not in after.coords
+
+
+# --- grouped reduces -----------------------------------------------------------------
+# The arm was derived from what xarray actually does rather than from first principles,
+# so it is checked the same way: fold the schema, run the chain, compare. Anything else
+# would only re-assert the assumption the arm was written from.
+
+
+@pytest.fixture
+def dated_ds() -> xr.Dataset:
+    rng = np.random.default_rng(0)
+    return xr.Dataset(
+        {
+            "temperature": (("time", "lat", "lon"), rng.random((24, 3, 5))),
+            # deliberately missing ``time``: it still gains the minted dim
+            "elevation": (("lat", "lon"), rng.random((3, 5))),
+        },
+        coords={
+            "time": pd.date_range("2000-01-31", periods=24, freq="ME"),
+            "lat": np.arange(3),
+            "lon": np.arange(5),
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("calls", "node"),
+    [
+        (
+            [("groupby", ("time.month",)), ("mean", ())],
+            GroupedReduce(
+                name="groupby", group_dim="time", new_dim="month", reduce="mean"
+            ),
+        ),
+        (
+            [("groupby", ("time.month",)), ("mean", (["time", "lat"],))],
+            GroupedReduce(
+                name="groupby",
+                group_dim="time",
+                new_dim="month",
+                reduce="mean",
+                consumes={"lat"},
+            ),
+        ),
+        (
+            [("groupby", ("lat",)), ("mean", ())],
+            GroupedReduce(
+                name="groupby", group_dim="lat", new_dim="lat", reduce="mean"
+            ),
+        ),
+        (
+            [("groupby_bins", ("lat", 2)), ("mean", ())],
+            GroupedReduce(
+                name="groupby_bins", group_dim="lat", new_dim="lat_bins", reduce="mean"
+            ),
+        ),
+    ],
+)
+def test_grouped_reduce_arm_agrees_with_xarray(dated_ds, calls, node):
+    eager = dated_ds
+    for name, args in calls:
+        eager = getattr(eager, name)(*args)
+
+    after = apply_schema(SchemaState.from_dataset(dated_ds), node)
+
+    assert after.dim_names == frozenset(eager.sizes)
+    assert after.coords == frozenset(eager.coords)
+    assert {k: set(v) for k, v in after.data_vars.items()} == {
+        k: set(v.dims) for k, v in eager.data_vars.items()
+    }
+
+
+def test_grouped_reduce_mints_a_dim_of_unknown_size(dated_ds):
+    # The group count is a fact about coordinate *values*, which this layer does not read
+    # -- exactly the gap ``int | None`` was added for. Unknown, never a guess.
+    node = GroupedReduce(
+        name="groupby", group_dim="time", new_dim="month", reduce="mean"
+    )
+    after = apply_schema(SchemaState.from_dataset(dated_ds), node)
+    assert after.dims["month"] is None
+    assert after.dims["lat"] == 3  # untouched dims keep their known sizes
+
+
+def test_grouped_reduce_adds_the_new_dim_to_a_variable_that_lacked_the_group_dim(
+    dated_ds,
+):
+    # The non-obvious half: ``elevation(lat, lon)`` comes back as ``(month, lat, lon)``
+    # even though it never carried ``time``. Verified against xarray above; asserted
+    # directly here because it is the part a reader would most expect to be wrong.
+    node = GroupedReduce(
+        name="groupby", group_dim="time", new_dim="month", reduce="mean"
+    )
+    after = apply_schema(SchemaState.from_dataset(dated_ds), node)
+    assert set(after.data_vars["elevation"]) == {"month", "lat", "lon"}
 
 
 def test_scan_leaves_schema_unchanged(ds):

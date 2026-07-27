@@ -53,6 +53,28 @@ OP_TABLE: dict[str, OpSpec] = {
 }
 
 
+#: Methods returning a *builder* (``DatasetGroupBy``, ``DatasetRolling``,
+#: ``DatasetWeighted``, ...) rather than a Dataset. Deliberately not in
+#: :data:`OP_TABLE`: a table entry names the ``Op`` variant a call *is*, whereas these
+#: are half of an operation — ``to_opnode`` mints a :class:`~xrexpr.ir.ContextOpen` and
+#: what the pair means is settled by ``lower.to_lower_ir``, which can see the other half.
+#:
+#: Every name is checked against ``xr.Dataset`` by the test suite, so a typo or a
+#: method xarray removes fails a test rather than silently ceasing to open a context.
+CONTEXT_METHODS = frozenset(
+    {
+        "groupby",
+        "groupby_bins",
+        "resample",
+        "rolling",
+        "rolling_exp",
+        "coarsen",
+        "weighted",
+        "cumulative",
+    }
+)
+
+
 def spec(name: str) -> OpSpec | None:
     """Return the :class:`OpSpec` for ``name``, or ``None`` if it isn't tabulated."""
     return OP_TABLE.get(name)

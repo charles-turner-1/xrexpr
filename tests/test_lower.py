@@ -1,20 +1,35 @@
 """Tests for the lowering stage: ``to_lower_ir`` and ``emit``.
 
-The stage is currently an identity — no fused node kinds exist yet — so these pin the
-*contract* rather than any translation: lowering is semantics-preserving and idempotent,
-and ``emit`` reproduces the calls the recorder saw, spelling included. Written now, while
-the answers are trivially known, so the first fusion rule lands against assertions that
-were not written to accommodate it.
+Two things are pinned here. The *contract* — lowering is semantics-preserving and
+idempotent, and ``emit`` reproduces the calls the recorder saw, spelling included — and
+the *fusion policy*: which builder pairs v1 claims to understand, and that everything else
+takes the mandatory opaque fallback rather than being modelled on a guess.
+
+Refusing to fuse is always safe, so the negative cases matter as much as the positive
+ones: each pins a narrowing of what is claimed, not a bug.
 
 ``emit`` is a pure function of the plan, so everything here runs without a dataset; the
 end-to-end equality lives in ``test_accessor.py`` and ``test_properties.py``.
 """
 
+from typing import get_args
+
 import pytest
 from frozendict import frozendict
 
-from xrexpr.ir import Opaque, Project, Rechunk, Reduce, Scan, Select
+from xrexpr.ir import (
+    ContextOpen,
+    ContextOpenName,
+    GroupedReduce,
+    Opaque,
+    Project,
+    Rechunk,
+    Reduce,
+    Scan,
+    Select,
+)
 from xrexpr.lower import Call, emit, to_lower_ir
+from xrexpr.operations import CONTEXT_METHODS
 from xrexpr.schema import to_opnode
 
 
@@ -29,6 +44,20 @@ def plan():
         to_opnode("mean", ("lat",), {}),
         to_opnode("where", ("cond",), {}),
     ]
+
+
+def test_context_open_names_match_the_runtime_table():
+    # The Literal in ``ir`` and the frozenset in ``operations`` are the same list written
+    # twice -- one for the type checker, one for ``to_opnode``'s dispatch. Pin them
+    # together so neither can drift.
+    assert set(get_args(ContextOpenName)) == set(CONTEXT_METHODS)
+
+
+def test_every_context_method_records_as_an_opener():
+    assert all(
+        isinstance(to_opnode(name, (), {}), ContextOpen)
+        for name in sorted(CONTEXT_METHODS)
+    )
 
 
 def test_the_fixture_plan_really_covers_every_variant(plan):
@@ -86,3 +115,135 @@ def test_call_coerces_to_immutable_containers_and_hashes():
 def test_calls_compare_by_value():
     assert Call(name="mean", args=("lat",)) == Call(name="mean", args=("lat",))
     assert Call(name="mean", args=("lat",)) != Call(name="mean", args=("lon",))
+
+
+# --- fusing the groupby family -------------------------------------------------------
+
+
+def _lower(*calls):
+    """Lower the plan the recorder would build from ``(name, args, kwargs)`` triples."""
+    return to_lower_ir([to_opnode(*call) for call in calls])
+
+
+@pytest.mark.parametrize(
+    ("grouper", "group_dim", "new_dim"),
+    [
+        # verified against xarray 2026.7.0 -- see GroupedReduce's docstring
+        (("groupby", ("time.month",), {}), "time", "month"),
+        (("groupby", ("lat",), {}), "lat", "lat"),
+        (("groupby_bins", ("lat", 2), {}), "lat", "lat_bins"),
+        (("resample", (), {"time": "2D"}), "time", "time"),
+    ],
+)
+def test_grouper_dims_are_read_off_the_opener(grouper, group_dim, new_dim):
+    (node,) = _lower(grouper, ("mean", (), {}))
+    assert isinstance(node, GroupedReduce)
+    assert (node.group_dim, node.new_dim) == (group_dim, new_dim)
+    assert node.reduce == "mean"
+
+
+def test_bare_closer_consumes_nothing_extra():
+    # The correction that is easy to get backwards: a grouped bare ``mean()`` reduces
+    # only along the group dim, so unlike a Dataset-level bare reduce it leaves the other
+    # dims alone. ``consumes`` is what it removes *in addition*, which here is nothing.
+    (node,) = _lower(("groupby", ("time.month",), {}), ("mean", (), {}))
+    assert node.consumes == frozenset()
+
+
+def test_closer_naming_the_group_dim_fuses_with_no_extra():
+    (node,) = _lower(("groupby", ("time.month",), {}), ("mean", ("time",), {}))
+    assert node.consumes == frozenset()
+
+
+def test_closer_naming_more_than_the_group_dim_keeps_the_rest_as_consumes():
+    (node,) = _lower(("groupby", ("time.month",), {}), ("mean", (["time", "lat"],), {}))
+    assert node.consumes == frozenset({"lat"})
+
+
+def test_within_group_map_does_not_fuse():
+    # ``ds.groupby("time.month").mean("lat")`` is a per-group *map*: it keeps ``time``
+    # and mints no ``month``, so the aggregation node would misdescribe it. Refusing
+    # leaves a verbatim pair, which is correct if unoptimised.
+    lowered = _lower(("groupby", ("time.month",), {}), ("mean", ("lat",), {}))
+    assert [type(n) for n in lowered] == [Opaque, Opaque]
+    assert [n.name for n in lowered] == ["groupby", "mean"]
+
+
+@pytest.mark.parametrize(
+    "opener",
+    [
+        ("rolling", (), {"time": 3}),
+        ("coarsen", (), {"time": 2}),
+        ("weighted", ("w",), {}),
+        ("cumulative", ("time",), {}),
+        ("rolling_exp", (), {"time": 3}),
+    ],
+)
+def test_openers_without_a_fusion_rule_demote_the_whole_pair(opener):
+    # Until their own PRs land these behave exactly as the accessor's barrier made them:
+    # both halves opaque, so no rule can fire on or across the pair.
+    lowered = _lower(opener, ("mean", (), {}))
+    assert [type(n) for n in lowered] == [Opaque, Opaque]
+
+
+def test_demoting_the_closer_is_not_optional():
+    # The failure this guards: leaving the closer as the ``Reduce`` ``to_opnode``
+    # provisionally built keeps a *Dataset-level* reading of a call that was never
+    # Dataset-level -- a bare grouped ``mean()`` would carry ALL_DIMS and a following
+    # select would be rejected against dims it never removed.
+    lowered = _lower(("rolling", (), {"time": 3}), ("mean", (), {}))
+    assert not any(isinstance(n, Reduce) for n in lowered)
+
+
+def test_non_string_grouper_does_not_fuse():
+    # A DataArray/Grouper argument has no single statically-known group dim.
+    lowered = _lower(("groupby", (object(),), {}), ("mean", (), {}))
+    assert [type(n) for n in lowered] == [Opaque, Opaque]
+
+
+def test_untabulated_closer_does_not_fuse():
+    # ``first`` records Opaque, not Reduce, so there is no dim spec to reason about.
+    lowered = _lower(("groupby", ("lat",), {}), ("first", (), {}))
+    assert [type(n) for n in lowered] == [Opaque, Opaque]
+
+
+def test_unclosed_context_demotes_to_a_single_opaque():
+    lowered = _lower(("groupby", ("lat",), {}))
+    assert [type(n) for n in lowered] == [Opaque]
+
+
+def test_no_context_open_ever_survives_lowering():
+    # The invariant the LoweredOp alias enforces at type-check time, asserted at runtime
+    # too across every shape above -- fused, refused, and unclosed.
+    plans = [
+        _lower(("groupby", ("time.month",), {}), ("mean", (), {})),
+        _lower(("groupby", ("time.month",), {}), ("mean", ("lat",), {})),
+        _lower(("rolling", (), {"time": 3}), ("mean", (), {})),
+        _lower(("groupby", ("lat",), {})),
+    ]
+    assert not any(isinstance(n, ContextOpen) for plan in plans for n in plan)
+
+
+def test_ops_after_a_context_are_modelled_again():
+    # What retires the trailing barrier: only the pair goes opaque, so the ``mean`` that
+    # follows an unfusable ``first`` is a real Reduce again.
+    lowered = _lower(
+        ("groupby", ("lat",), {}), ("first", (), {}), ("mean", ("time",), {})
+    )
+    assert [type(n) for n in lowered] == [Opaque, Opaque, Reduce]
+    assert lowered[-1].consumes == frozenset({"time"})
+
+
+def test_fused_node_emits_both_calls_verbatim():
+    (node,) = _lower(("groupby", ("time.month",), {}), ("mean", (), {"skipna": True}))
+    assert emit([node]) == [
+        Call(name="groupby", args=("time.month",)),
+        Call(name="mean", kwargs=frozendict({"skipna": True})),
+    ]
+
+
+def test_lowering_stays_idempotent_with_fusion():
+    once = _lower(
+        ("groupby", ("time.month",), {}), ("mean", (), {}), ("cumsum", ("lat",), {})
+    )
+    assert to_lower_ir(once) == once

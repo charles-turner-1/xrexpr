@@ -17,16 +17,11 @@ from frozendict import frozendict
 from xarray.testing import assert_equal
 
 import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
-from xrexpr.accessor import (
-    _CONTEXT_METHODS,
-    _EAGER_ATTRS,
-    Explanation,
-    LazyDatasetProxy,
-)
+from xrexpr.accessor import _EAGER_ATTRS, Explanation, LazyDatasetProxy
 from xrexpr.exceptions import InvalidExpressionError
-from xrexpr.ir import ALL_DIMS, Opaque
+from xrexpr.ir import ALL_DIMS, ContextOpen, GroupedReduce, Opaque, Reduce, Select
 from xrexpr.lower import emit
-from xrexpr.operations import spec
+from xrexpr.operations import CONTEXT_METHODS, spec
 from xrexpr.optimize import _schemas
 
 #: xrexpr itself never needs dask, but replaying a ``chunk()`` call does -- without a
@@ -413,17 +408,40 @@ def test_select_after_grouped_reduce_matches_eager(ds):
     assert_equal(chain.collect(), ds.groupby("time").mean().isel(time=0))
 
 
-def test_context_chain_records_only_opaque_in_written_order(ds):
+def test_context_chain_records_an_opener_then_lowers_to_one_node(ds):
     chain = ds.plan.groupby("time").mean().isel(time=0)
 
-    # every node from the context op on is Opaque, so no rule has an adjacency to fire on
-    assert [type(op) for op in chain._ops] == [Opaque, Opaque, Opaque]
-    assert [op.name for op in chain._ops] == ["groupby", "mean", "isel"]
+    # recorded: the opener is typed, the closer provisionally as an ordinary reduce
+    assert [type(op) for op in chain._ops] == [ContextOpen, Reduce, Select]
 
-    # ... and the optimised plan the replay walks is the recorded one, unreordered
+    # lowered: the pair becomes one node, and no ContextOpen survives
+    lowered = chain._optimized()
+    assert [type(n) for n in lowered] == [GroupedReduce, Select]
+    assert not any(isinstance(n, ContextOpen) for n in lowered)
+
+    # ... and it still replays as the two calls that were written, in order
     assert chain.explain() == Explanation(
         "plan (3 ops):\n  1. groupby('time')\n  2. mean()\n  3. isel(time=0)"
     )
+
+
+def test_ops_after_an_unfusable_context_are_modelled_again(ds):
+    # The trailing barrier is retired. ``first`` closes the context and returns a Dataset,
+    # so the ``mean`` after it is an ordinary Dataset reduce -- a chain the barrier
+    # rendered permanently opaque from the groupby onward.
+    chain = ds.plan.groupby("lat").first().mean("time")
+
+    lowered = chain._optimized()
+    assert [type(n) for n in lowered] == [Opaque, Opaque, Reduce]
+    assert_equal(chain.collect(), ds.groupby("lat").first().mean("time"))
+
+
+def test_grouped_chain_still_replays_as_written(ds):
+    # PR 3 adds no rules for GroupedReduce, so a fused chain must replay exactly as the
+    # barrier made it -- the node is modelled, nothing moves across it yet.
+    chain = ds.plan.groupby("time").mean().isel(time=0)
+    assert [c.name for c in emit(chain._optimized())] == ["groupby", "mean", "isel"]
+    assert_equal(chain.collect(), ds.groupby("time").mean().isel(time=0))
 
 
 def test_builder_only_method_records_and_replays(ds):
@@ -474,9 +492,9 @@ def test_plans_without_a_context_still_optimise(ds):
     assert [n.name for n in chain._optimized()] == ["isel", "mean"]
 
 
-@pytest.mark.parametrize("name", sorted(_CONTEXT_METHODS))
+@pytest.mark.parametrize("name", sorted(CONTEXT_METHODS))
 def test_every_context_method_is_a_dataset_method_and_untabulated(name):
-    # Coverage guard over ``_CONTEXT_METHODS``: a typo'd or removed name would silently
+    # Coverage guard over ``CONTEXT_METHODS``: a typo'd or removed name would silently
     # stop barriering. ``spec(name) is None`` pins the second half of the assumption
     # ``_in_opaque_context`` rests on -- these names record as ``Opaque``, so testing for
     # ``Opaque`` there really does detect them. Tabulating one would need this revisited.

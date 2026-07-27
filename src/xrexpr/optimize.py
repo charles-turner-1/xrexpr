@@ -57,7 +57,6 @@ from xrexpr.ir import (
     AllDims,
     DimSet,
     LoweredOp,
-    Op,
     Opaque,
     Project,
     Rechunk,
@@ -202,7 +201,7 @@ def merge_adjacent_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
     return out if folded else None
 
 
-def _mergeable_select(node: Op) -> TypeGuard[Select]:
+def _mergeable_select(node: LoweredOp) -> TypeGuard[Select]:
     """Whether ``node`` is a select fully described by its ``indexer`` (no option kwargs).
 
     A select whose kwargs carry keys beyond the indexed dims (``drop``, ``method``,

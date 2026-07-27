@@ -27,8 +27,12 @@ from xrexpr.indexers import Indexer
 from xrexpr.ir import (
     ALL_DIMS,
     AllDims,
+    ContextOpen,
+    ContextOpenName,
     DimSet,
-    Op,
+    FluentOp,
+    GroupedReduce,
+    LoweredOp,
     Opaque,
     Project,
     Rechunk,
@@ -36,6 +40,7 @@ from xrexpr.ir import (
     Scan,
     Select,
 )
+from xrexpr.operations import CONTEXT_METHODS
 from xrexpr.operations import spec as op_spec
 
 __all__ = ["SchemaState", "apply_schema", "to_opnode"]
@@ -112,7 +117,7 @@ class SchemaState:
         return frozenset(self.dims)
 
 
-def apply_schema(schema: SchemaState, node: Op) -> SchemaState:
+def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
     """Return the schema resulting from applying ``node`` to ``schema``.
 
     Each variant affects the schema differently, so this dispatches with ``match``:
@@ -123,6 +128,9 @@ def apply_schema(schema: SchemaState, node: Op) -> SchemaState:
     - :class:`~xrexpr.ir.Select` removes the dims it drops (scalar indices) and
       *resizes* the dims it keeps (slice/sequence indices);
     - :class:`~xrexpr.ir.Project` restricts the variables, leaving dims alone;
+    - :class:`~xrexpr.ir.GroupedReduce` removes its ``group_dim`` and any extra
+      ``consumes``, and mints ``new_dim`` — of *unknown* size, since the group count is a
+      fact about coordinate values — onto every variable;
     - :class:`~xrexpr.ir.Scan`/:class:`~xrexpr.ir.Rechunk`/:class:`~xrexpr.ir.Opaque`
       leave dims untouched (a rechunk changes only chunk topology);
     - a coordinate sharing a name with a removed dim disappears (all cases), and a
@@ -163,6 +171,12 @@ def apply_schema(schema: SchemaState, node: Op) -> SchemaState:
                     dims[dim] = _selected_size(select.name, index, dims[dim])
         case Project(variables=variables):
             data_vars = {v: data_vars[v] for v in variables if v in data_vars}
+        case GroupedReduce() as grouped:
+            for dim in (grouped.group_dim, *grouped.consumes):
+                dims.pop(dim, None)
+            # The minted dim's extent is the number of groups -- a fact about coordinate
+            # *values*, which this layer does not read. ``None`` rather than a guess.
+            dims[grouped.new_dim] = None
         case Scan() | Rechunk() | Opaque():
             pass
         case _:
@@ -174,6 +188,17 @@ def apply_schema(schema: SchemaState, node: Op) -> SchemaState:
         name: tuple(d for d in var_dims if d not in removed)
         for name, var_dims in data_vars.items()
     }
+    if isinstance(node, GroupedReduce):
+        # Verified against xarray 2026.7.0, and the non-obvious half of the arm above:
+        # *every* variable comes back carrying the minted dim, including ones that never
+        # carried the group dim -- ``elevation(lat, lon)`` under ``groupby("time.month")``
+        # is ``(month, lat, lon)``. So this is an addition to each variable, not a
+        # substitution of one dim for another. The minted dim is also a coordinate.
+        coords = coords | {node.new_dim}
+        data_vars = {
+            name: (node.new_dim, *(d for d in var_dims if d != node.new_dim))
+            for name, var_dims in data_vars.items()
+        }
     return SchemaState(
         dims=frozendict(dims), coords=coords, data_vars=frozendict(data_vars)
     )
@@ -230,7 +255,7 @@ def to_opnode(
     name: str,
     args: tuple[Any, ...],
     kwargs: Mapping[str, Any],
-) -> Op:
+) -> FluentOp:
     """Normalise one recorded call into a resolved :data:`~xrexpr.ir.Op` variant.
 
     A pure function of the call itself: every kind below is settled by the method name
@@ -266,6 +291,14 @@ def to_opnode(
     kind = op.kind if op is not None else "opaque"
     kw = frozendict(kwargs)
 
+    if name in CONTEXT_METHODS:
+        # Decidable per-call even though what it *means* is not: a builder-returning
+        # method opens a context whatever follows it. Pairing is lowering's job.
+        return ContextOpen(
+            name=cast(ContextOpenName, name),
+            args=args,
+            kwargs=kw,
+        )
     if kind == "reduce":
         return Reduce(
             name=name,
