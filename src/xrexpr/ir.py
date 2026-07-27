@@ -18,6 +18,17 @@ table can't decide it — the shape of the *key* does.
 ``to_opnode`` (in ``schema.py``) builds these at record time; the optimiser
 (``optimize.py``) rewrites the list and the ``.plan`` accessor replays it.
 
+**Dim sets are symbolic where the call is.** A bare ``ds.mean()`` names no dim: it means
+"every dim there is *when this runs*", which is not knowable at record time — past an
+unmodelled op the recorder's schema is a guess, so expanding it eagerly bakes in names
+that may already be wrong (``rename`` is the case that bites). :data:`DimSet` therefore
+admits the sentinel :data:`ALL_DIMS` alongside a concrete ``frozenset``, and the
+expansion is deferred to a reader that has an exact schema. It is a *sentinel*, not
+``None``: ``None`` already means **don't know** in this codebase
+(``SchemaState.var_dims``), whereas ``ALL_DIMS`` means something definite. Readers
+narrow it with a match arm rather than an ``assert``, so the two cases are handled where
+the field is used.
+
 Only **unary** ops are modelled here. Binary/n-ary ops (``merge``/``concat``/``where``)
 would add their own variants carrying plan-typed children and promote the container from
 a list to a tree — an additive, orthogonal change deferred until such an op is in scope.
@@ -26,13 +37,16 @@ Keep that linearity assumption named *here*, not leaked into individual rules.
 
 from collections.abc import Hashable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Final, Literal, final
 
 from frozendict import frozendict
 
 from xrexpr.indexers import Indexer, classify
 
 __all__ = [
+    "ALL_DIMS",
+    "AllDims",
+    "DimSet",
     "Op",
     "Opaque",
     "Project",
@@ -44,25 +58,52 @@ __all__ = [
 ]
 
 
+@final
+@dataclass(frozen=True)
+class AllDims:
+    """Sentinel: *every dim present at this point*, whatever they turn out to be.
+
+    The dim set of a call that names none — ``ds.mean()``, ``ds.mean(dim=None)``. It
+    stays unexpanded until a reader with an exact schema resolves it, which is what
+    keeps a record-time guess about the dims from being frozen into the plan.
+
+    Fieldless and frozen, so every instance compares and hashes equal; :data:`ALL_DIMS`
+    is the one to use.
+    """
+
+    def __repr__(self) -> str:
+        return "ALL_DIMS"
+
+
+#: The singleton :class:`AllDims`.
+ALL_DIMS: Final = AllDims()
+
+#: The dims an op removes: a concrete set, or :data:`ALL_DIMS` for a call that named
+#: none. Readers must handle both — see this module's docstring.
+DimSet = frozenset[Hashable] | AllDims
+
+
 @dataclass(frozen=True)
 class Reduce:
     """A dimension-destroying reduction (``mean``/``sum``/``std``/...).
 
-    ``consumes`` — the dims the reduction removes — is *stored*, resolved by
-    ``to_opnode`` from the ``dim`` spec against the record-time schema (a bare
-    ``mean()`` consumes *every* current dim). ``args``/``kwargs`` are coerced to
-    immutable containers so the node is hashable and safe to share between plans.
+    ``consumes`` — the dims the reduction removes — is *stored*, parsed by ``to_opnode``
+    from the ``dim`` spec. A bare ``mean()`` names no dim and so consumes
+    :data:`ALL_DIMS`, left symbolic rather than expanded against the record-time schema
+    (see the module docstring). ``args``/``kwargs`` are coerced to immutable containers
+    so the node is hashable and safe to share between plans.
     """
 
     name: str  # open set of tabulated reductions → str (kind-safety via OP_TABLE)
     args: tuple[Any, ...] = ()
     kwargs: frozendict[str, Any] = field(default_factory=frozendict)
-    consumes: frozenset[Hashable] = frozenset()
+    consumes: DimSet = frozenset()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "args", tuple(self.args))
         object.__setattr__(self, "kwargs", frozendict(self.kwargs))
-        object.__setattr__(self, "consumes", frozenset(self.consumes))
+        if not isinstance(self.consumes, AllDims):
+            object.__setattr__(self, "consumes", frozenset(self.consumes))
 
 
 @dataclass(frozen=True)

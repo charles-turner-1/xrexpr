@@ -7,11 +7,11 @@ recorded plan and replays it onto the real dataset (:meth:`~LazyDatasetProxy.exp
 returns the optimised plan as text without running it).
 
 The recorded plan is a list of :data:`~xrexpr.ir.Op` variants: each call is normalised
-by :func:`~xrexpr.schema.to_opnode` against a :class:`SchemaState` threaded from
-``self._base_ds`` and evolved per op (no materialisation). ``collect`` runs the plan
-through :func:`~xrexpr.optimize.optimize` (a fixpoint of rewrite rules), replays the
-optimised ``Op`` nodes onto the base dataset, and materialises the result. See
-``docs/pr-plan.md``.
+by :func:`~xrexpr.schema.to_opnode`, a pure function of that call, and appended —
+recording holds no schema of its own. ``collect`` runs the plan through
+:func:`~xrexpr.optimize.optimize` (a fixpoint of rewrite rules, which folds the base
+schema forward itself), replays the optimised ``Op`` nodes onto the base dataset, and
+materialises the result. See ``docs/pr-plan.md``.
 """
 
 from functools import wraps
@@ -21,7 +21,7 @@ import xarray as xr
 
 from xrexpr.ir import Op, Opaque, frozendict
 from xrexpr.optimize import optimize
-from xrexpr.schema import SchemaState, apply_schema, to_opnode
+from xrexpr.schema import SchemaState, to_opnode
 
 
 class Explanation(str):
@@ -92,19 +92,9 @@ class LazyDatasetProxy:
     untouched) carrying the extended plan and the schema after that op.
     """
 
-    def __init__(
-        self,
-        base_ds: xr.Dataset,
-        ops: list[Op] | None = None,
-        schema: SchemaState | None = None,
-    ):
+    def __init__(self, base_ds: xr.Dataset, ops: list[Op] | None = None):
         self._base_ds = base_ds
         self._ops: list[Op] = list(ops) if ops else []
-        # schema is threaded by ``_record``; recompute from the base only for a
-        # fresh (empty) proxy such as the one xarray builds for ``ds.plan``.
-        self._schema = (
-            schema if schema is not None else SchemaState.from_dataset(base_ds)
-        )
 
     def _record(
         self, method_name: str, *args: Any, **kwargs: Any
@@ -112,19 +102,16 @@ class LazyDatasetProxy:
         node = (
             Opaque(name=method_name, args=args, kwargs=frozendict(kwargs))
             if self._in_opaque_context()
-            else to_opnode(self._schema, method_name, args, kwargs)
+            else to_opnode(method_name, args, kwargs)
         )
-        return LazyDatasetProxy(
-            self._base_ds,
-            self._ops + [node],
-            apply_schema(self._schema, node),
-        )
+        return LazyDatasetProxy(self._base_ds, self._ops + [node])
 
     def _base_schema(self) -> SchemaState:
         """The schema of the *base* dataset, which is what the optimiser plans against.
 
-        Not ``self._schema``: that is the schema left at the *end* of recording, whereas
-        the optimiser rewrites from the front and folds the base forward itself.
+        The proxy keeps no schema of its own: recording is a pure append, and the single
+        fold over the plan belongs to the optimiser, which rewrites from the front and so
+        needs the base rather than whatever recording ended on.
         """
         return SchemaState.from_dataset(self._base_ds)
 

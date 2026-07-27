@@ -12,7 +12,17 @@ import dataclasses
 import pytest
 from frozendict import frozendict as _pkg_frozendict
 
-from xrexpr.ir import Opaque, Project, Rechunk, Reduce, Scan, Select, frozendict
+from xrexpr.ir import (
+    ALL_DIMS,
+    AllDims,
+    Opaque,
+    Project,
+    Rechunk,
+    Reduce,
+    Scan,
+    Select,
+    frozendict,
+)
 
 
 def test_ir_reexports_third_party_frozendict():
@@ -24,6 +34,32 @@ def test_reduce_minimal_defaults():
     assert node.args == ()
     assert node.kwargs == frozendict()
     assert node.consumes == frozenset()
+
+
+def test_all_dims_instances_are_interchangeable():
+    # Fieldless and frozen, so the sentinel is a value rather than an identity: a node
+    # built with a fresh ``AllDims()`` equals and hashes like one built with ALL_DIMS.
+    assert AllDims() == ALL_DIMS
+    assert hash(AllDims()) == hash(ALL_DIMS)
+    assert Reduce(name="mean", consumes=AllDims()) == Reduce(
+        name="mean", consumes=ALL_DIMS
+    )
+    assert repr(ALL_DIMS) == "ALL_DIMS"
+
+
+def test_all_dims_is_not_coerced_and_stays_hashable():
+    # ``__post_init__`` coerces a dim *set* to frozenset; the sentinel must pass through
+    # untouched, and the node must stay shareable between plans like every other.
+    node = Reduce(name="mean", consumes=ALL_DIMS)
+    assert node.consumes is ALL_DIMS
+    assert hash(node)
+
+
+def test_all_dims_is_distinct_from_the_empty_dim_set():
+    # The distinction the whole change rests on: "every dim, whatever they are" is not
+    # "no dims". Conflating them is what let a select hop in front of a bare reduce.
+    assert ALL_DIMS != frozenset()
+    assert Reduce(name="mean", consumes=ALL_DIMS) != Reduce(name="mean")
 
 
 def test_select_minimal_defaults():
