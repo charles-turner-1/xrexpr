@@ -10,8 +10,9 @@ re-decisions:
 
 - :attr:`drops_dim` — does this indexer remove its dim (a scalar) or keep it? (``ir.py``'s
   ``Select.consumes``.)
-- :meth:`size` — the new length of a *kept* dim under this indexer. (``schema.py``'s old
-  ``_indexer_size``.)
+- :meth:`size` — the new length of a *kept* dim under this indexer. Sizing a dim whose
+  current length is unknown, or a ``sel`` label slice, is not this layer's call: those
+  answer "unknown" at ``schema._selected_size``, which guards every call to this.
 - :meth:`to_raw` — the exact xarray-facing value to hand back to replay when a rewrite
   rebuilds a node's ``args`` from its ``indexer``.
 

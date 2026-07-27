@@ -72,7 +72,8 @@ class LazyDatasetProxy:
 
     Registered as the ``.plan`` accessor, so ``ds.plan`` yields an empty proxy
     over ``ds``; each recorded call returns a fresh proxy (leaving the original
-    untouched) carrying the extended plan and the schema after that op.
+    untouched) carrying the extended plan, and nothing else — recording is a pure
+    append, and the schema fold belongs to the optimiser.
     """
 
     def __init__(self, base_ds: xr.Dataset, ops: list[FluentOp] | None = None):

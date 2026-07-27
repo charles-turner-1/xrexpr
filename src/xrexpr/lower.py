@@ -58,9 +58,11 @@ from xrexpr.ir import (
 
 __all__ = ["Call", "emit", "to_lower_ir"]
 
-#: ``resample`` keyword arguments that are *options*, not the dim being resampled.
+#: ``resample`` keyword arguments that are *options*, not the dim being resampled
+#: (xarray 2026.7.0's signature). Drift is safe in one direction only, and it is the
+#: right one: an option this misses leaves two candidate keys, which refuses to fuse.
 _RESAMPLE_OPTION_KWARGS = frozenset(
-    {"closed", "label", "offset", "origin", "restore_coord_dims", "skipna", "base"}
+    {"closed", "label", "offset", "origin", "restore_coord_dims", "skipna"}
 )
 
 

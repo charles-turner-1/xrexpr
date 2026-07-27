@@ -1,4 +1,4 @@
-"""Record-time logical schema tracking (no data materialisation).
+"""Logical schema tracking (no data materialisation).
 
 The ``.plan`` proxy starts from the *real* base dataset, so a cheap **logical** schema
 — the current dims, their sizes, and the coordinate names — can be folded forward
@@ -279,6 +279,11 @@ def to_opnode(
       minus option kwargs like ``token``) becomes ``chunks``. The uniform forms
       (``chunk()``, ``chunk(100)``, ``chunk("auto")``) name no dim, so ``chunks`` is
       empty and the spec stays in ``args``.
+    - **context opener** (``groupby``/``rolling``/``weighted``/...): a
+      :class:`~xrexpr.ir.ContextOpen`, which says only *a context opens here*. Checked
+      before the table, and the one kind whose meaning this function deliberately does
+      not settle — the call is half an operation, and the pair is
+      ``lower.to_lower_ir``'s to read.
     - **scan** / untabulated ops: no dims resolved (name/args/kwargs only).
 
     ``args``/``kwargs`` are kept verbatim for faithful replay; ``consumes``/``indexer``

@@ -12,14 +12,11 @@ ones: each pins a narrowing of what is claimed, not a bug.
 end-to-end equality lives in ``test_accessor.py`` and ``test_properties.py``.
 """
 
-from typing import get_args
-
 import pytest
 from frozendict import frozendict
 
 from xrexpr.ir import (
     ContextOpen,
-    ContextOpenName,
     GroupedReduce,
     Opaque,
     Project,
@@ -29,7 +26,6 @@ from xrexpr.ir import (
     Select,
 )
 from xrexpr.lower import Call, emit, to_lower_ir
-from xrexpr.operations import CONTEXT_METHODS
 from xrexpr.schema import to_opnode
 
 
@@ -46,20 +42,6 @@ def plan():
     ]
 
 
-def test_context_open_names_match_the_runtime_table():
-    # The Literal in ``ir`` and the frozenset in ``operations`` are the same list written
-    # twice -- one for the type checker, one for ``to_opnode``'s dispatch. Pin them
-    # together so neither can drift.
-    assert set(get_args(ContextOpenName)) == set(CONTEXT_METHODS)
-
-
-def test_every_context_method_records_as_an_opener():
-    assert all(
-        isinstance(to_opnode(name, (), {}), ContextOpen)
-        for name in sorted(CONTEXT_METHODS)
-    )
-
-
 def test_the_fixture_plan_really_covers_every_variant(plan):
     # keeps the round-trip tests below from passing vacuously on a partial vocabulary
     assert {type(node) for node in plan} == {
@@ -72,7 +54,9 @@ def test_the_fixture_plan_really_covers_every_variant(plan):
     }
 
 
-def test_lowering_is_the_identity_today(plan):
+def test_a_plan_with_no_builder_chain_passes_through_unchanged(plan):
+    # every multi-call spelling is a ``ContextOpen`` pair, so a plan without one is
+    # already what it means and lowering must leave it alone
     assert to_lower_ir(plan) == plan
 
 

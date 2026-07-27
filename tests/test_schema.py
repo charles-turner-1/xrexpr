@@ -1,4 +1,4 @@
-"""Tests for the record-time logical schema (PR 4).
+"""Tests for the logical schema layer.
 
 ``SchemaState`` is snapshotted from a real dataset and then evolved by
 ``apply_schema`` using only :data:`~xrexpr.ir.Op` metadata — no array data is touched.

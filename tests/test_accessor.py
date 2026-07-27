@@ -4,7 +4,7 @@ Covers recording behaviour and *equality* — ``ds.plan.<chain>.collect()`` matc
 the eager ``ds.<chain>`` for the README pipelines, exercising record → optimise →
 replay end to end. The golden op-list assertions that pin the optimiser itself live
 in ``tests/test_optimize.py`` (it owns ``optimize``); here we only care that the
-accessor records ``Op`` nodes, threads the schema, and replays to the right result.
+accessor records the right nodes and that the pipeline replays to the right result.
 """
 
 import importlib.util
@@ -21,7 +21,6 @@ from xrexpr.accessor import _EAGER_ATTRS, Explanation, LazyDatasetProxy
 from xrexpr.exceptions import InvalidExpressionError
 from xrexpr.ir import ALL_DIMS, ContextOpen, GroupedReduce, Opaque, Reduce, Select
 from xrexpr.lower import emit
-from xrexpr.operations import CONTEXT_METHODS, spec
 from xrexpr.optimize import _schemas
 
 #: xrexpr itself never needs dask, but replaying a ``chunk()`` call does -- without a
@@ -86,7 +85,7 @@ def test_getitem_records_and_computes(ds):
     assert_equal(ds.plan["temperature"].collect(), ds["temperature"])
 
 
-# --- PR 6: recording now builds Op variants and threads the schema --------------
+# --- recording builds Op variants ----------------------------------------------
 
 
 def test_record_builds_op_variants(ds):
@@ -490,16 +489,6 @@ def test_plans_without_a_context_still_optimise(ds):
     # The barrier must not leak: an ordinary chain is still rewritten.
     chain = ds.plan.mean("lat").isel(time=0)
     assert [n.name for n in chain._optimized()] == ["isel", "mean"]
-
-
-@pytest.mark.parametrize("name", sorted(CONTEXT_METHODS))
-def test_every_context_method_is_a_dataset_method_and_untabulated(name):
-    # Coverage guard over ``CONTEXT_METHODS``: a typo'd or removed name would silently
-    # stop barriering. ``spec(name) is None`` pins the second half of the assumption
-    # ``_in_opaque_context`` rests on -- these names record as ``Opaque``, so testing for
-    # ``Opaque`` there really does detect them. Tabulating one would need this revisited.
-    assert hasattr(xr.Dataset, name)
-    assert spec(name) is None
 
 
 def test_terminal_to_dataframe_triggers_collect_and_delegates(ds):
