@@ -10,13 +10,21 @@ accessor records ``Op`` nodes, threads the schema, and replays to the right resu
 import importlib.util
 
 import numpy as np
+import pandas as pd
 import pytest
 import xarray as xr
 from xarray.testing import assert_equal
 
 import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
-from xrexpr.accessor import _EAGER_ATTRS, Explanation, LazyDatasetProxy
+from xrexpr.accessor import (
+    _CONTEXT_METHODS,
+    _EAGER_ATTRS,
+    Explanation,
+    LazyDatasetProxy,
+)
 from xrexpr.exceptions import InvalidExpressionError
+from xrexpr.ir import Opaque
+from xrexpr.operations import spec
 from xrexpr.optimize import optimize
 
 #: xrexpr itself never needs dask, but replaying a ``chunk()`` call does -- without a
@@ -351,21 +359,115 @@ def test_unregistered_terminal_is_not_routed(ds):
     assert type(attr) is type(getattr(chain.collect(), term))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="groupby/resample/rolling/coarsen/weighted are mis-modelled: the grouped "
-    "``mean()`` is recorded as a Dataset-level reduce over every current dim, so a "
-    "following ``isel`` on a dim the group kept is wrongly rejected. Fixing it needs the "
-    "IR to model a grouped/windowed context (a new Op variant or sub-plan). See "
-    "``__getattr__``'s known-limitation note and the plan-accessor memory.",
-)
+# --- grouped / windowed contexts -----------------------------------------------------
+# ``groupby``/``resample``/``rolling``/... return a builder, not a Dataset, so calls after
+# them mean something different from the same-named Dataset ops. The accessor barriers
+# them: everything from the context op on records as ``Opaque``, which no rewrite rule can
+# fire on or across -- correct but unoptimised, until ``docs/roadmap/02-lowering.md``.
+
+
+@pytest.fixture
+def dated_ds() -> xr.Dataset:
+    # ``ds`` has an integer ``time`` coord; ``resample`` needs a real datetime index.
+    rng = np.random.default_rng(0)
+    return xr.Dataset(
+        {"temperature": (("time", "lat"), rng.random((8, 3)))},
+        coords={
+            "time": pd.date_range("2000-01-01", periods=8, freq="D"),
+            "lat": np.arange(3),
+        },
+    )
+
+
 def test_groupby_then_reduce_then_select_matches_eager(ds):
     # Valid *eagerly* -- ``groupby('time').mean()`` reduces within groups, leaving ``lat``
-    # for the later ``isel(lat=0)``. But the proxy records the grouped ``mean()`` as a
-    # full-dataset reduce (no dim -> every current dim), so its schema drops ``lat`` and
-    # ``collect()`` raises InvalidExpressionError instead of matching eager.
+    # for the later ``isel(lat=0)``. Before the barrier the proxy recorded the grouped
+    # ``mean()`` as a full-dataset reduce (no dim -> every current dim), so its schema
+    # dropped ``lat`` and ``collect()`` raised InvalidExpressionError.
     chain = ds.plan.groupby("time").mean().isel(lat=0)
     assert_equal(chain.collect(), ds.groupby("time").mean().isel(lat=0))
+
+
+def test_select_after_grouped_reduce_matches_eager(ds):
+    # The other failure mode: a select on a dim *disjoint* from the bogus ``consumes`` was
+    # silently swapped behind the reduce, and replay then looked ``isel`` up on the
+    # DatasetGroupBy. Barriered, it replays in the order written.
+    chain = ds.plan.groupby("time").mean().isel(time=0)
+    assert_equal(chain.collect(), ds.groupby("time").mean().isel(time=0))
+
+
+def test_context_chain_records_only_opaque_in_written_order(ds):
+    chain = ds.plan.groupby("time").mean().isel(time=0)
+
+    # every node from the context op on is Opaque, so no rule has an adjacency to fire on
+    assert [type(op) for op in chain._ops] == [Opaque, Opaque, Opaque]
+    assert [op.name for op in chain._ops] == ["groupby", "mean", "isel"]
+
+    # ... and the optimised plan the replay walks is the recorded one, unreordered
+    assert chain.explain() == Explanation(
+        "plan (3 ops):\n  1. groupby('time')\n  2. mean()\n  3. isel(time=0)"
+    )
+
+
+def test_builder_only_method_records_and_replays(ds):
+    # ``first`` is a DatasetGroupBy method that does not exist on Dataset, so before the
+    # barrier it fell to the property branch and collected eagerly -- onto a DatasetGroupBy
+    # with no ``.compute()``. In context the callable check is skipped and it records.
+    chain = ds.plan.groupby("lat").first()
+    assert isinstance(chain, LazyDatasetProxy)
+    assert_equal(chain.collect(), ds.groupby("lat").first())
+
+
+def test_getitem_in_context_selects_a_group_not_a_variable(ds):
+    # ``DatasetGroupBy.__getitem__`` selects a *group*; classifying it as a Project would
+    # let projection pushdown treat the key as a variable name.
+    chain = ds.plan.groupby("lat")[0]
+    assert isinstance(chain._ops[-1], Opaque)
+    assert_equal(chain.collect(), ds.groupby("lat")[0])
+
+
+def test_resample_matches_eager(dated_ds):
+    chain = dated_ds.plan.resample(time="2D").mean()
+    assert_equal(chain.collect(), dated_ds.resample(time="2D").mean())
+
+
+def test_rolling_then_select_matches_eager(ds):
+    chain = ds.plan.rolling(time=2).mean().isel(lat=0)
+    assert_equal(chain.collect(), ds.rolling(time=2).mean().isel(lat=0))
+
+
+def test_weighted_matches_eager(ds):
+    weights = ds["area"]
+    chain = ds.plan.weighted(weights).mean(("lat", "lon"))
+    assert_equal(chain.collect(), ds.weighted(weights).mean(("lat", "lon")))
+
+
+def test_terminal_after_context_matches_eager(ds):
+    # ``_EAGER_ATTRS`` is checked before the context branch, so terminals still collect
+    # rather than being recorded into the barrier and never run.
+    result = ds.plan.groupby("time").mean().to_dataframe()
+
+    assert not isinstance(result, LazyDatasetProxy)
+    assert result.equals(ds.groupby("time").mean().to_dataframe())
+
+
+def test_plans_without_a_context_still_optimise(ds):
+    # The barrier must not leak: an ordinary chain is still rewritten.
+    chain = ds.plan.mean("lat").isel(time=0)
+    assert [n.name for n in optimize(chain._ops, chain._base_schema())] == [
+        "isel",
+        "mean",
+    ]
+
+
+@pytest.mark.parametrize("name", sorted(_CONTEXT_METHODS))
+def test_every_context_method_is_a_dataset_method_and_untabulated(name):
+    # Coverage guard over ``_CONTEXT_METHODS``: a typo'd or removed name would silently
+    # stop barriering. ``spec(name) is None`` pins the second half of the assumption
+    # ``_in_opaque_context`` rests on -- these names record as ``Opaque``, so testing for
+    # ``Opaque`` there really does detect them. Tabulating one would need this revisited.
+    assert hasattr(xr.Dataset, name)
+    assert spec(name) is None
 
 
 def test_terminal_to_dataframe_triggers_collect_and_delegates(ds):
