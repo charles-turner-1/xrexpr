@@ -19,7 +19,7 @@ from typing import Any
 
 import xarray as xr
 
-from xrexpr.ir import Op
+from xrexpr.ir import Op, Opaque, frozendict
 from xrexpr.optimize import optimize
 from xrexpr.schema import SchemaState, apply_schema, to_opnode
 
@@ -63,6 +63,26 @@ _EAGER_ATTRS = frozenset(
 )
 
 
+#: Methods that return a non-Dataset intermediate (``DatasetGroupBy``,
+#: ``DatasetRolling``, ``DatasetWeighted``, ...) whose subsequent calls mean something
+#: different from the same-named Dataset ops -- ``groupby("x").mean()`` reduces *within
+#: groups*, not over the dataset. Once one is recorded the proxy stops modelling: every
+#: later call records as :class:`~xrexpr.ir.Opaque`, so no rewrite rule can fire on or
+#: across the context and replay stays verbatim. See :meth:`LazyDatasetProxy.__getattr__`.
+_CONTEXT_METHODS = frozenset(
+    {
+        "groupby",
+        "groupby_bins",
+        "resample",
+        "rolling",
+        "rolling_exp",
+        "coarsen",
+        "weighted",
+        "cumulative",
+    }
+)
+
+
 @xr.register_dataset_accessor("plan")  # type: ignore[no-untyped-call]
 class LazyDatasetProxy:
     """Record operations on an ``xr.Dataset`` and replay them on ``collect()``.
@@ -89,7 +109,11 @@ class LazyDatasetProxy:
     def _record(
         self, method_name: str, *args: Any, **kwargs: Any
     ) -> "LazyDatasetProxy":
-        node = to_opnode(self._schema, method_name, args, kwargs)
+        node = (
+            Opaque(name=method_name, args=args, kwargs=frozendict(kwargs))
+            if self._in_opaque_context()
+            else to_opnode(self._schema, method_name, args, kwargs)
+        )
         return LazyDatasetProxy(
             self._base_ds,
             self._ops + [node],
@@ -106,6 +130,17 @@ class LazyDatasetProxy:
 
     def _is_method_callable_on_dataset(self, name: str) -> bool:
         return callable(getattr(self._base_ds, name, None))
+
+    def _in_opaque_context(self) -> bool:
+        """Whether a :data:`_CONTEXT_METHODS` op has been recorded, after which the live
+        object is no longer a Dataset and nothing further can be modelled.
+
+        Derived from the recorded plan rather than stored (house discipline, cf.
+        ``Select.consumes``): plans are ~10 nodes, so the scan per record is irrelevant.
+        """
+        return any(
+            isinstance(op, Opaque) and op.name in _CONTEXT_METHODS for op in self._ops
+        )
 
     def __repr__(self) -> str:
         ops_preview = " -> ".join(
@@ -124,13 +159,22 @@ class LazyDatasetProxy:
         - **Non-callable attributes** (``.dims``, ``.coords``, ...) force
           materialisation and are read off the realised dataset.
 
-        Known limitation — intermediate accessor-returning methods (``groupby``,
-        ``resample``, ``rolling``, ``coarsen``, ``weighted``) are mis-modelled: they take
-        the callable branch and record as ``Opaque``, so a following ``.mean()`` is
-        recorded as a *Dataset*-level reduce rather than a reduction over the group /
-        window, and can be reordered or dim-resolved wrongly. Handling them needs the IR
-        to model a grouped/windowed context (a new ``Op`` variant or a sub-plan), not
-        just a name allowlist. Deferred; do not chain a reduction after these on ``.plan``.
+        Inside an opaque context — after a :data:`_CONTEXT_METHODS` call (``groupby``,
+        ``resample``, ``rolling``, ``coarsen``, ``weighted``, ...) — the live object is a
+        builder, not a Dataset, so the callable test above (which asks the *base dataset*)
+        is meaningless: ``DatasetGroupBy.first`` does not exist on ``Dataset``, and a
+        grouped ``.mean()`` is not the Dataset reduce of the same name. Every call from
+        the context op onward therefore records as ``Opaque``, which no rewrite rule can
+        fire on or across, so such chains are **correct but never optimised** — replayed
+        exactly as written. Modelling grouped/windowed semantics (so they optimise again)
+        needs a lowering stage with lookahead over the finished plan; see
+        ``docs/roadmap/02-lowering.md``.
+
+        One cost of recording unconditionally in a context: a builder *property* such as
+        ``ds.plan.groupby("x").groups`` comes back as a recording wrapper rather than the
+        property's value, because telling methods from attributes would mean materialising.
+        It does not work today either (the property branch collects eagerly and the builder
+        has no ``.compute()``); lowering's typed context node removes the guesswork.
         """
         # protect internal / dunder attribute lookups
         if name.startswith("_"):
@@ -140,6 +184,13 @@ class LazyDatasetProxy:
         # (``.plot`` is an accessor with ``__call__``) but must not be recorded.
         if name in _EAGER_ATTRS:
             return getattr(self.collect(), name)
+
+        if self._in_opaque_context():
+            # no ``@wraps``: the name need not exist on the base dataset at all.
+            def _context_method(*args: Any, **kwargs: Any) -> "LazyDatasetProxy":
+                return self._record(name, *args, **kwargs)
+
+            return _context_method
 
         if self._is_method_callable_on_dataset(name):
 
