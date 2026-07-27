@@ -21,7 +21,7 @@ from typing import Any
 
 import xarray as xr
 
-from xrexpr.ir import FluentOp, LoweredOp, Opaque, frozendict
+from xrexpr.ir import ContextOpen, FluentOp, LoweredOp, Opaque, frozendict
 from xrexpr.lower import Call, emit, to_lower_ir
 from xrexpr.optimize import optimize
 from xrexpr.schema import SchemaState, to_opnode
@@ -66,33 +66,14 @@ _EAGER_ATTRS = frozenset(
 )
 
 
-#: Methods that return a non-Dataset intermediate (``DatasetGroupBy``,
-#: ``DatasetRolling``, ``DatasetWeighted``, ...) whose subsequent calls mean something
-#: different from the same-named Dataset ops -- ``groupby("x").mean()`` reduces *within
-#: groups*, not over the dataset. Once one is recorded the proxy stops modelling: every
-#: later call records as :class:`~xrexpr.ir.Opaque`, so no rewrite rule can fire on or
-#: across the context and replay stays verbatim. See :meth:`LazyDatasetProxy.__getattr__`.
-_CONTEXT_METHODS = frozenset(
-    {
-        "groupby",
-        "groupby_bins",
-        "resample",
-        "rolling",
-        "rolling_exp",
-        "coarsen",
-        "weighted",
-        "cumulative",
-    }
-)
-
-
 @xr.register_dataset_accessor("plan")  # type: ignore[no-untyped-call]
 class LazyDatasetProxy:
     """Record operations on an ``xr.Dataset`` and replay them on ``collect()``.
 
     Registered as the ``.plan`` accessor, so ``ds.plan`` yields an empty proxy
     over ``ds``; each recorded call returns a fresh proxy (leaving the original
-    untouched) carrying the extended plan and the schema after that op.
+    untouched) carrying the extended plan, and nothing else — recording is a pure
+    append, and the schema fold belongs to the optimiser.
     """
 
     def __init__(self, base_ds: xr.Dataset, ops: list[FluentOp] | None = None):
@@ -102,11 +83,13 @@ class LazyDatasetProxy:
     def _record(
         self, method_name: str, *args: Any, **kwargs: Any
     ) -> "LazyDatasetProxy":
-        node = (
-            Opaque(name=method_name, args=args, kwargs=frozendict(kwargs))
-            if self._in_opaque_context()
-            else to_opnode(method_name, args, kwargs)
-        )
+        node: FluentOp
+        if method_name == "__getitem__" and self._in_context():
+            # A builder ``__getitem__`` selects a *group* (``gb[1]`` is the matching
+            # subset), not a variable, so it must never classify as a ``Project``.
+            node = Opaque(name=method_name, args=args, kwargs=frozendict(kwargs))
+        else:
+            node = to_opnode(method_name, args, kwargs)
         return LazyDatasetProxy(self._base_ds, self._ops + [node])
 
     def _base_schema(self) -> SchemaState:
@@ -121,16 +104,20 @@ class LazyDatasetProxy:
     def _is_method_callable_on_dataset(self, name: str) -> bool:
         return callable(getattr(self._base_ds, name, None))
 
-    def _in_opaque_context(self) -> bool:
-        """Whether a :data:`_CONTEXT_METHODS` op has been recorded, after which the live
-        object is no longer a Dataset and nothing further can be modelled.
+    def _in_context(self) -> bool:
+        """Whether the live object is a builder rather than a Dataset.
 
-        Derived from the recorded plan rather than stored (house discipline, cf.
-        ``Select.consumes``): plans are ~10 nodes, so the scan per record is irrelevant.
+        One node, not a scan: a context is a *pair*, so it is open only immediately after
+        its opener. ``DatasetGroupBy.__getitem__`` selects a group and Rolling/Coarsen/
+        Weighted reject ``__getitem__``, so xarray offers no builder→builder call that
+        would keep one open across two nodes.
+
+        This is what retires the trailing barrier the previous design needed: the closer
+        is recorded normally and lowering, which can see the pair, decides what it meant —
+        so ops *after* a context are modelled again instead of every one of them being
+        opaque forever.
         """
-        return any(
-            isinstance(op, Opaque) and op.name in _CONTEXT_METHODS for op in self._ops
-        )
+        return bool(self._ops) and isinstance(self._ops[-1], ContextOpen)
 
     def __repr__(self) -> str:
         ops_preview = " -> ".join(
@@ -149,22 +136,21 @@ class LazyDatasetProxy:
         - **Non-callable attributes** (``.dims``, ``.coords``, ...) force
           materialisation and are read off the realised dataset.
 
-        Inside an opaque context — after a :data:`_CONTEXT_METHODS` call (``groupby``,
+        Inside a context — immediately after a builder-returning call (``groupby``,
         ``resample``, ``rolling``, ``coarsen``, ``weighted``, ...) — the live object is a
         builder, not a Dataset, so the callable test above (which asks the *base dataset*)
-        is meaningless: ``DatasetGroupBy.first`` does not exist on ``Dataset``, and a
-        grouped ``.mean()`` is not the Dataset reduce of the same name. Every call from
-        the context op onward therefore records as ``Opaque``, which no rewrite rule can
-        fire on or across, so such chains are **correct but never optimised** — replayed
-        exactly as written. Modelling grouped/windowed semantics (so they optimise again)
-        needs a lowering stage with lookahead over the finished plan; see
-        ``docs/roadmap/02-lowering.md``.
+        is meaningless: ``DatasetGroupBy.first`` does not exist on ``Dataset``. Such a
+        call is therefore always recorded, and the *meaning* of the resulting pair is
+        settled later by :func:`~xrexpr.lower.to_lower_ir`, which can see both halves at
+        once. A pair it fuses is modelled and optimisable; a pair it does not understand
+        is demoted to ``Opaque`` — replayed verbatim, correct, merely unoptimised — and in
+        either case the ops that *follow* are modelled normally.
 
         One cost of recording unconditionally in a context: a builder *property* such as
         ``ds.plan.groupby("x").groups`` comes back as a recording wrapper rather than the
         property's value, because telling methods from attributes would mean materialising.
         It does not work today either (the property branch collects eagerly and the builder
-        has no ``.compute()``); lowering's typed context node removes the guesswork.
+        has no ``.compute()``).
         """
         # protect internal / dunder attribute lookups
         if name.startswith("_"):
@@ -175,7 +161,7 @@ class LazyDatasetProxy:
         if name in _EAGER_ATTRS:
             return getattr(self.collect(), name)
 
-        if self._in_opaque_context():
+        if self._in_context():
             # no ``@wraps``: the name need not exist on the base dataset at all.
             def _context_method(*args: Any, **kwargs: Any) -> "LazyDatasetProxy":
                 return self._record(name, *args, **kwargs)
@@ -223,27 +209,34 @@ class LazyDatasetProxy:
     def explain(self) -> Explanation:
         """Return the optimised plan as text, without running it (à la Polars ``explain``).
 
-        Shows the ops :meth:`collect` would actually replay — i.e. *after* lowering and
+        Shows the calls :meth:`collect` would actually replay — i.e. *after* lowering and
         optimisation — so the rewrite (merged / pushed-down selects) is visible. Raises
         the same :class:`~xrexpr.exceptions.InvalidExpressionError` as :meth:`collect`
         when the plan is invalid.
+
+        Formatted from the **emitted calls** rather than the lowered nodes, which keeps
+        this the answer to "what will run": a fused node such as
+        :class:`~xrexpr.ir.GroupedReduce` shows as the two calls it replays as. Showing
+        the lowered *nodes* — the more informative artefact, and what Polars does — is a
+        deliberate later change (``docs/roadmap/02-lowering.md`` PR 8), not something to
+        drift into as a side effect of the first fused node.
         """
-        plan = self._optimized()
-        if not plan:
+        calls = emit(self._optimized())
+        if not calls:
             return Explanation("plan (0 ops)")
         body = "\n".join(
-            f"  {i}. {self._format_node(n)}" for i, n in enumerate(plan, 1)
+            f"  {i}. {self._format_call(c)}" for i, c in enumerate(calls, 1)
         )
-        return Explanation(f"plan ({len(plan)} ops):\n{body}")
+        return Explanation(f"plan ({len(calls)} ops):\n{body}")
 
     @staticmethod
-    def _format_node(node: LoweredOp) -> str:
-        """One-line human-readable form of a lowered node for :meth:`explain`."""
-        if node.name == "__getitem__":
-            return f"[{node.args[0]!r}]"
-        parts = [repr(a) for a in node.args]
-        parts += [f"{k}={v!r}" for k, v in node.kwargs.items()]
-        return f"{node.name}({', '.join(parts)})"
+    def _format_call(call: Call) -> str:
+        """One-line human-readable form of an emitted call for :meth:`explain`."""
+        if call.name == "__getitem__":
+            return f"[{call.args[0]!r}]"
+        parts = [repr(a) for a in call.args]
+        parts += [f"{k}={v!r}" for k, v in call.kwargs.items()]
+        return f"{call.name}({', '.join(parts)})"
 
     def _replay(self, calls: list[Call]) -> xr.Dataset | xr.DataArray:
         """Perform each emitted :class:`~xrexpr.lower.Call` against the real dataset.
