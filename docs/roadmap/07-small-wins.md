@@ -137,37 +137,31 @@ PR that lands the feature, or immediately after:
 | W6 | add `cumsum`/`cumprod`/`diff` |
 | W2 phase 1 | assert `emit(to_lower_ir(p))` replays equal to eager, and that `to_lower_ir` is idempotent, over the existing generated chains |
 | W3 | assert rewrites survive unknown dim sizes |
-| ~~W2 PRs 3–5~~ | add `groupby`/`resample`/`rolling`/`coarsen`/`weighted` builder chains — **deferred, see below** |
+| W2 PRs 3–5 | ~~add `groupby`/`resample`/`rolling`/`coarsen`/`weighted` builder chains~~ — **paid in the PR after W2 PR 5** (see below) |
 
-> **The builder-chain row is deferred to its own PR** (2026-07, decided when W2 PR 5
-> landed). It was not paid by PRs 3, 4 or 5, and re-pledging it against the *next* fused
-> node is no longer available — PR 5 was the last one. Recorded as a decision rather than
-> left to drift, per [`02-lowering.md`](./02-lowering.md) §11's own standard, and it should
-> be **the PR immediately after W2 PR 5**.
+> **Paid (2026-07), one PR late and in one go.** Deferred when W2 PR 5 landed, because PRs
+> 3, 4 and 5 had each left it and there was no later fused node to re-pledge it against;
+> done immediately after, covering all three fused nodes at once rather than as three
+> partial widenings. `builder_plans` now generates the pairs and feeds them to the contract
+> properties (optimised equals eager, lowering idempotent, the emit round-trip, tracked
+> names, rewrites under unknown sizes), with `_builder_pair` drawing opener and closer as a
+> unit — which is what the one-call-at-a-time loop could not do — and a per-kind
+> anti-vacuity test so a kind that stopped being generated fails rather than goes quiet.
 >
-> The reason it is not a one-line widening of `_calls`: the generator guarantees legality
-> by *evaluating as it generates*, and each of the five needs something that loop does not
-> have.
+> Three things it turned up, none of them a bug in the package:
 >
-> - `_calls` draws and applies **one call at a time**, but a builder chain is a *pair* and
->   fusion only matches adjacent pairs. Drawing opener+closer as a unit changes the loop's
->   shape, not just its `sampled_from` list.
-> - `datasets()` builds coords as `np.arange(s)`, so there is no datetime index:
->   `groupby("time.month")` and `resample` cannot run at all without a second dataset
->   strategy.
-> - Closer names must be **per builder**. `DatasetWeighted` has only
->   `mean`/`sum`/`std`/`var`, so drawing from `REDUCE_NAMES` would generate
->   `ds.weighted(w).max()` — an `AttributeError` unrelated to the rewrites under test.
-> - The closer's *argument shape* differs per builder too: `_calls` emits
->   `Call(name, dim=dims)` uniformly, but `DatasetRolling.mean` takes **no** dim argument,
->   so a generated rolling closer must be bare or it trips the `keep_attrs` misparse.
-> - `weighted` needs a **weights strategy**, coupled to the dim draw: a weighted reduce
->   maps per variable and *raises* when any variable lacks the named dim, unlike a plain
->   reduce.
->
-> Doing it once for all three fused nodes is also strictly better than three partial
-> widenings, which is the other half of why deferring is the right call rather than merely
-> the convenient one.
+> - **The size-exactness property cannot be widened**, and shouldn't be: a fused node is
+>   entitled to answer "unknown", which is what W3 built `int | None` for. It keeps the
+>   plain generator.
+> - **The tracked-schema property silently assumed no unmodelled op.** True by accident
+>   while the generator produced none; an unfusable builder pair is an `Opaque`, past which
+>   `apply_schema` is documented to be a guess (`optimize._trusted_prefix`). The assumption
+>   is now stated as an `assume` rather than relied upon.
+> - **Two generator gaps around non-float data**, reachable from the plain chains alone
+>   (`all`/`any` yield bool, `count` yields int) and only surfaced by the longer chains
+>   builders produce. Both are xarray/numpy limitations, now filtered in one place with the
+>   mapping written down: `median` of a zero-size non-float array raises where a float one
+>   answers NaN, and the *windowed* builders' kernels are float-only on bool.
 
 One narrowing has no workstream and should get one: `.reduce` is excluded
 (`test_properties.py:28-30`) because its first positional argument is a *function*, which
