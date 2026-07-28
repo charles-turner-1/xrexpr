@@ -140,7 +140,7 @@ optimisations we can apply whether or not any Rust is ever written.
 ## Checkpoint — where this stands (2026-07-28)
 
 A status entry, not a revision: nothing below changes a decision above. Written at the
-point where W2 is one PR from complete and the untouched work is all in phase 3.
+point where **W2's PR sequence is complete** and the untouched work is all in phase 3.
 
 ### Landed on `main`
 
@@ -159,12 +159,10 @@ point where W2 is one PR from complete and the untouched work is all in phase 3.
 | #86 | projections hop past grouped/windowed reduces | W2 PR 7 |
 | #87 | the `dim_effect` unification | W2 §11.1 |
 | #88 | projections hop past weighted reduces | W2 §8.1 → "PR 9" |
+| #89 | `explain()` on the lowered plan | W2 PR 8 (last of §12) |
 
 ### Not started
 
-- **W2 PR 8** — `explain()` on the lowered plan. The **last item in §12's sequence**;
-  `accessor.py`'s `explain()` still formats the emitted calls and names PR 8 as the
-  deliberate later change.
 - **W4** — `Rechunk.chunks` is still `frozendict[Hashable, Any]`, and `_pushable_rechunk`'s
   `isinstance` ladder — §"What remains" item 2 calls it *the last one in the package* — is
   still there.
@@ -189,7 +187,8 @@ Of the three gaps in §"What remains, honestly": **gap 1 is closed** — grouped
 barriered by W1, then modelled properly by W2, and the trailing barrier is retired. **Gaps 2
 and 3 are untouched**; they are exactly W4 and W5.
 
-By phase: **0 and 1 complete; 2 complete bar PR 8; 3 is where all the untouched work sits.**
+By phase: **0, 1 and 2 complete; 3 is where all the untouched work sits.** W2's memo has one
+item left and it was never in the sequence — the weighted *select* rule (§8.1).
 
 One deviation from the sequencing worth recording, since it was not planned: **three of the
 four items parked in phase 4 (gated) were taken ahead of phase 3**, because each became
