@@ -393,10 +393,16 @@ class WeightedReduce:
     The variant exists as much for what it **blocks** as for what it describes. Lowered to
     a plain :class:`Reduce` it would be indistinguishable from one, so ``pushdown_selects``
     would match it and hop a select in front of a weighted mean with the weights left
-    un-subset — a wrong plan, silently. Nothing here fires any rule (see
+    un-subset — a wrong plan, silently. **No select ever crosses one** (see
     ``docs/roadmap/02-lowering.md`` §8.1: subsetting ``w`` alongside would be the first
     rewrite in this package to transform an *array* rather than reorder metadata, and that
     needs its own workstream).
+
+    A *projection* does cross one (W2 PR 9), which is the asymmetry ``weight_dims`` pays
+    for: a projection discards variables rather than subsetting them, so the weights need
+    no rewriting, but it can orphan a dim **coordinate** — and whether a coord is present
+    decides whether the weights align against that dim or broadcast a fresh one, so the
+    rule has to require every weight dim survive. See ``optimize.dim_effect``.
 
     The dim algebra, verified against xarray 2026.7.0 — and **not** a plain ``Reduce``'s,
     which is what ``weight_dims`` is for. ``consumes`` is exactly a reduce's, symbolic

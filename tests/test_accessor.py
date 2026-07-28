@@ -581,23 +581,40 @@ def test_projection_pushdown_introduces_no_error_of_its_own(dated_ds):
     )
 
 
-def test_projection_past_a_weighted_reduce_is_left(dated_ds):
-    # Pins the *current* behaviour rather than defending it. ``WeightedReduce`` is absent
-    # from this rule's match, so nothing crosses it and both orders raise alike. The
-    # argument that originally justified the exclusion -- that hopping the projection in
-    # front would mask ``elevation``'s error -- has since been retired: by the test above
-    # and ``07-small-wins.md`` §8, skipping a discarded variable's failure is the *better*
-    # answer. Whether weighted should now join the rule is an open decision recorded in §8;
-    # a projection, unlike a select, never has to subset the weights.
+def test_a_projection_hops_past_a_weighted_reduce_and_disarms_it(dated_ds):
+    # §8's contract at its sharpest, end to end. Eagerly this chain *raises*: a weighted
+    # reduce maps per variable and ``elevation`` has no ``time``, where a plain
+    # ``.mean("time")`` would merely waste effort on it. The projection hops in front, so
+    # ``elevation`` is gone before the reduce runs and the plan delivers the value it was
+    # asked for. Not a masked error -- an error that only ever came from discarded work.
     ds = dated_ds.assign(elevation=(("lat", "lon"), np.zeros((3, 4))))
     weights = ds["area"]
     chain = ds.plan.weighted(weights).mean("time")[["temperature"]]
 
-    assert [type(n) for n in chain._optimized()] == [WeightedReduce, Project]
-    with pytest.raises(ValueError, match="do not exist"):
-        chain.collect()
+    assert [type(n) for n in chain._optimized()] == [Project, WeightedReduce]
     with pytest.raises(ValueError, match="do not exist"):
         ds.weighted(weights).mean("time")[["temperature"]]
+    # ...and the value is exactly the one the hopped plan is supposed to compute
+    xr.testing.assert_identical(
+        chain.collect(), ds[["temperature"]].weighted(weights).mean("time")
+    )
+
+
+def test_a_projection_orphaning_a_weight_dim_is_left(dated_ds):
+    # The guard, end to end. ``elevation`` has no ``time``, so projecting to it drops the
+    # ``time`` *coordinate* -- and these weights carry ``time``, so after the hop they would
+    # broadcast a fresh ``time`` instead of inner-joining against the dataset's. That
+    # changes values, not just errors, which is why ``requires`` adds ``weight_dims``.
+    ds = dated_ds.assign(elevation=(("lat", "lon"), np.zeros((3, 4))))
+    weights = xr.DataArray(
+        np.arange(1.0, 9.0), dims="time", coords={"time": ds["time"]}
+    )
+    chain = ds.plan.weighted(weights).mean("lat")[["elevation"]]
+
+    assert [type(n) for n in chain._optimized()] == [WeightedReduce, Project]
+    xr.testing.assert_identical(
+        chain.collect(), ds.weighted(weights).mean("lat")[["elevation"]]
+    )
 
 
 def test_select_on_a_consumed_group_dim_still_raises_from_xarray(dated_ds):

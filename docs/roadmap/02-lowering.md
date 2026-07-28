@@ -404,6 +404,26 @@ workstream. Modelling alone already pays: `consumes` becomes correct (today a ba
 gets an exact arm, and — because lowering only needs to opaque the *pair* — ops after a
 weighted reduce are modelled again instead of barriered.
 
+> **Amended (2026-07, W2 PR 9): "without rules" now means "without *select* rules".**
+> Everything above is about the **select** hop and stands unchanged. A **projection** hop
+> is a different proposition, and it is now admitted: a projection *discards* variables
+> rather than subsetting them, so `w` is never rewritten and none of the obligations in the
+> paragraph above arise. The trigger was
+> [`07-small-wins.md`](./07-small-wins.md) §8 retiring the second argument for exclusion —
+> that hopping would mask the error a weighted reduce raises for a variable lacking a named
+> dim — which §8 reclassifies as the *better* answer, and of which weighted is the sharpest
+> instance (it raises where a plain reduce merely wastes effort).
+>
+> The hop is conditional, and the condition came from probing xarray rather than from the
+> dim algebra. A projection drops a dim **coordinate** no surviving variable uses, and the
+> weights' treatment of a dim depends on whether that coord exists — inner-join against it
+> if so, broadcast a fresh one if not. So the rule requires `consumes | weight_dims` of the
+> projected variables; without the `weight_dims` term two chains diverge in *values and
+> coords*, not merely in errors. This is the second thing `weight_dims` (§5.3) pays for, and
+> the first rule anywhere in the package whose guard is about a **coordinate's existence**
+> rather than a dim's. A bare closer needs no such term: it clears every dim, minted weight
+> dims included, so nothing survives for a coord to be missing from.
+
 ## 9. What this retires from W1
 
 [`01-grouped-barrier.md`](./01-grouped-barrier.md) should still land first, unchanged: it
@@ -433,7 +453,9 @@ closes the context and returns a Dataset just as `mean` does.
   That sub-design is salvaged intact from W9 §4 into
   [`03-schema-sizes.md`](./03-schema-sizes.md) and gates `GroupedReduce`.
 - **The weighted pushdown rule is deferred** (§8.1), as is anything else needing a
-  data-touching rewrite.
+  data-touching rewrite. *Still true of the **select** rule, which is the one that needs
+  the rewrite. The **projection** rule was admitted in W2 PR 9 — see §8.1's amendment —
+  precisely because it needs no rewrite at all.*
 - **The tree is still not here.** Nothing above touches binary ops
   (`merge`/`concat`/`ds1 + ds2`); the container is still a list and the deferral at
   `ir.py:21-24` still stands. This memo deliberately declines to spend that budget.
@@ -592,6 +614,13 @@ by hand.
 
 Deliberately outside this sequence: the weighted pushdown rule (§8.1) and the dim-effect
 unification (§11), each of which needs its own decision first.
+
+> **Both since taken** (2026-07), in the order the decisions actually became answerable:
+> the dim-effect unification (§11.1) once PR 7's projection arm made the shape unambiguous,
+> then **PR 9 — projection pushdown past `WeightedReduce`** (§8.1's amendment above), which
+> the unification reduced to one `dim_effect` arm. The *select* half of the weighted
+> pushdown rule remains outside the sequence, undecided and still needing a data-touching
+> rewrite. PR 8 (`explain()` on the lowered plan) is the remaining item.
 
 Each PR ships green under:
 

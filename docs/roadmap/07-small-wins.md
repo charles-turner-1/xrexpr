@@ -237,14 +237,45 @@ first and third; it may not rely on failures being preserved.
   (`dimensions ('lat',) must have the same length as … ndim=0`). Arguably an upstream bug
   — `std(dim=[])` should be a no-op — and present in both supported xarray versions.
   `mean` and the rest simply skip such a variable, so nothing diverges for them.
-- **`weighted`** would be the same shape: a weighted reduce refuses a variable lacking a
-  named dim where a plain one skips it. `WeightedReduce` is currently excluded from
-  `pushdown_projections` (W2 PR 7) partly on the error-masking argument this section has
-  now retired. **Open question, worth its own decision:** a projection does not have to
-  subset the weights — that argument belongs to the *select* rule
-  ([`02-lowering.md`](./02-lowering.md) §8.1) — so with §8 settled there may be no reason
-  left to exclude it, and grouped/windowed chains ending in a projection would optimise
-  where weighted ones still do not.
+- **`weighted`** is the same shape, and the sharpest instance of it: a weighted reduce
+  *refuses* a variable lacking a named dim where a plain one merely skips it, so
+  `ds.weighted(w).mean("time")[["temperature"]]` raises eagerly over `elevation` and
+  succeeds once the projection runs first.
+
+  **Decided (2026-07, W2 PR 9): admitted.** The error-masking argument that had excluded
+  `WeightedReduce` from `pushdown_projections` is exactly what this section retires, and
+  the other argument — subsetting the weights — belongs to the *select* rule
+  ([`02-lowering.md`](./02-lowering.md) §8.1), not this one: a projection discards
+  variables rather than subsetting them, so the weights are untouched.
+
+  It is **not** unconditional, and the condition was found by probing xarray rather than by
+  reasoning. A projection drops a dim *coordinate* that no surviving variable uses, and
+  what the weights do with a dim turns on whether its coord is there — inner-join against
+  it if so, broadcast a fresh one if not. So with weights on `lat` and a projection to a
+  variable spanning only `time`, the two orders disagree in **values and coords**, not just
+  in errors (an uncoordinated `lat` loses its coord entirely; a *disjoint* `lat` diverges
+  outright). The rule therefore requires `consumes | weight_dims` of the projected
+  variables, which is what `WeightedReduce.weight_dims` was added for in W2 PR 5.
+
+  A bare closer (`ALL_DIMS`) needs no such term and could not carry one: it clears every
+  dim including minted weight dims, so nothing survives for a coord to be missing from,
+  and a weight dim the dataset lacks could never be a subset of the projected variables'
+  dims.
+
+  Verified against the contract above rather than against the guard's own logic: 512
+  weighted chains (4 variable layouts × 8 weights × 4 closers × every projection) driven
+  end to end through `ds.plan`, of which 278 hopped. **No value changed, no coordinate
+  changed, and no error was introduced.** 285 came back identical to eager; 191 raised both
+  ways; the 36 that skipped an error each returned *exactly* the projection-first answer,
+  and every one of those errors was traceable to a discarded variable — including a
+  `MergeError` where disjoint weights gave the kept variable `lat` size 0 and the discarded
+  one size 2, so combining them conflicted.
+
+  The property suite covers the hop but not this last clause: its generator constrains the
+  weighted closer so no variable raises, because `optimised == eager` cannot express "eager
+  raises and that is fine" — the same reason it filters `EMPTY_AXIS_UNSAFE_REDUCES`. The
+  hop still fires on ~21% of generated weighted-plus-projection plans, all asserting
+  equality with eager.
 
 ### A note on the property suite
 
