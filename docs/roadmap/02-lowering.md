@@ -495,12 +495,41 @@ then it is a note.
 > intersection policy, not the dim sets alone; the sketch above only accounts for the
 > first.
 >
-> Not taken here, deliberately: PR 6's scope is the rule, and §12 already places the
-> unification outside the sequence as needing its own decision. What PR 6 does do is keep
-> the seam clean — `optimize._fused_dims` is a single `assert_never`-closed match over the
-> fused variants, i.e. one shard of `dim_effect` in the shape §11.1 describes, so the
-> unification has somewhere obvious to grow from rather than three inlined dim sets to
-> gather up. PR 7's projection arm will be the fourth instance.
+> Not taken in PR 6 — its scope was the rule — and taken immediately after PR 7, once the
+> fourth instance (the projection arm) made the shape unambiguous.
+>
+> **Done (2026-07).** `optimize.DimEffect` + `dim_effect`, one `match` closed with
+> `assert_never`, consumed by both pushdown rules; `pushdown_selects` and
+> `pushdown_selects_past_fused_reduces` collapse into one rule, and `_fused_dims` and
+> `pushdown_projections`' four-arm `match crossed` both disappear into it. Three partial
+> dispatches with three separate silent fallbacks became one exhaustive dispatch, which is
+> the win the sketch above claimed.
+>
+> Two corrections to that sketch, both found by writing it:
+>
+> - **It needs two dim sets, not one, and the reason is structural rather than
+>   incidental.** The rules approach a node from opposite sides. A *select* moving left
+>   comes from *after* the node, so it must avoid the minted dim as well (it is entitled to
+>   name `month`). A *projection* moving left lands *before* it, where the minted dim does
+>   not exist, so requiring it would block every hop. Hence `blocks` and `requires` — and
+>   `GroupedReduce` is where they actually differ. Landing PR 7 first is what made this
+>   visible; unifying earlier would have produced a single "dims involved" set and then
+>   had to break it apart.
+> - **Plus the intersection policy**, as noted above — kept as an explicit
+>   `on_conflict` field rather than derived. It is tempting to compute it (*"is the blocked
+>   dim actually gone?"*), but that would silently change behaviour: a select on a
+>   consumed `group_dim` would start raising `InvalidExpressionError` where it currently
+>   replays and lets xarray report it, which W2 PR 6 chose deliberately and pinned.
+>
+> Behaviour-preserving, and checked as such rather than asserted: the whole suite passes
+> unmodified, and the merged optimiser was diffed against the pre-refactor one over 8000
+> generated plans — same output, and the same plans raising.
+>
+> `pushdown_selects_past_rechunks` stays outside, which is worth recording as a decision.
+> It looked like a third instance from a distance but is a different rule: it has no
+> disjointness test at all (a rechunk changes no dim, so a select *always* commutes) and
+> instead rewrites the spec it crosses. Folding it in would mean inventing a `DimEffect`
+> shape for "always crossable, but adjust me on the way", which no other node wants.
 
 ### 11.2 Legality is not profitability
 

@@ -11,22 +11,29 @@ Rules (in ``_RULES``):
 - :func:`merge_adjacent_selects` — fold a run of consecutive ``isel``/``isel`` (or
   ``sel``/``sel``) into a single indexer, *composing* rather than overwriting when both
   select the same dim (PR 7, #33).
-- :func:`pushdown_selects` — hop a select left past a preceding reduce when their dims
-  are disjoint, so the reduction scans a smaller array (PR 8, #11).
-- :func:`pushdown_selects_past_fused_reduces` — the same hop past a *grouped* or
-  *windowed* reduce, which is what lowering's fused nodes were built to make expressible:
-  ``groupby("time.month").mean().isel(lat=0)`` groups one latitude instead of all of them
-  (W2 PR 6).
-- :func:`pushdown_projections` — hop a variable projection left past a preceding reduce
-  or select, so only the needed variables flow through the plan (#32).
+- :func:`pushdown_selects` — hop a select left past **any** node whose dims permit it, so
+  the work behind it runs on less data: past a plain reduce (PR 8, #11), and past a
+  grouped or windowed one, which is what lowering's fused nodes were built to make
+  expressible — ``groupby("time.month").mean().isel(lat=0)`` groups one latitude instead
+  of all of them (W2 PR 6).
+- :func:`pushdown_projections` — hop a variable projection left past a preceding reduce,
+  select or fused reduce, so only the needed variables flow through the plan (#32, W2 PR 7).
 - :func:`pushdown_selects_past_rechunks` — hop a select left past a preceding ``chunk``
   so the rechunk moves less data (#57).
 
 Each is a *local, single-step* rewrite; the fixpoint composes them (a select bubbles
-past a whole run of reductions, and newly-adjacent selects then merge). ``pushdown_selects``
-handles each ``(reduce, select)`` adjacency by set algebra — disjoint dims → swap,
-intersecting dims → :class:`InvalidExpressionError` — and leaves anything else (PR 9, #12).
+past a whole run of reductions, and newly-adjacent selects then merge).
 See ``docs/pr-plan.md``.
+
+**One dispatch site for dim algebra.** The two pushdown rules above ask different
+questions of the node they cross — what a *select* coming from the right must avoid, and
+what a *projection* going to its left must supply — and both read the answer from
+:func:`dim_effect`, a single ``match`` closed with ``assert_never``. That is
+``docs/roadmap/02-lowering.md`` §11.1's derived ``DimEffect`` view, taken up once its
+stated trigger (the third rule that would otherwise be written twice) arrived.
+:func:`pushdown_selects_past_rechunks` deliberately stays outside it: it has no
+disjointness test at all — a rechunk changes no dim, so a select *always* commutes with
+one — and instead rewrites the spec it crosses.
 
 **The schema, and how far it can be trusted.** Dim-level rules read almost everything they
 need off the nodes themselves, but a *variable*-level rule can't: whether a projection may
@@ -42,7 +49,8 @@ inside it.
 """
 
 from collections.abc import Callable, Hashable, Iterable, Mapping
-from typing import TypeGuard
+from dataclasses import dataclass
+from typing import Literal, TypeGuard
 
 from frozendict import frozendict
 from typing_extensions import assert_never
@@ -66,7 +74,9 @@ from xrexpr.ir import (
     Project,
     Rechunk,
     Reduce,
+    Scan,
     Select,
+    WeightedReduce,
     WindowedReduce,
 )
 from xrexpr.schema import SchemaState, apply_schema
@@ -98,12 +108,11 @@ def optimize(nodes: Plan, schema: SchemaState) -> Plan:
 
     **Termination.** Every rule strictly decreases the lexicographic measure
     ``(len(plan), sum of the indices of the Select and Project nodes)``. Merging and
-    dropping a spent rechunk shrink the plan; the four pushdown rules leave the length
+    dropping a spent rechunk shrink the plan; the three pushdown rules leave the length
     alone but move a select or projection strictly left. Neither component can grow, so
     no rule may ever push a node *right* or lengthen a plan — the invariant a new rule
-    has to preserve. (The pushdown rules fire on disjoint adjacencies — ``(reduce,
-    select)``, ``(grouped | windowed reduce, select)``, ``(reduce | select, project)`` and
-    ``(rechunk, select)`` — so they can't undo one another.)
+    has to preserve. (The pushdown rules fire on disjoint adjacencies — ``(*, select)``,
+    ``(*, project)`` and ``(rechunk, select)`` — so they can't undo one another.)
     """
     plan = list(nodes)
     while True:
@@ -147,6 +156,87 @@ def _trusted_prefix(nodes: Plan) -> int:
         if isinstance(node, Opaque):
             return i
     return len(nodes)
+
+
+@dataclass(frozen=True)
+class DimEffect:
+    """What one node does to dims, as the *rules* need to know it.
+
+    A **derived** view, never stored: :func:`dim_effect` computes it from a node with one
+    ``match``, which is the house's "derive, don't store" discipline (``Select.consumes``,
+    ``Project.single``) applied one level up — at the plan rather than the node. It is what
+    ``docs/roadmap/02-lowering.md`` §11.1 sketches and defers; its stated trigger, *the
+    third rule that would otherwise be written twice*, arrived with W2 PR 6.
+
+    Two fields rather than one dim set, because the pushdown rules approach a node from
+    **opposite sides** and that turned out to be the load-bearing fact:
+
+    - :attr:`blocks` is read by a rule moving a **select** left, i.e. from *after* the
+      node. It must avoid everything the node consumed, minted or resized — a grouped
+      reduce's minted dim included, since a select is entitled to name it.
+    - :attr:`requires` is read by a rule moving a **projection** left, i.e. to *before*
+      the node. It is what the node needs of its **input**, which excludes a minted dim
+      outright: that dim does not exist yet where the projection would land.
+
+    ``None`` means *don't know*, the contract ``SchemaState.var_dims`` states, with the
+    same discipline: it must be read as **no rewrite**, never as "no dims". Nothing crosses
+    a node that answers ``None``.
+    """
+
+    #: Dims a select may not hop over, or ``None`` to refuse every hop.
+    blocks: DimSet | None
+    #: Dims the node needs of its input, or ``None`` to refuse every projection hop.
+    requires: DimSet | None
+    #: What a select hopping over :attr:`blocks` means. ``"invalid"`` — the node *removed*
+    #: those dims, so the chain can never replay and the optimiser should say so.
+    #: ``"immovable"`` — the dims survive in some form, so the chain is very likely valid
+    #: and merely un-reorderable; leave it. Only meaningful when ``blocks`` is not ``None``.
+    on_conflict: Literal["invalid", "immovable"] = "immovable"
+
+
+#: Nothing crosses this node in either direction — the answer for every kind whose dim
+#: effect the optimiser does not model (``Scan``, whose order matters; ``Opaque``, which
+#: could do anything; ``Rechunk``, which has its own rule; ``WeightedReduce``, held back
+#: deliberately) and for ``Project`` and ``Select``, which the *other* rules handle.
+_OPAQUE_EFFECT = DimEffect(blocks=None, requires=None)
+
+
+def dim_effect(node: LoweredOp) -> DimEffect:
+    """The dim effect of ``node``: one dispatch site, closed with ``assert_never``.
+
+    The point of gathering these here is that a **new variant must answer every question at
+    once**. Before this existed the same facts were spread over three partial matches — one
+    in ``pushdown_selects``, one in ``_fused_dims``, four arms in
+    :func:`pushdown_projections` — each with its own silent "anything else is left"
+    fallback, so a new node kind would quietly get the conservative answer from all three
+    without anyone deciding it should.
+
+    A conservative answer is still available, and is what most kinds take: ``None`` on both
+    fields. What is no longer available is taking it *by accident*.
+    """
+    match node:
+        case Reduce(consumes=consumes):
+            # A reduce removes exactly what it names, so a later select on one of those
+            # dims can never replay -- the empty-dim reorder bug, and the one case where
+            # the optimiser is entitled to reject the chain itself.
+            return DimEffect(blocks=consumes, requires=consumes, on_conflict="invalid")
+        case Select(indexer=indexer):
+            # Nothing hops a select over a select -- ``merge_adjacent_selects`` folds those
+            # instead -- but a *projection* crosses one, and needs its indexed dims.
+            return DimEffect(blocks=None, requires=frozenset(indexer))
+        case GroupedReduce(group_dim=group_dim, new_dim=new_dim, consumes=consumes):
+            return DimEffect(
+                blocks=frozenset({group_dim, new_dim}) | consumes,
+                requires=frozenset({group_dim}) | consumes,
+            )
+        case WindowedReduce(window=window):
+            # A window consumes nothing and mints nothing; it can only *resize*, and only
+            # the dims it names. So the keys are both answers.
+            return DimEffect(blocks=frozenset(window), requires=frozenset(window))
+        case Scan() | Project() | Rechunk() | Opaque() | WeightedReduce():
+            return _OPAQUE_EFFECT
+        case _:
+            assert_never(node)
 
 
 def merge_adjacent_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
@@ -416,135 +506,64 @@ def _scaled_stop(inner_stop: int | None, start: int, step: int) -> int | None:
 
 
 def pushdown_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
-    """Hop a select left past a preceding reduce when their dims permit.
+    """Hop a select left past a preceding node whose dims permit it.
 
-    The rule only *fires* on a `(reduce, select)` adjacency — that structural test is
-    the one thing this shares with pattern matching. What to do once it fires is decided
-    by **set algebra** on the select's dims vs the reduce's ``consumes``, not by any
-    further dispatch:
+    The structural test is only *which* adjacency fires; what happens once it does is
+    **set algebra** on the select's dims against the crossed node's
+    :attr:`DimEffect.blocks`, plus that node's answer to what an overlap *means*:
 
-    - **disjoint dims** — the select touches no reduced dim, so the swap is valid:
-      ``ds.mean("lat").isel(time=0)`` → ``ds.isel(time=0).mean("lat")`` (select first, a
-      smaller array to reduce). Matching the :class:`~xrexpr.ir.Reduce` variant
-      generalises this to *any* reduce (``std``/``max``/...), not just a hard-coded
-      ``mean``/``sum``/``prod`` list (#1).
-    - **intersecting dims** — the select indexes a dim the reduce already removed, so the
-      expression can never replay (``mean("lon").isel(lon=0)``, and the all-dims
+    - **disjoint dims** — the select touches nothing the node consumed, minted or resized,
+      so the swap is valid and strictly cheaper. ``ds.mean("lat").isel(time=0)`` becomes
+      ``ds.isel(time=0).mean("lat")``, and ``ds.groupby("time.month").mean().isel(lat=0)``
+      runs the climatology over one latitude — the pattern this project exists for.
+    - **overlapping dims, ``on_conflict="invalid"``** — a plain reduce *removed* those
+      dims, so the chain can never replay (``mean("lon").isel(lon=0)``, and the all-dims
       ``mean().isel(time=0)``): raise :class:`InvalidExpressionError` rather than emit a
-      silently-wrong reorder (the empty-dim reorder bug).
+      silently-wrong reorder.
+    - **overlapping dims, ``on_conflict="immovable"``** — the dims survive in some form, so
+      the chain is very likely *valid* and merely un-reorderable. ``.mean().isel(month=0)``
+      indexes a minted dim; ``rolling(time=3).mean().isel(time=0)`` indexes one the window
+      kept. Leave it. Raising here would reject working chains, and where such a chain
+      really is invalid xarray reports it at replay in its own words.
+    - **``blocks is None``** — don't know, so don't move. Scans are the salient case:
+      ``cumsum("time").isel(time=5)`` is left untouched because order matters there.
 
-    Any other adjacency is simply left. Scans are the salient case: a ``cumsum``/``diff``
-    is a :class:`~xrexpr.ir.Scan`, not a :class:`~xrexpr.ir.Reduce`, so the pattern never
-    matches it — ``cumsum("time").isel(time=5)`` is left untouched (order matters),
-    neither swapped nor raised.
+    That last distinction is what makes this one rule rather than the two it replaced. A
+    pushed select also cannot disturb window *boundaries* (``02-lowering.md`` §11.2):
+    windows run along their own dims independently at each position of the others,
+    ``center``/``min_periods`` included, so a select on a **disjoint** dim cannot change
+    which elements a window sees — and an intersecting one never moves.
+
+    ``ALL_DIMS`` needs no schema: whatever the dims turn out to be, a reduce over every one
+    of them leaves nothing for a select to index, so every select dim overlaps.
 
     One hop per call, returning the rewritten plan; ``None`` when no adjacency swaps.
     :func:`optimize`'s fixpoint composes hops so a select reaches the front of a run of
     reductions (and adjacent selects then merge).
     """
     for i in range(len(nodes) - 1):
-        match nodes[i], nodes[i + 1]:
-            case (
-                Reduce(consumes=consumes) as reduce_node,
-                Select(indexer=indexer) as select_node,
-            ):
-                select_dims = frozenset(indexer)
-                # ``ALL_DIMS`` needs no schema here: whatever the dims turn out to be,
-                # a reduce over every one of them leaves nothing for a select to index,
-                # so each of the select's dims is one the reduce removed.
-                shared = (
-                    select_dims
-                    if isinstance(consumes, AllDims)
-                    else select_dims & consumes
-                )
-                if not shared:
-                    swapped = list(nodes)
-                    swapped[i], swapped[i + 1] = select_node, reduce_node
-                    return swapped
+        crossed, select = nodes[i], nodes[i + 1]
+        if not isinstance(select, Select):
+            continue
 
-                raise InvalidExpressionError(
-                    f"{select_node.name}() indexes {sorted(str(d) for d in shared)}, "
-                    f"which {reduce_node.name}() has already reduced away"
-                )
+        effect = dim_effect(crossed)
+        blocks = effect.blocks
+        if blocks is None:
+            continue
+
+        select_dims = frozenset(select.indexer)
+        shared = select_dims if isinstance(blocks, AllDims) else select_dims & blocks
+        if not shared:
+            swapped = list(nodes)
+            swapped[i], swapped[i + 1] = select, crossed
+            return swapped
+
+        if effect.on_conflict == "invalid":
+            raise InvalidExpressionError(
+                f"{select.name}() indexes {sorted(str(d) for d in shared)}, "
+                f"which {crossed.name}() has already reduced away"
+            )
     return None
-
-
-def pushdown_selects_past_fused_reduces(
-    nodes: Plan, schema: SchemaState
-) -> Plan | None:
-    """Hop a select left past a preceding grouped or windowed reduce.
-
-    The payoff the whole lowering workstream was built for, and the pattern this project
-    exists for: ``ds.plan.groupby("time.month").mean().isel(lat=0)`` becomes
-    ``ds.plan.isel(lat=0).groupby("time.month").mean()``, running the climatology over one
-    latitude instead of over all of them and then discarding the rest. It can only be
-    written now because the pair is *one node* — before lowering, ``groupby`` and ``mean``
-    were two, and no rule could see what the adjacency meant.
-
-    The select hops when its dims are **disjoint** from everything the fused node's dim
-    algebra involves (:func:`_fused_dims`): for a grouped reduce the ``group_dim`` it
-    consumes, the ``new_dim`` it mints and any extra ``consumes``; for a windowed one the
-    ``window`` keys, which are the only dims it can resize. Grouping and windowing both act
-    independently at each position of every *other* dim, so subsetting one of those before
-    the aggregation reaches the same answer over less data.
-
-    **Intersecting dims are left, never raised** — the scan discipline, not
-    :func:`pushdown_selects`'. That is a correctness requirement rather than caution:
-    ``.mean().isel(month=0)`` selects the minted dim, ``rolling(time=3).mean().isel(time=0)``
-    and ``coarsen(time=3).mean().isel(time=0)`` select a dim the window kept, and all three
-    are **perfectly valid** (verified against xarray 2026.7.0) — merely immovable. Only
-    selecting the consumed ``group_dim`` is invalid, and leaving it lets xarray say so in
-    its own words at replay, which is what this rule would otherwise have to guess at.
-
-    A pushed select cannot disturb window *boundaries*, the one thing that would make this
-    unsound (``docs/roadmap/02-lowering.md`` §11.2): windows run along their own dims
-    independently at each position of the others, ``center``/``min_periods`` included, so a
-    select on a **disjoint** dim cannot change which elements a window sees. An
-    *intersecting* one could, and this rule never moves those.
-
-    :class:`~xrexpr.ir.WeightedReduce` is deliberately absent, which is the whole reason it
-    is a separate variant: the dim algebra would permit the hop, but the **weights** would
-    need subsetting alongside — a rewrite that transforms an array rather than reordering
-    metadata, and its own workstream (§8.1).
-
-    One hop per call, returning the rewritten plan; ``None`` when nothing moves. Moving a
-    select strictly left decreases :func:`optimize`'s termination measure, exactly as the
-    other pushdowns do.
-    """
-    for i in range(len(nodes) - 1):
-        match nodes[i], nodes[i + 1]:
-            case (
-                (GroupedReduce() | WindowedReduce()) as fused,
-                Select(indexer=indexer) as select,
-            ):
-                if frozenset(indexer) & _fused_dims(fused):
-                    continue  # immovable, and usually still valid — leave it alone
-                swapped = list(nodes)
-                swapped[i], swapped[i + 1] = select, fused
-                return swapped
-    return None
-
-
-def _fused_dims(node: GroupedReduce | WindowedReduce) -> frozenset[Hashable]:
-    """Every dim a fused reduce consumes, mints or resizes — what a select must avoid.
-
-    A shard of the ``dim_effect(op) -> DimEffect`` view ``docs/roadmap/02-lowering.md``
-    §11.1 sketches and defers, kept deliberately small: one ``match`` closed with
-    ``assert_never``, so a fourth fused variant has to say which dims it involves before
-    this rule can be trusted near it.
-
-    ``group_dim`` and ``new_dim`` are frequently the same dim (``groupby("lat")`` and
-    ``resample(time="2D")`` both mint what they grouped over); the set absorbs that.
-    """
-    match node:
-        case GroupedReduce(group_dim=group_dim, new_dim=new_dim, consumes=consumes):
-            return frozenset({group_dim, new_dim}) | consumes
-        case WindowedReduce(window=window):
-            # A window consumes nothing and mints nothing -- it can only *resize*, and only
-            # the dims it names (and only for ``coarsen``). So the keys are the whole story.
-            return frozenset(window)
-        case _:
-            assert_never(node)
 
 
 def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
@@ -584,7 +603,8 @@ def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
     every one of ``groupby("time.month")``/``resample``/``rolling``/``coarsen`` then raises
     rather than quietly doing nothing. The ``needed`` sets say what each requires of its
     **input**: ``{group_dim} | consumes`` for a grouped reduce, the ``window`` keys for a
-    windowed one. Both differ from :func:`_fused_dims` — see the ``GroupedReduce`` arm.
+    windowed one. That is :attr:`DimEffect.requires`, and for a grouped reduce it is
+    deliberately *narrower* than :attr:`DimEffect.blocks` — see :func:`dim_effect`.
 
     **This rule may skip an error, and that is deliberate.** Moving a projection earlier
     means the discarded variables are never computed — usually just cheaper, occasionally
@@ -619,23 +639,15 @@ def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
             continue
 
         crossed = nodes[i]
-        needed: frozenset[Hashable]
-        match crossed:
-            case Reduce(consumes=consumes):
-                needed = _resolve_dims(consumes, schemas[i])
-            case Select(indexer=indexer):
-                needed = frozenset(indexer)
-            case GroupedReduce(group_dim=group_dim, consumes=consumes):
-                # Note what is *absent*: ``new_dim``. This rule asks what the crossed op
-                # needs of its **input**, and the minted dim does not exist yet when the
-                # projection runs in front of it -- which is exactly why this set is not
-                # ``_fused_dims``, whose caller runs *after* the node and can name it.
-                needed = frozenset({group_dim}) | consumes
-            case WindowedReduce(window=window):
-                needed = frozenset(window)
-            case _:
-                continue
+        requires = dim_effect(crossed).requires
+        if requires is None:  # don't know what it needs, so don't move anything past it
+            continue
 
+        # ``ALL_DIMS`` (a bare ``mean()``) resolves against the schema *entering* the
+        # crossed node, which is exact here because this loop stays inside the trusted
+        # prefix. The subset test below then passes only when the projected variables span
+        # every dim — exactly when the replayed bare reduce reduces the same ones.
+        needed = _resolve_dims(requires, schemas[i])
         available = schemas[i].var_dims(project.variables)
         if available is None or not needed <= available:
             continue
@@ -724,7 +736,6 @@ def _pushable_rechunk(node: Rechunk) -> bool:
 _RULES: tuple[Rule, ...] = (
     merge_adjacent_selects,
     pushdown_selects,
-    pushdown_selects_past_fused_reduces,
     pushdown_projections,
     pushdown_selects_past_rechunks,
 )

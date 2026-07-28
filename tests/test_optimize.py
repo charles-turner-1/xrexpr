@@ -23,7 +23,7 @@ from frozendict import frozendict
 from xrexpr.exceptions import InvalidExpressionError
 from xrexpr.indexers import classify
 from xrexpr.ir import ALL_DIMS, GroupedReduce, WeightedReduce, WindowedReduce
-from xrexpr.optimize import optimize
+from xrexpr.optimize import dim_effect, optimize
 from xrexpr.schema import SchemaState, to_opnode
 
 
@@ -759,18 +759,19 @@ def test_projection_is_left_when_the_fused_node_would_lose_its_dim(schema, fused
 def test_projection_needed_set_excludes_the_minted_dim(schema):
     # The asymmetry with the select rule, pinned: a grouped reduce *mints* ``month``, but
     # the projection runs in front of it where no ``month`` exists, so requiring the
-    # projected variables to carry it would block every hop. ``_fused_dims`` includes it;
-    # this rule's ``needed`` must not.
+    # projected variables to carry it would block every hop. ``DimEffect.blocks`` includes
+    # it, because a select comes from the other side; ``requires`` must not.
     plan = [_grouped(new_dim="month"), _node("__getitem__", ["temperature"])]
     out = optimize(plan, schema)
     assert [type(n).__name__ for n in out] == ["Project", "GroupedReduce"]
 
 
 def test_no_projection_hops_past_a_weighted_reduce(schema):
-    # A second, independent reason beyond the weights (which a *projection* would not have
-    # to subset): a weighted reduce is applied per variable and raises when any variable
-    # lacks the named dim, where a plain reduce skips it. Hopping the projection in front
-    # would drop the offending variable and turn a raising chain into a succeeding one.
+    # Pinned on the narrower ground the docstring now states: a weighted reduce is simply
+    # not modelled here yet, so ``dim_effect`` gives it the conservative answer and nothing
+    # moves. The original reason -- that hopping would mask the error a weighted reduce
+    # raises for a variable lacking the named dim -- is what §8 reclassifies as a win, so
+    # this assertion records a deferral, not a hazard.
     plan = [
         _weighted(consumes=frozenset({"time"}), weight_dims=frozenset({"lat"})),
         _node("__getitem__", ["temperature"]),
@@ -784,3 +785,81 @@ def test_projection_and_select_both_cross_a_fused_reduce(schema):
     plan = [_grouped(), _node("isel", lat=0), _node("__getitem__", ["temperature"])]
     out = optimize(plan, schema)
     assert [type(n).__name__ for n in out] == ["Project", "Select", "GroupedReduce"]
+
+
+# --- the derived dim effect (02-lowering §11.1) ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("node", "blocks", "requires"),
+    [
+        # a reduce removes exactly what it names, so both answers coincide
+        (_node("mean", "lat"), frozenset({"lat"}), frozenset({"lat"})),
+        (_node("mean"), ALL_DIMS, ALL_DIMS),
+        # a select is never crossed by another select, but is by a projection
+        (_node("isel", time=0), None, frozenset({"time"})),
+        # the asymmetry the two fields exist for: ``new_dim`` blocks a select coming from
+        # the right, but is *not* required of the input a projection would leave behind
+        (_grouped(), frozenset({"time", "month"}), frozenset({"time"})),
+        (
+            _grouped(consumes=frozenset({"lat"})),
+            frozenset({"time", "month", "lat"}),
+            frozenset({"time", "lat"}),
+        ),
+        # a window resizes what it names and needs the same dims present
+        (_windowed(), frozenset({"time"}), frozenset({"time"})),
+        # nothing crosses these, in either direction
+        (_node("cumsum", "time"), None, None),
+        (_node("where", "cond"), None, None),
+        (_node("chunk", {"time": 2}), None, None),
+        (_node("__getitem__", ["temperature"]), None, None),
+        (_weighted(), None, None),
+    ],
+)
+def test_dim_effect_table(node, blocks, requires):
+    effect = dim_effect(node)
+    assert effect.blocks == blocks
+    assert effect.requires == requires
+
+
+def test_only_a_plain_reduce_calls_a_conflict_invalid():
+    # A reduce *removes* what it names, so a select on one of those dims can never replay
+    # and the optimiser is entitled to reject the chain. Every other node either mints or
+    # keeps the dims it blocks, so an overlapping select there is merely immovable -- the
+    # distinction that lets one rule serve both, and the one a new variant must get right.
+    invalid = [
+        node
+        for node in (
+            _node("mean", "lat"),
+            _grouped(),
+            _windowed(),
+            _weighted(),
+            _node("cumsum", "time"),
+        )
+        if dim_effect(node).on_conflict == "invalid"
+    ]
+    assert invalid == [_node("mean", "lat")]
+
+
+def test_dim_effect_covers_every_lowered_variant():
+    # ``assert_never`` makes this a type error too; asserted at runtime as well so the
+    # table above cannot silently stop covering the union it claims to.
+    from typing import get_args
+
+    from xrexpr.ir import LoweredOp
+
+    covered = {
+        type(node)
+        for node in (
+            _node("mean", "lat"),
+            _node("isel", time=0),
+            _node("cumsum", "time"),
+            _node("__getitem__", ["temperature"]),
+            _node("chunk", {"time": 2}),
+            _node("where", "cond"),
+            _grouped(),
+            _windowed(),
+            _weighted(),
+        )
+    }
+    assert covered == set(get_args(LoweredOp))
