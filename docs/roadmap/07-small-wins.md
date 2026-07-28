@@ -138,25 +138,24 @@ PR that lands the feature, or immediately after:
 | W2 phase 1 | assert `emit(to_lower_ir(p))` replays equal to eager, and that `to_lower_ir` is idempotent, over the existing generated chains |
 | W3 | assert rewrites survive unknown dim sizes |
 | W2 PRs 3–5 | ~~add `groupby`/`resample`/`rolling`/`coarsen`/`weighted` builder chains~~ — **paid in the PR after W2 PR 5** (see below) |
-| *(unscheduled)* | **multi-variable datasets and `__getitem__` projections** — see below |
+| W2 PR 7 | ~~multi-variable datasets and `__getitem__` projections~~ — **paid in W2 PR 7** (see below) |
 
-> **The property suite does not exercise projection pushdown at all**, measured rather
-> than assumed while W2 PR 7 was written: instrumenting `pushdown_projections` over 5000
-> generated builder chains fires it **0 times**. Two reasons compound, and neither is new —
-> this gap has been open since `pushdown_projections` landed (#32), and PR 7's fused arms
-> merely inherit it:
+> **Paid (2026-07) in W2 PR 7, having first been measured.** Instrumenting
+> `pushdown_projections` over 5000 generated chains fired it **0 times**: `_calls` never
+> drew `__getitem__`, and `datasets()` built a single variable, so even a projection would
+> have been vacuous — the rule's whole question is whether the *projected subset* still
+> carries the dims the crossed op names, which needs a variable that lacks one. The gap had
+> been open since `pushdown_projections` landed (#32); PR 7's fused arms only inherited it.
 >
-> - `_calls` draws from `isel`/`sel`/`reduce` (plus builders); `__getitem__` is not in the
->   list, so no plan ever contains a `Project`;
-> - `datasets()` builds **one** variable, so even if projections were drawn they would be
->   near-vacuous — the rule's whole question is whether the *projected subset* still carries
->   the dims the crossed op names, which needs a variable that lacks one.
+> `datasets()` now builds a second variable over a proper subset of the dims (the
+> `elevation(lat, lon)` shape the hand-written fixtures use) and `_calls` draws list-form
+> projections. The rule fires on **10.7%** of generated chains. List form only: a bare name
+> yields a `DataArray`, whose downstream algebra is a different thing and whose accessor
+> does not exist yet (§5).
 >
-> Fixing it means a second generated variable over a proper subset of the dims (the
-> `elevation(lat, lon)` shape the hand-written fixtures use) plus a projection draw. Worth
-> doing — the variable-level rule is the one whose guard is hardest to reason about by
-> hand — but it is its own PR, and until then the projection rules are covered by goldens
-> and hand-written equality-vs-eager only.
+> It paid for itself immediately — see §8, and the corrected `Project` arm in
+> `apply_schema` (a projection *orphans* dims, which that arm used to miss, and a
+> hand-written test had encoded the wrong behaviour).
 
 > **Paid (2026-07), one PR late and in one go.** Deferred when W2 PR 5 landed, because PRs
 > 3, 4 and 5 had each left it and there was no later fused node to re-pledge it against;
@@ -190,3 +189,61 @@ like any other. That is a real latent bug, not just a generator limitation.
 The invariant asserted is always the same and is the project's crown jewel:
 `ds.plan.<chain>.collect()` equals the eager chain, for generated datasets and
 chains, plus idempotence of `optimize`.
+
+## 8. Projection pushdown can mask an eager error
+
+Found by the property widening in §7 (2026-07, during W2 PR 7), and **unfixed** — it needs
+a decision rather than a patch, so it is written down rather than quietly filtered.
+
+`pushdown_projections` guards on *"do the projected variables still carry the dims the
+crossed op names?"*. It never asks the other question: **would a variable the projection
+drops have made the op fail?** When one would, the swap turns a raising chain into a
+quietly succeeding one — the optimised plan diverging from eager, which is the failure
+mode this package treats as worst.
+
+Two instances, both verified (xarray 2026.7.0 and 2025.6.1):
+
+```python
+ds = xr.Dataset({"temperature": (("time", "lat"), ...),   # has time
+                 "elevation":   ("lat", ...)})            # no time
+
+ds.std("time")[["temperature"]]              # ValueError, from `elevation`
+ds.plan.std("time")[["temperature"]].collect()   # succeeds — diverges
+```
+
+- **`std`/`var`.** A Dataset reduce hands `dim=[]` to a variable lacking every dim it
+  named, and those two then build a 0-d result while still claiming the variable's dims
+  (`dimensions ('lat',) must have the same length as … ndim=0`). That is an upstream bug —
+  `std(dim=[])` should be a no-op — but it is present in both supported xarray versions.
+- **`weighted`.** A weighted reduce is applied per variable and *refuses* when one lacks a
+  named dim, where a plain reduce skips it. Already handled, by keeping `WeightedReduce`
+  out of the rule entirely (W2 PR 7), but it is the same shape.
+
+The generator filters the `std`/`var` case (`EMPTY_AXIS_UNSAFE_REDUCES`) so the widening
+could land; that filter hides the *noise*, not this.
+
+**Why it is not simply fixed.** The obvious conservative rule — only swap when *every*
+variable carries the needed dims — would kill the feature outright: `ds.mean("time")
+[["tas"]]` with a `time`-less `elevation` is the canonical case the rule exists for, and
+`mean` handles it perfectly well. The distinction is per-reduction (`mean` skips, `std`
+raises), so encoding it means a table of "reductions that refuse a non-participating
+variable" — a shadow table beside `OP_TABLE`, exactly the kind
+[`02-lowering.md`](./02-lowering.md) §13 rejects as drift-prone.
+
+Three options, in the order I would rank them:
+
+1. **Leave it, documented.** The divergence only appears where xarray itself is arguably
+   buggy, and it fails in the *safe* direction for the user (they get an answer rather than
+   an error). Cheapest, and honest as long as it is written down — which is what this
+   section is for.
+2. **Fix upstream.** `std(dim=[])`/`var(dim=[])` returning a correctly-shaped no-op would
+   remove the `std`/`var` instance entirely, leaving only `weighted`, which is already
+   handled. The best outcome, and not in this repo's gift.
+3. **Teach the rule.** Add the per-reduction fact to `OP_TABLE` (an `OpSpec` field, not a
+   separate table, which answers the drift objection) and have `pushdown_projections`
+   consult it for the *dropped* variables. Correct and self-contained, but it buys little
+   over option 1 unless the upstream behaviour is here to stay.
+
+The property suite currently passes only because the generator filters the trigger; if
+option 3 is ever taken, drop `EMPTY_AXIS_UNSAFE_REDUCES` in the same PR so the property is
+the thing that proves it.

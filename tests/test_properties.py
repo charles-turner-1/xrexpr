@@ -163,11 +163,19 @@ def datasets(draw, dated=False):
     sizes = [draw(st.integers(min_value=1, max_value=5)) for _ in dims]
     values = np.arange(int(np.prod(sizes)), dtype=float).reshape(sizes)
     coords = {d: np.arange(s) for d, s in zip(dims, sizes)}
+    # A **second variable missing the first dim**, mirroring the hand-written fixtures'
+    # ``elevation(lat, lon)``. Without it the projection rules cannot be exercised at all:
+    # their whole question is whether the projected *subset* still carries the dims the
+    # crossed op names, which is vacuous when every variable carries every dim.
+    elevation = np.arange(int(np.prod(sizes[1:])), dtype=float).reshape(sizes[1:])
     if dated:
         # daily, so a 2-5 point index spans one month: ``time.month`` yields one group and
         # ``resample(time="2D")`` halves it. Both are legal, which is all that is needed.
         coords["time"] = pd.date_range("2000-01-01", periods=sizes[0], freq="D")
-    return xr.Dataset({"temperature": (dims, values)}, coords=coords)
+    return xr.Dataset(
+        {"temperature": (dims, values), "elevation": (dims[1:], elevation)},
+        coords=coords,
+    )
 
 
 def _label(value):
@@ -261,7 +269,20 @@ WINDOWED_FLOAT_ONLY_REDUCES = frozenset({"median", "std", "var"})
 NON_FLOAT_EMPTY_UNSAFE_REDUCES = frozenset({"median"})
 
 
-def _drawable_reduces(obj, names, dims=None, windowed=False):
+#: Reductions that break when a *variable* ends up reducing over **no** dims. A Dataset
+#: reduce passes ``dim=[]`` down to any variable that lacks every dim it named, and
+#: ``std``/``var`` then build a 0-d result while still claiming the variable's dims:
+#: ``ValueError: dimensions ('lat',) must have the same length as ... ndim=0``. Verified on
+#: xarray 2026.7.0 *and* 2025.6.1, so it is not a recent regression; ``mean`` and the rest
+#: are fine, as are ``rolling``/``coarsen`` (which only touch variables having the window
+#: dim). Reachable only with a variable that lacks a dim — i.e. only since the generator
+#: grew one — and it is an upstream bug, so it is filtered rather than reported. But see
+#: ``docs/roadmap/07-small-wins.md`` §8: it also exposes a real divergence in
+#: ``pushdown_projections``, which is *not* filtered away.
+EMPTY_AXIS_UNSAFE_REDUCES = frozenset({"std", "var"})
+
+
+def _drawable_reduces(obj, names, dims=None, windowed=False, reduced=None):
     """``names`` minus the reductions xarray cannot actually apply to ``obj`` as it stands.
 
     Every exclusion is an xarray/numpy limitation rather than a finding about the rewrites
@@ -289,6 +310,10 @@ def _drawable_reduces(obj, names, dims=None, windowed=False):
         names = tuple(n for n in names if n not in NON_FLOAT_EMPTY_UNSAFE_REDUCES)
     if windowed and any(v.dtype == bool for v in obj.data_vars.values()):
         names = tuple(n for n in names if n not in WINDOWED_FLOAT_ONLY_REDUCES)
+    if reduced is not None and any(
+        not (reduced & set(var.dims)) for var in obj.data_vars.values()
+    ):
+        names = tuple(n for n in names if n not in EMPTY_AXIS_UNSAFE_REDUCES)
     return names
 
 
@@ -362,10 +387,25 @@ def _builder_pair(draw, obj, kind=None):
     else:
         opener = Call("weighted", _weights(obj, dim))
 
+    # The closer's dim spec is drawn *first*, because which reductions are legal depends on
+    # it: a grouped reduce removes the group dim plus whatever the closer named, and a
+    # variable left with none of those trips :data:`EMPTY_AXIS_UNSAFE_REDUCES`.
+    spec = draw(_closer_dims(obj, kind, dim))
+    reduced = None
+    if kind in {"groupby", "resample"}:
+        # What each *variable* ends up reducing over, which is not the same as what the
+        # node removes: the group dim is consumed by the grouping mechanism, so a closer
+        # that named dims reduces exactly those within each group (the map case), while a
+        # bare one reduces along the group dim. ``groupby("lat").std(dim=["time"])`` is
+        # the case that tells them apart -- a ``lat``-less variable reduces over nothing.
+        reduced = set(spec["dim"]) if "dim" in spec else {dim}
     names = _drawable_reduces(
-        obj, BUILDER_CLOSERS[kind], windowed=kind in {"rolling", "coarsen"}
+        obj,
+        BUILDER_CLOSERS[kind],
+        windowed=kind in {"rolling", "coarsen"},
+        reduced=reduced,
     )
-    closer = Call(draw(st.sampled_from(names)), **draw(_closer_dims(obj, kind, dim)))
+    closer = Call(draw(st.sampled_from(names)), **spec)
     return [opener, closer]
 
 
@@ -375,7 +415,15 @@ def _closer_dims(draw, obj, kind, dim):
     if kind in {"rolling", "coarsen"}:
         return {}  # takes no dim argument at all -- see ``_builder_pair``
     if kind == "weighted":
-        candidates = sorted(obj.sizes)
+        # A weighted reduce is applied per variable and *raises* when one lacks a named
+        # dim, where a plain reduce skips it -- but ``dot`` broadcasts the weights in
+        # first, so what each variable ``v`` needs is ``named <= v.dims | w.dims``. The
+        # weights here are over ``dim`` alone (see ``_weights``), which makes the safe
+        # candidate set the dims *every* variable carries, plus ``dim`` itself.
+        shared = set(obj.sizes)
+        for var in obj.data_vars.values():
+            shared &= set(var.dims)
+        candidates = sorted(shared | {dim})
     else:  # grouped: the group dim aggregates, any other dim is a per-group map
         candidates = sorted(obj.sizes) if kind == "groupby" else [dim]
     spec = draw(
@@ -415,7 +463,7 @@ def _calls(draw, ds, max_ops=4, builders=False):
 
     # "builder" twice, so the ``assume`` in ``builder_plans`` discards fewer examples —
     # a chain with no builder pair in it is just a plain chain, already covered.
-    kinds = ["isel", "sel", "reduce"] + (["builder"] * 2 if builders else [])
+    kinds = ["isel", "sel", "reduce", "project"] + (["builder"] * 2 if builders else [])
 
     for _ in range(draw(st.integers(min_value=0, max_value=max_ops))):
         if not current.sizes:
@@ -431,6 +479,27 @@ def _calls(draw, ds, max_ops=4, builders=False):
             calls.extend(pair)
             continue
 
+        if kind == "project":
+            # A **list** key only, so the result stays a Dataset. A bare name yields a
+            # DataArray, whose downstream algebra is a different thing entirely (no
+            # ``data_vars``, and ``__getitem__`` becomes indexing rather than projection);
+            # that case is covered by the hand-written suites, and ``.plan`` is not even
+            # registered for DataArray yet (``07-small-wins.md`` §5).
+            names = sorted(map(str, current.data_vars))
+            if not names:
+                break
+            call = Call(
+                "__getitem__",
+                draw(
+                    st.lists(st.sampled_from(names), min_size=1, unique=True).map(
+                        sorted
+                    )
+                ),
+            )
+            current = _apply(current, [call])
+            calls.append(call)
+            continue
+
         if kind == "reduce":
             dims = draw(
                 st.lists(
@@ -440,7 +509,9 @@ def _calls(draw, ds, max_ops=4, builders=False):
                     unique=True,
                 ).map(sorted)
             )
-            names = _drawable_reduces(current, REDUCE_NAMES, dims=dims)
+            names = _drawable_reduces(
+                current, REDUCE_NAMES, dims=dims, reduced=set(dims)
+            )
             call = Call(draw(st.sampled_from(names)), dim=dims)
         else:
             # No dim is indexed twice anywhere in the chain — not merely twice in a row.
