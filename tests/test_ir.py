@@ -5,11 +5,17 @@ re-test that library's internals — only that each variant coerces to it, stays
 frozen/hashable, and that the derived properties really are derived: ``Select.consumes``
 from ``indexer``, and ``Project.single`` from the verbatim key (never stored fields that
 could drift from what replay does).
+
+Hashability is the one claim that is *conditional*, so it is pinned in both directions: a
+node whose payload holds a ``DataArray`` is unhashable and uncomparable, while nodes
+sharing that payload object still compare equal. See ``ir.py``'s module docstring for why
+the weaker claim is the one wanted.
 """
 
 import dataclasses
 
 import pytest
+import xarray as xr
 from frozendict import frozendict as _pkg_frozendict
 
 from xrexpr.ir import (
@@ -142,6 +148,38 @@ def test_variants_hashable_and_value_equal():
     assert a == b
     assert hash(a) == hash(b)
     assert {a, b} == {a}
+
+
+def test_a_node_carrying_an_array_is_not_hashable():
+    # ``ir.py`` used to promise every node was hashable outright, which was never true:
+    # ``xr.DataArray.__hash__`` is None, so any node whose payload holds one raises. The
+    # claim is now conditional and this pins the condition. Making it unconditional would
+    # mean hashing the array's *values* -- computing a dask array at plan time, which is
+    # the one thing the package promises never to do.
+    weights = xr.DataArray([1.0, 2.0, 3.0], dims="lat")
+    with pytest.raises(TypeError, match="unhashable type"):
+        hash(Opaque(name="weighted", args=(weights,)))
+
+
+def test_two_nodes_holding_distinct_but_equal_arrays_cannot_be_compared():
+    # Sharper than the hashability gap and easy to miss: ``==`` does not merely return
+    # False, it *raises* -- comparing the payloads elementwise yields an array, which has
+    # no truth value.
+    weights = xr.DataArray([1.0, 2.0, 3.0], dims="lat")
+    a = Opaque(name="weighted", args=(weights,))
+    b = Opaque(name="weighted", args=(weights.copy(),))
+    with pytest.raises(ValueError, match="truth value of an array"):
+        a == b  # noqa: B015 -- the comparison itself is what's under test
+
+
+def test_nodes_sharing_an_array_payload_still_compare_equal():
+    # Why the gap above is latent rather than live: a plan holds one payload *object*, and
+    # tuple comparison short-circuits on identity, so every plan-equality assertion in the
+    # suite (lowering idempotence, the optimiser fixpoint) is sound as written.
+    weights = xr.DataArray([1.0, 2.0, 3.0], dims="lat")
+    assert Opaque(name="weighted", args=(weights,)) == Opaque(
+        name="weighted", args=(weights,)
+    )
 
 
 def test_distinct_variants_are_unequal():

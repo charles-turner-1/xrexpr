@@ -93,6 +93,21 @@ the record path consults). Accessor-equality tests over the README-style chains 
 
 ## 6. Nodes carrying arrays are not hashable
 
+> **Closed (2026-07) in [`02-lowering.md`](./02-lowering.md) PR 5**, which is the trigger
+> named below. The decision this section asks for, written down: **the claim was
+> narrowed**, not the payload made hash-safe. Hashing a `DataArray` means hashing its
+> *values*, which for a dask-backed weights array means computing it at plan time — the
+> one thing the package promises never to do — so the `Mask` precedent does not transfer
+> (that payload is small and already realised). `ir.py`'s module docstring now states the
+> conditional claim and `test_ir.py` pins all three behaviours.
+>
+> One fact this section understated, found while closing it: `==` is affected as well as
+> `hash()`, and worse. Two nodes holding *distinct but equal* arrays raise
+> `ValueError: truth value of an array … is ambiguous` rather than returning `False`. It
+> stays latent for the same reason: a plan holds one payload *object*, and tuple
+> comparison short-circuits on identity, so the suite's plan-equality assertions (lowering
+> idempotence, the optimiser fixpoint) are sound as written.
+
 `ir.py`'s variants all promise to be "hashable and safe to share between plans", and
 `test_ir.py` asserts it — but `xr.DataArray.__hash__ is None`, so
 `Opaque(name="weighted", args=(w,))` raises `TypeError` on `hash()` today. Any op whose

@@ -32,6 +32,21 @@ expansion is deferred to a reader that has an exact schema. It is a *sentinel*, 
 narrow it with a match arm rather than an ``assert``, so the two cases are handled where
 the field is used.
 
+**Immutability is unconditional; hashability is not.** Every variant is frozen and
+coerces its containers, so a node cannot be mutated or drift from itself — and each is
+hashable and comparable **when its payload is**. Some payloads aren't:
+``xr.DataArray.__hash__`` is ``None``, so a node carrying an array (``weighted(w)``, a
+boolean-mask ``__getitem__``, ``where(cond)``) raises ``TypeError`` on ``hash()``, and
+``==`` between two such nodes holding *distinct but equal* arrays raises ``ValueError``
+(the elementwise comparison has no truth value). The stronger claim is deliberately not
+wanted: making an array payload hashable means hashing its *values*, which for a
+dask-backed array means computing it at plan time — the one thing this package promises
+never to do. (``indexers.Mask`` normalises to a tuple of booleans for a related reason,
+but that payload is small and already realised, so the precedent does not transfer.)
+Nothing here hashes a node, and plan-equality compares nodes that *share* the payload
+object, where tuple comparison's identity check applies — see ``test_ir.py``, which pins
+all three behaviours.
+
 Only **unary** ops are modelled here. Binary/n-ary ops (``merge``/``concat``/``where``)
 would add their own variants carrying plan-typed children and promote the container from
 a list to a tree — an additive, orthogonal change deferred until such an op is in scope.
@@ -100,7 +115,8 @@ class Reduce:
     from the ``dim`` spec. A bare ``mean()`` names no dim and so consumes
     :data:`ALL_DIMS`, left symbolic rather than expanded against the record-time schema
     (see the module docstring). ``args``/``kwargs`` are coerced to immutable containers
-    so the node is hashable and safe to share between plans.
+    so the node is safe to share between plans, and hashable when its payload is (see the
+    module docstring on why that last part is conditional).
     """
 
     name: str  # open set of tabulated reductions → str (kind-safety via OP_TABLE)
