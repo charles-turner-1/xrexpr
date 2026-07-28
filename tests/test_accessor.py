@@ -24,6 +24,7 @@ from xrexpr.ir import (
     ContextOpen,
     GroupedReduce,
     Opaque,
+    Project,
     Reduce,
     Select,
     WeightedReduce,
@@ -494,6 +495,72 @@ def test_select_across_a_fused_reduce_matches_eager(dated_ds, chain):
     # Whether the select moved or not, the answer must not change -- which is the only
     # thing that makes "hop when disjoint, leave otherwise" worth anything.
     assert_equal(chain(dated_ds.plan).collect(), chain(dated_ds))
+
+
+def test_projection_is_pushed_in_front_of_the_grouping(dated_ds):
+    # W2 PR 7: aggregate one variable instead of two and then discarding one.
+    ds = dated_ds.assign(elevation=(("lat", "lon"), np.zeros((3, 4))))
+    chain = ds.plan.groupby("time.month").mean()[["temperature"]]
+
+    assert [c.name for c in emit(chain._optimized())] == [
+        "__getitem__",
+        "groupby",
+        "mean",
+    ]
+    assert_equal(chain.collect(), ds.groupby("time.month").mean()[["temperature"]])
+
+
+@pytest.mark.parametrize(
+    "chain",
+    [
+        lambda o: o.groupby("time.month").mean()[["temperature"]],
+        lambda o: o.resample(time="2D").mean()[["temperature"]],
+        lambda o: o.rolling(time=3).mean()[["temperature"]],
+        lambda o: o.coarsen(time=2, boundary="trim").mean()[["temperature"]],
+        # immovable: ``elevation`` has no ``time``, so projecting first would drop the
+        # ``time`` coord and the fused op would raise
+        lambda o: o.groupby("time.month").mean()[["elevation"]],
+        lambda o: o.rolling(time=3).mean()[["elevation"]],
+        # both variables kept: ``time`` survives the projection via ``temperature``
+        lambda o: o.groupby("time.month").mean()[["temperature", "elevation"]],
+        # projection and select both crossing
+        lambda o: o.groupby("time.month").mean().isel(lat=0)[["temperature"]],
+    ],
+)
+def test_projection_across_a_fused_reduce_matches_eager(dated_ds, chain):
+    ds = dated_ds.assign(elevation=(("lat", "lon"), np.zeros((3, 4))))
+    assert_equal(chain(ds.plan).collect(), chain(ds))
+
+
+def test_projection_past_a_windowed_reduce_is_left_when_the_dim_would_go(dated_ds):
+    # Pinned end to end because the failure would be loud rather than wrong: projecting
+    # first drops the ``time`` coord (no surviving variable uses it) and ``rolling``
+    # raises ``Window dimensions ('time',) not found``. The rule must not create that.
+    ds = dated_ds.assign(elevation=(("lat", "lon"), np.zeros((3, 4))))
+    chain = ds.plan.rolling(time=3).mean()[["elevation"]]
+
+    assert [c.name for c in emit(chain._optimized())] == [
+        "rolling",
+        "mean",
+        "__getitem__",
+    ]
+    assert_equal(chain.collect(), ds.rolling(time=3).mean()[["elevation"]])
+
+
+def test_projection_past_a_weighted_reduce_would_mask_an_error_so_is_left(dated_ds):
+    # The weighted exclusion, end to end and in its sharpest form: eager *raises* because
+    # ``elevation`` has no ``time`` and a weighted reduce -- unlike a plain one -- refuses
+    # rather than skipping. Hopping the projection in front would drop ``elevation`` and
+    # quietly succeed, which is a worse outcome than the missed optimisation.
+    ds = dated_ds.assign(elevation=(("lat", "lon"), np.zeros((3, 4))))
+    weights = ds["area"]
+    chain = ds.plan.weighted(weights).mean("time")[["temperature"]]
+
+    assert [type(n) for n in chain._optimized()] == [WeightedReduce, Project]
+    with pytest.raises(ValueError, match="do not exist"):
+        chain.collect()
+    with pytest.raises(ValueError, match="do not exist"):
+        ds.weighted(weights).mean("time")[["temperature"]]
 
 
 def test_select_on_a_consumed_group_dim_still_raises_from_xarray(dated_ds):

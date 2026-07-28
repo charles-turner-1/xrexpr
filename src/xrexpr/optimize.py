@@ -548,7 +548,7 @@ def _fused_dims(node: GroupedReduce | WindowedReduce) -> frozenset[Hashable]:
 
 
 def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
-    """Hop a variable projection left past a preceding reduce or select.
+    """Hop a variable projection left past a preceding reduce, select or fused reduce.
 
     ``ds.mean("time")[["tas"]]`` reduces every variable in the dataset and then throws
     all but ``tas`` away; ``ds[["tas"]].mean("time")`` reduces one. The rule fires on a
@@ -578,6 +578,23 @@ def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
     exact: this rule already confines itself to the trusted prefix, where the fold is not
     a guess.
 
+    **The fused reduces** (W2 PR 7) join on the same terms, and the guard is if anything
+    more load-bearing for them: projecting drops a dim coordinate that no surviving
+    variable uses, so ``ds[["elevation"]]`` (no ``time``) has no ``time`` *at all*, and
+    every one of ``groupby("time.month")``/``resample``/``rolling``/``coarsen`` then raises
+    rather than quietly doing nothing. The ``needed`` sets say what each requires of its
+    **input**: ``{group_dim} | consumes`` for a grouped reduce, the ``window`` keys for a
+    windowed one. Both differ from :func:`_fused_dims` — see the ``GroupedReduce`` arm.
+
+    :class:`~xrexpr.ir.WeightedReduce` is excluded, and for a *second* reason beyond the
+    weights argument that keeps it out of the select rule (§8.1). A weighted reduce is
+    applied per variable and **raises** when any variable lacks the named dim, unlike a
+    plain reduce, which skips it: with ``w(lat, lon)``, ``ds.weighted(w).mean("time")``
+    raises on ``elevation`` while ``ds[["temperature"]].weighted(w).mean("time")``
+    succeeds. Hopping the projection in front would turn a raising chain into a quietly
+    succeeding one — the silent-divergence failure mode this package has been bitten by
+    before, and worse than the missed optimisation.
+
     One hop per call, returning the rewritten plan; ``None`` when nothing moves.
     :func:`optimize`'s fixpoint composes hops so a projection walks to the front of the
     plan (where #43 will eventually turn it into a backend read plan).
@@ -599,6 +616,14 @@ def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
                 needed = _resolve_dims(consumes, schemas[i])
             case Select(indexer=indexer):
                 needed = frozenset(indexer)
+            case GroupedReduce(group_dim=group_dim, consumes=consumes):
+                # Note what is *absent*: ``new_dim``. This rule asks what the crossed op
+                # needs of its **input**, and the minted dim does not exist yet when the
+                # projection runs in front of it -- which is exactly why this set is not
+                # ``_fused_dims``, whose caller runs *after* the node and can name it.
+                needed = frozenset({group_dim}) | consumes
+            case WindowedReduce(window=window):
+                needed = frozenset(window)
             case _:
                 continue
 

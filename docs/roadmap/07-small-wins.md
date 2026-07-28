@@ -138,6 +138,25 @@ PR that lands the feature, or immediately after:
 | W2 phase 1 | assert `emit(to_lower_ir(p))` replays equal to eager, and that `to_lower_ir` is idempotent, over the existing generated chains |
 | W3 | assert rewrites survive unknown dim sizes |
 | W2 PRs 3–5 | ~~add `groupby`/`resample`/`rolling`/`coarsen`/`weighted` builder chains~~ — **paid in the PR after W2 PR 5** (see below) |
+| *(unscheduled)* | **multi-variable datasets and `__getitem__` projections** — see below |
+
+> **The property suite does not exercise projection pushdown at all**, measured rather
+> than assumed while W2 PR 7 was written: instrumenting `pushdown_projections` over 5000
+> generated builder chains fires it **0 times**. Two reasons compound, and neither is new —
+> this gap has been open since `pushdown_projections` landed (#32), and PR 7's fused arms
+> merely inherit it:
+>
+> - `_calls` draws from `isel`/`sel`/`reduce` (plus builders); `__getitem__` is not in the
+>   list, so no plan ever contains a `Project`;
+> - `datasets()` builds **one** variable, so even if projections were drawn they would be
+>   near-vacuous — the rule's whole question is whether the *projected subset* still carries
+>   the dims the crossed op names, which needs a variable that lacks one.
+>
+> Fixing it means a second generated variable over a proper subset of the dims (the
+> `elevation(lat, lon)` shape the hand-written fixtures use) plus a projection draw. Worth
+> doing — the variable-level rule is the one whose guard is hardest to reason about by
+> hand — but it is its own PR, and until then the projection rules are covered by goldens
+> and hand-written equality-vs-eager only.
 
 > **Paid (2026-07), one PR late and in one go.** Deferred when W2 PR 5 landed, because PRs
 > 3, 4 and 5 had each left it and there was no later fused node to re-pledge it against;

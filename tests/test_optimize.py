@@ -710,3 +710,77 @@ def test_no_select_hops_past_a_weighted_reduce(schema):
     # match, so it cannot fire.
     plan = [_weighted(consumes=frozenset({"lat"})), _node("isel", time=0)]
     assert optimize(plan, schema) == plan
+
+
+# --- projection pushdown past the fused reduces (W2 PR 7) -----------------------------
+
+
+@pytest.mark.parametrize(
+    "fused",
+    [
+        _grouped(),
+        _grouped(group_dim="lat", new_dim="lat"),
+        _windowed(),
+        _windowed(name="coarsen", window=frozendict({"time": 2})),
+    ],
+)
+def test_projection_hops_past_a_fused_reduce_when_the_dims_survive(schema, fused):
+    # ``temperature(time, lat, lon)`` carries every dim these name, so projecting first
+    # aggregates one variable instead of two and then discarding one.
+    plan = [fused, _node("__getitem__", ["temperature"])]
+    out = optimize(plan, schema)
+    assert [type(n).__name__ for n in out] == ["Project", type(fused).__name__]
+
+
+@pytest.mark.parametrize(
+    ("fused", "why"),
+    [
+        (_grouped(), "the group dim is not carried by the projected variable"),
+        (
+            _grouped(group_dim="time", new_dim="time"),
+            "same, for a self-minting grouper",
+        ),
+        (_windowed(), "the window dim is not carried by the projected variable"),
+        (
+            _grouped(group_dim="lat", new_dim="lat", consumes=frozenset({"time"})),
+            "the group dim survives but the extra consumes does not",
+        ),
+    ],
+)
+def test_projection_is_left_when_the_fused_node_would_lose_its_dim(schema, fused, why):
+    # ``elevation(lat, lon)`` has no ``time``. Projecting first would drop the ``time``
+    # coord entirely -- no surviving variable uses it -- and every fused kind then *raises*
+    # rather than quietly doing nothing. Left alone, never raised: the chain is valid
+    # eagerly, just not reorderable.
+    plan = [fused, _node("__getitem__", ["elevation"])]
+    assert optimize(plan, schema) == plan, why
+
+
+def test_projection_needed_set_excludes_the_minted_dim(schema):
+    # The asymmetry with the select rule, pinned: a grouped reduce *mints* ``month``, but
+    # the projection runs in front of it where no ``month`` exists, so requiring the
+    # projected variables to carry it would block every hop. ``_fused_dims`` includes it;
+    # this rule's ``needed`` must not.
+    plan = [_grouped(new_dim="month"), _node("__getitem__", ["temperature"])]
+    out = optimize(plan, schema)
+    assert [type(n).__name__ for n in out] == ["Project", "GroupedReduce"]
+
+
+def test_no_projection_hops_past_a_weighted_reduce(schema):
+    # A second, independent reason beyond the weights (which a *projection* would not have
+    # to subset): a weighted reduce is applied per variable and raises when any variable
+    # lacks the named dim, where a plain reduce skips it. Hopping the projection in front
+    # would drop the offending variable and turn a raising chain into a succeeding one.
+    plan = [
+        _weighted(consumes=frozenset({"time"}), weight_dims=frozenset({"lat"})),
+        _node("__getitem__", ["temperature"]),
+    ]
+    assert optimize(plan, schema) == plan
+
+
+def test_projection_and_select_both_cross_a_fused_reduce(schema):
+    # The two PR 6 / PR 7 rules composing through the fixpoint: both end up in front of
+    # the grouping, which is the plan the workstream was aiming at.
+    plan = [_grouped(), _node("isel", lat=0), _node("__getitem__", ["temperature"])]
+    out = optimize(plan, schema)
+    assert [type(n).__name__ for n in out] == ["Project", "Select", "GroupedReduce"]
