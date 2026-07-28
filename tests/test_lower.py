@@ -9,13 +9,18 @@ Refusing to fuse is always safe, so the negative cases matter as much as the pos
 ones: each pins a narrowing of what is claimed, not a bug.
 
 ``emit`` is a pure function of the plan, so everything here runs without a dataset; the
-end-to-end equality lives in ``test_accessor.py`` and ``test_properties.py``.
+end-to-end equality lives in ``test_accessor.py`` and ``test_properties.py``. The weighted
+cases do build a ``DataArray``, but only as a payload whose ``.dims`` fusion reads —
+metadata, materialising nothing.
 """
 
+import numpy as np
 import pytest
+import xarray as xr
 from frozendict import frozendict
 
 from xrexpr.ir import (
+    ALL_DIMS,
     ContextOpen,
     GroupedReduce,
     Opaque,
@@ -24,6 +29,7 @@ from xrexpr.ir import (
     Reduce,
     Scan,
     Select,
+    WeightedReduce,
     WindowedReduce,
 )
 from xrexpr.lower import Call, emit, to_lower_ir
@@ -157,7 +163,6 @@ def test_within_group_map_does_not_fuse():
 @pytest.mark.parametrize(
     "opener",
     [
-        ("weighted", ("w",), {}),
         # not a fixed window: an exponential weighting, which ``window`` cannot describe
         ("rolling_exp", (), {"time": 3}),
         # a scan wearing a builder's clothes
@@ -165,9 +170,8 @@ def test_within_group_map_does_not_fuse():
     ],
 )
 def test_openers_without_a_fusion_rule_demote_the_whole_pair(opener):
-    # Until their own PRs land (or never, for the two that no node describes) these
-    # behave exactly as the accessor's barrier made them: both halves opaque, so no rule
-    # can fire on or across the pair.
+    # No fused node describes these, so they behave permanently as the accessor's barrier
+    # made them: both halves opaque, and no rule can fire on or across the pair.
     lowered = _lower(opener, ("mean", (), {}))
     assert [type(n) for n in lowered] == [Opaque, Opaque]
 
@@ -241,6 +245,87 @@ def test_windowed_node_emits_both_calls_verbatim():
     ]
 
 
+# --- fusing weighted -----------------------------------------------------------------
+
+
+def _weights(*dims):
+    """A weights ``DataArray`` over ``dims``. Only its ``.dims`` is ever read here."""
+    return xr.DataArray(np.ones([2] * len(dims)), dims=dims)
+
+
+def test_weighted_pair_fuses_with_a_bare_closer():
+    (node,) = _lower(("weighted", (_weights("lat"),), {}), ("mean", (), {}))
+    assert isinstance(node, WeightedReduce)
+    assert node.reduce == "mean"
+    assert node.consumes is ALL_DIMS
+    assert node.weight_dims == frozenset({"lat"})
+
+
+def test_weighted_closer_keeps_the_dims_it_named():
+    # The asymmetry with ``rolling``, and a fact about the two signatures rather than a
+    # judgement: ``DatasetWeighted.mean`` is ``(dim=None, *, skipna, keep_attrs)`` -- it
+    # really does take a dim -- while ``DatasetRolling.mean`` takes none, which is what
+    # makes ``rolling(time=3).mean("lat")`` a misparse that must not fuse. So a named dim
+    # spec is carried over here rather than refused.
+    (node,) = _lower(("weighted", (_weights("lat"),), {}), ("mean", (["lat"],), {}))
+    assert node.consumes == frozenset({"lat"})
+
+
+@pytest.mark.parametrize(
+    "opener",
+    [
+        ("weighted", (_weights("lat", "lon"),), {}),
+        ("weighted", (), {"weights": _weights("lat", "lon")}),  # the keyword spelling
+    ],
+)
+def test_weight_dims_are_read_off_the_weights(opener):
+    (node,) = _lower(opener, ("mean", ("lat",), {}))
+    assert node.weight_dims == frozenset({"lat", "lon"})
+
+
+def test_zero_dimensional_weights_fuse_with_no_weight_dims():
+    # Honest rather than a special case: a 0-d weights array broadcasts nothing and aligns
+    # nothing, so such a node's dim effect really *is* a plain reduce's.
+    (node,) = _lower(("weighted", (_weights(),), {}), ("mean", ("lat",), {}))
+    assert node.weight_dims == frozenset()
+
+
+@pytest.mark.parametrize("weights", ["lat", np.ones(3), {"lat": 1}, None])
+def test_weights_with_no_dims_tuple_do_not_fuse(weights):
+    # The weight dims are what make this node more than a relabelled ``Reduce``, so a
+    # payload they can't be read from refuses. That costs nothing: xarray itself rejects
+    # such weights (``ValueError: `weights` must be a DataArray``), so the pair could not
+    # have replayed either way -- and refusing lets xarray say so in its own words.
+    lowered = _lower(("weighted", (weights,), {}), ("mean", (), {}))
+    assert [type(n) for n in lowered] == [Opaque, Opaque]
+
+
+@pytest.mark.parametrize("closer", ["sum_of_weights", "sum_of_squares", "quantile"])
+def test_weighted_only_closers_do_not_fuse(closer):
+    # These aren't in ``OP_TABLE``, so they record ``Opaque`` and refuse for free -- which
+    # is the right answer for ``quantile`` in particular: it takes ``q`` first
+    # positionally, which a reduce's dim-spec parse would read as a dim.
+    lowered = _lower(("weighted", (_weights("lat"),), {}), (closer, (), {}))
+    assert [type(n) for n in lowered] == [Opaque, Opaque]
+
+
+def test_weighted_node_emits_both_calls_verbatim():
+    weights = _weights("lat")
+    (node,) = _lower(("weighted", (weights,), {}), ("mean", ("lat",), {"skipna": True}))
+    assert emit([node]) == [
+        Call(name="weighted", args=(weights,)),
+        Call(name="mean", args=("lat",), kwargs=frozendict({"skipna": True})),
+    ]
+
+
+def test_lowering_stays_idempotent_with_a_weighted_pair():
+    # The weights are the one payload plan equality cannot compare structurally (an
+    # elementwise ``==`` has no truth value), so this also pins that the *same* payload
+    # object is carried through rather than rebuilt -- see ``test_ir.py``.
+    once = _lower(("weighted", (_weights("lat"),), {}), ("mean", (), {}))
+    assert to_lower_ir(once) == once
+
+
 def test_non_string_grouper_does_not_fuse():
     # A DataArray/Grouper argument has no single statically-known group dim.
     lowered = _lower(("groupby", (object(),), {}), ("mean", (), {}))
@@ -265,6 +350,7 @@ def test_no_context_open_ever_survives_lowering():
         _lower(("groupby", ("time.month",), {}), ("mean", (), {})),
         _lower(("groupby", ("time.month",), {}), ("mean", ("lat",), {})),
         _lower(("rolling", (), {"time": 3}), ("mean", (), {})),
+        _lower(("weighted", (_weights("lat"),), {}), ("mean", (), {})),
         _lower(("groupby", ("lat",), {})),
     ]
     assert not any(isinstance(n, ContextOpen) for plan in plans for n in plan)

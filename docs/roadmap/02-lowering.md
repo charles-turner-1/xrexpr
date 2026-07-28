@@ -166,6 +166,37 @@ So §7.4's rule widens: **a variant is earned by data the optimiser must reason 
 by a rewrite it must be kept away from.** The second clause is new, and `WeightedReduce`
 is its first instance.
 
+**Corrected in implementation (2026-07, PR 5, verified against xarray 2026.7.0): the claim
+above that the node "carries no novel dim data at all" is false, and the §7.4 widening is
+therefore not load-bearing for it.** A weighted reduce's `consumes` really is a plain
+reduce's — `DatasetWeighted.mean` is `(dim=None, *, skipna, keep_attrs)`, so it takes a dim
+and a bare closer means all of them — but the **weights** have a dim effect of their own,
+because `dot` broadcasts and aligns:
+
+- a weight dim the dataset **lacks is broadcast in**, onto *every* variable. With
+  `w(lat, member)`, `ds.weighted(w).mean("lat")` returns `{time, lon, member}` and
+  `elevation(lat, lon)` comes back as `(lon, member)`.
+- a weight dim the dataset **shares is aligned**, and a misaligned one *shrinks* it: `w` on
+  `lat` labelled `[0, 1]` against a `lat` of `[0, 1, 2]` inner-joins to size 2.
+
+So the node carries `weight_dims: frozenset[Hashable]`, read off `w.dims` at fusion time
+(metadata; materialising nothing), and `apply_schema` marks every surviving weight dim
+**present with unknown size** — names exact, extents honestly unknown, which is precisely
+the answer [`03-schema-sizes.md`](./03-schema-sizes.md) added `int | None` for, and its
+first consumer beyond `GroupedReduce`. Sizes are deliberately *not* stored on the node:
+they would be a guess about the post-alignment extent.
+
+Two consequences for this memo. §7.4 as originally written already licenses the variant, so
+§13 item 2's worry — that a stated design rule was being widened to admit a single node —
+is moot: nothing rests on the widening. And the second clause remains worth keeping anyway,
+because it is still the reason this node gets **no rules**, which is a separate claim from
+why it exists.
+
+A third fact, immaterial to the design but worth knowing before writing any rule for it: a
+weighted reduce maps per variable and **raises** where a plain one doesn't —
+`ds.weighted(w).mean("time")` raises `ValueError` when any variable lacks `time`, whereas
+`ds.mean("time")` quietly leaves such a variable alone.
+
 ### 5.4 Why not W9's `Contextual(inner: Op)`
 
 W9 proposed one variant carrying the context call plus a nested inner `Op`, on the grounds
@@ -419,6 +450,11 @@ closes the context and returns a Dataset just as `mean` does.
   arg. Pre-existing and not caused by lowering, but a modelled node routinely carrying
   weights makes it worth closing; filed as a small win. `indexers.Mask` (`indexers.py:135`)
   is the precedent for how the payload can be made hash-safe.
+  *Closed in PR 5 ([`07-small-wins.md`](./07-small-wins.md) §6): the **claim was narrowed**,
+  not the payload changed — hashing a `DataArray` means hashing its values, i.e. computing a
+  dask array at plan time. `Mask` turns out not to be the precedent it looks like, its
+  payload being small and already realised. Also worse than recorded here: `==` between two
+  nodes holding distinct-but-equal arrays **raises** rather than returning `False`.*
 - **`.reduce()` is still mis-tabulated.** `"reduce"` is in `_REDUCTIONS`
   (`operations.py:31`), but its first positional argument is a *function*, which
   `_reduce_dims` reads as a dim spec. The property generators exclude it
@@ -548,6 +584,12 @@ alternative is to keep §7.4 as written and express the blocking some other way 
 mechanism to avoid loosening a rule that has served well. I think the widening is right
 and the second clause is genuinely principled rather than a carve-out, but it is a
 one-instance generalisation and should be treated as such.
+
+*Resolved in implementation (2026-07, PR 5):* moot. The premise — that `WeightedReduce`
+carries no novel structural data — is simply false, and was corrected in §5.3 above: the
+weights broadcast and align dims, so the node carries `weight_dims` and §7.4 as written
+licenses it. Nothing rests on the widening. The rest of this item stands as a record of the
+reasoning, and its conclusions about the *rejected* alternatives are unaffected.
 
 *Review note (2026-07):* there is a reading that keeps §7.4 intact rather than widening
 it — treat the discriminant itself as structural data. "This reduce carries a hidden

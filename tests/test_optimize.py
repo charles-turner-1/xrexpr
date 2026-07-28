@@ -17,10 +17,12 @@ reordered, and must not raise either.
 """
 
 import pytest
+import xarray as xr
 from frozendict import frozendict
 
 from xrexpr.exceptions import InvalidExpressionError
 from xrexpr.indexers import classify
+from xrexpr.ir import ALL_DIMS, WeightedReduce
 from xrexpr.optimize import optimize
 from xrexpr.schema import SchemaState, to_opnode
 
@@ -537,3 +539,74 @@ def test_composition_survives_pushdown_past_a_reduce(schema):
     out = optimize(plan, schema)
     assert [n.name for n in out] == ["isel", "mean"]
     assert out[0].indexer == _ix(time=2)
+
+
+# --- weighted reduces: the node that exists to be left alone (#02-lowering §8.1) ------
+
+
+def _weighted(
+    reduce="mean", consumes=frozenset({"lat"}), weight_dims=frozenset({"lat"})
+):
+    """A ``WeightedReduce`` as ``to_lower_ir`` would build it, weights payload included."""
+    weights = xr.DataArray([1.0, 2.0, 3.0], dims="lat")
+    return WeightedReduce(
+        name="weighted",
+        reduce=reduce,
+        weight_dims=weight_dims,
+        args=(weights,),
+        reduce_args=(sorted(consumes),),
+        consumes=consumes,
+    )
+
+
+@pytest.mark.parametrize(
+    "trailing",
+    [
+        # the rewrite the variant exists to block: hopping this left would run the
+        # weighted mean over one latitude with the *weights* left un-subset
+        lambda: _node("isel", time=0),
+        lambda: _node("__getitem__", ["temperature"]),
+        lambda: _node("chunk", {"time": 2}),
+    ],
+)
+def test_no_rule_fires_across_a_weighted_reduce(schema, trailing):
+    # ``WeightedReduce`` carries no novel *dim* obstacle -- ``consumes`` is a plain
+    # reduce's -- so lowered to a ``Reduce`` it would be indistinguishable from one and
+    # ``pushdown_selects`` would match it. It is a separate variant precisely so no rule
+    # can. Subsetting the weights alongside is a data-touching rewrite with its own
+    # workstream (``docs/roadmap/02-lowering.md`` §8.1).
+    plan = [_weighted(), trailing()]
+    assert optimize(plan, schema) == plan
+
+
+def test_a_select_on_a_weighted_reduces_own_dim_is_left_not_raised(schema):
+    # ``pushdown_selects`` raises on an intersecting ``(Reduce, Select)`` because the plan
+    # can never replay. That leg is deliberately out of reach here: the rule matches
+    # ``Reduce`` only, so xarray reports the invalid selection at replay in its own words
+    # rather than the optimiser guessing on a node it models less exactly.
+    plan = [_weighted(consumes=frozenset({"lat"})), _node("isel", lat=0)]
+    assert optimize(plan, schema) == plan
+
+
+def test_a_bare_weighted_closer_is_left_alone_too(schema):
+    # ``ALL_DIMS`` is the shape that most invites a rule to fire, since it is what
+    # ``pushdown_selects``'s no-schema-needed reasoning keys on.
+    plan = [
+        WeightedReduce(name="weighted", reduce="mean", consumes=ALL_DIMS),
+        _node("isel", time=0),
+    ]
+    assert optimize(plan, schema) == plan
+
+
+def test_ops_after_a_weighted_reduce_are_still_optimised(schema):
+    # The payoff for modelling a node that gets no rules of its own: lowering opaques only
+    # the *pair*, so the plan past it is inside the trusted prefix and rewrites normally --
+    # here the projection hops past the trailing reduce (§8.1's closing claim). Under the
+    # accessor's barrier everything from ``weighted`` onward was opaque forever.
+    plan = [
+        _weighted(consumes=frozenset({"lat"})),
+        _node("mean", "time"),
+        _node("__getitem__", ["temperature"]),
+    ]
+    out = optimize(plan, schema)
+    assert [type(n).__name__ for n in out] == ["WeightedReduce", "Project", "Reduce"]

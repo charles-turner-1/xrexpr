@@ -15,11 +15,13 @@ import xarray as xr
 
 from xrexpr.ir import (
     ALL_DIMS,
+    AllDims,
     GroupedReduce,
     Project,
     Reduce,
     Scan,
     Select,
+    WeightedReduce,
     WindowedReduce,
 )
 from xrexpr.schema import SchemaState, apply_schema
@@ -366,6 +368,124 @@ def test_windowing_an_unknown_size_stays_unknown():
         name="coarsen", reduce="mean", window={"time": 2}, kwargs={"time": 2}
     )
     assert apply_schema(unknown, node).dims["time"] is None
+
+
+# --- weighted reduces ----------------------------------------------------------------
+# Derived from xarray the same way the two arms above were: the weights' dim effect is the
+# part of this node that is *not* a plain reduce's, so it is compared against what
+# evaluation produces rather than against the assumption the arm was written from.
+
+
+def _weighted(consumes, weight_dims, weights):
+    return WeightedReduce(
+        name="weighted",
+        reduce="mean",
+        weight_dims=weight_dims,
+        args=(weights,),
+        reduce_args=(sorted(consumes),) if not isinstance(consumes, AllDims) else (),
+        consumes=consumes,
+    )
+
+
+@pytest.mark.parametrize(
+    ("weights", "consumes"),
+    [
+        # every weight dim consumed: nothing survives to be marked unknown, so the arm is
+        # exactly a plain reduce's and the schema stays fully exact
+        (lambda ds: ds["lat"] * ds["lon"], frozenset({"lat", "lon"})),
+        # a weight dim *survives*: aligned here, but the arm cannot know that
+        (lambda ds: ds["lat"] * ds["lon"], frozenset({"lat"})),
+        # weights carrying a dim the dataset lacks -- broadcast onto every variable
+        (
+            lambda ds: xr.DataArray(
+                [1.0, 2.0], dims="member", coords={"member": [0, 1]}
+            ),
+            frozenset({"lat"}),
+        ),
+        # a bare closer clears everything, weight dims included
+        (lambda ds: ds["lat"] * ds["lon"], ALL_DIMS),
+    ],
+)
+def test_weighted_reduce_arm_agrees_with_xarray(ds, weights, consumes):
+    w = weights(ds)
+    eager = ds.weighted(w)
+    eager = (
+        eager.mean() if isinstance(consumes, AllDims) else eager.mean(sorted(consumes))
+    )
+    node = _weighted(consumes, frozenset(w.dims), w)
+
+    after = apply_schema(SchemaState.from_dataset(ds), node)
+
+    # dim *names* are exact, which is what every rule reasons about
+    assert after.dim_names == frozenset(eager.sizes)
+    # coords are only ever a subset: a broadcast weight dim need carry no coord
+    assert after.coords <= frozenset(eager.coords)
+    assert {k: set(v) for k, v in after.data_vars.items()} == {
+        k: set(v.dims) for k, v in eager.data_vars.items()
+    }
+
+
+def test_a_surviving_weight_dim_is_sized_unknown_not_guessed(ds):
+    # The weights align with the dataset, so a shared dim can *shrink* -- verified below.
+    # An extent this layer cannot compute is ``None``, W3's answer, rather than the current
+    # size, which would be an over-report of a dim a rewrite might act on.
+    w = ds["lat"] * ds["lon"]
+    node = _weighted(frozenset({"lat"}), frozenset({"lat", "lon"}), w)
+
+    after = apply_schema(SchemaState.from_dataset(ds), node)
+
+    assert after.dims["lon"] is None  # a weight dim, kept but not sized
+    assert after.dims["time"] == 4  # untouched dims keep their known sizes
+    assert "lat" not in after.dims
+
+
+def test_misaligned_weights_really_do_shrink_a_shared_dim(ds):
+    # The fact the unknown above exists for, pinned against xarray so it is a verified
+    # claim rather than a defensive guess: ``dot`` aligns, so weights covering two of
+    # three ``lat`` labels inner-join and the dim comes back shorter.
+    w = xr.DataArray([1.0, 2.0], dims="lat", coords={"lat": [0, 1]})
+    eager = ds.weighted(w).mean("lon")
+    assert eager.sizes["lat"] == 2 < ds.sizes["lat"]
+
+    after = apply_schema(
+        SchemaState.from_dataset(ds),
+        _weighted(frozenset({"lon"}), frozenset({"lat"}), w),
+    )
+    assert after.dim_names == frozenset(eager.sizes)
+    assert after.dims["lat"] is None
+
+
+def test_a_broadcast_weight_dim_reaches_a_variable_that_could_not_have_had_it(ds):
+    # The other half, and the part a reader would most expect to be wrong: ``elevation``
+    # has no ``member`` and no way to acquire one, yet comes back carrying it -- because
+    # ``dot`` broadcasts. Asserted directly as well as via the derivation above.
+    w = xr.DataArray([1.0, 2.0], dims="member", coords={"member": [0, 1]})
+    node = _weighted(frozenset({"lat"}), frozenset({"member"}), w)
+
+    after = apply_schema(SchemaState.from_dataset(ds), node)
+
+    assert set(after.data_vars["elevation"]) == {"member", "lon"}
+    assert after.dims["member"] is None
+
+
+def test_several_minted_dims_land_in_a_deterministic_order(ds):
+    # ``minted`` is a set, and ``SchemaState`` is a *value*: an iteration-order-dependent
+    # dim tuple would make two snapshots folded from identical inputs unequal between
+    # processes (set order over strings varies with PYTHONHASHSEED). Dim order carries no
+    # meaning here, so a stable one is free -- but it has to be asserted to stay stable.
+    w = xr.DataArray(np.ones((2, 2, 2)), dims=("run", "member", "ens"))
+    node = _weighted(frozenset({"lat"}), frozenset(w.dims), w)
+
+    after = apply_schema(SchemaState.from_dataset(ds), node)
+
+    assert after.data_vars["elevation"][:3] == ("ens", "member", "run")
+
+
+def test_weighting_an_unknown_size_stays_unknown():
+    unknown = SchemaState(dims={"time": None, "lat": 3}, coords={"time", "lat"})
+    w = xr.DataArray([1.0], dims="time")
+    after = apply_schema(unknown, _weighted(frozenset({"lat"}), frozenset({"time"}), w))
+    assert after.dims["time"] is None
 
 
 def test_scan_leaves_schema_unchanged(ds):

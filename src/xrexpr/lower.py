@@ -30,11 +30,11 @@ own contract:
 the call sequence that reproduces it, so a node standing for *two* calls is ordinary
 rather than a special case the replay loop has to know about.
 
-Two fused kinds so far — :class:`~xrexpr.ir.GroupedReduce` and
-:class:`~xrexpr.ir.WindowedReduce`. ``weighted`` still takes the opaque fallback below, as
-do the openers no node describes (``rolling_exp`` is a weighting rather than a window,
-``cumulative`` a scan in a builder's clothes), so those behave exactly as they did under
-the accessor's barrier.
+Three fused kinds — :class:`~xrexpr.ir.GroupedReduce`,
+:class:`~xrexpr.ir.WindowedReduce` and :class:`~xrexpr.ir.WeightedReduce`, one per builder
+kind. The openers no node describes take the opaque fallback below (``rolling_exp`` is a
+weighting rather than a fixed window, ``cumulative`` a scan in a builder's clothes), so
+those behave exactly as they did under the accessor's barrier.
 """
 
 from collections.abc import Hashable
@@ -56,6 +56,7 @@ from xrexpr.ir import (
     Reduce,
     Scan,
     Select,
+    WeightedReduce,
     WindowedReduce,
 )
 
@@ -111,9 +112,9 @@ def to_lower_ir(nodes: list[FluentOp]) -> list[LoweredOp]:
     is **demoted to** :class:`~xrexpr.ir.Opaque` together with its closer — the pair then
     replays verbatim and no rule can fire on it. That fallback is what makes the closer's
     provisional typing safe: a closer recorded under a shape no rule expects simply fails
-    to match, so the failure mode is pessimisation, never wrongness. It is also why
-    rolling/coarsen/weighted behave exactly as they did under the accessor's barrier until
-    their own fusion rules land.
+    to match, so the failure mode is pessimisation, never wrongness. It is also what the
+    openers no fused node describes (``rolling_exp``, ``cumulative``) rely on permanently,
+    rather than only until their own rule lands.
 
     Idempotent and semantics-preserving (see the module docstring). Idempotence is not
     incidental: the output contains no ``ContextOpen`` at all, so a second pass has
@@ -130,7 +131,9 @@ def to_lower_ir(nodes: list[FluentOp]) -> list[LoweredOp]:
 
         closer = nodes[i + 1] if i + 1 < n else None
         fused = (
-            _fuse_grouped(node, closer) or _fuse_windowed(node, closer)
+            _fuse_grouped(node, closer)
+            or _fuse_windowed(node, closer)
+            or _fuse_weighted(node, closer)
             if closer is not None
             else None
         )
@@ -160,8 +163,8 @@ def _fuse_grouped(opener: ContextOpen, closer: FluentOp) -> GroupedReduce | None
     Refusing is always safe (the caller demotes to ``Opaque``), so every condition below
     is a *narrowing* of what v1 claims to understand rather than a correctness risk.
 
-    - **The opener must be groupby-family.** ``rolling``/``coarsen``/``weighted`` get
-      their own nodes in later PRs; until then they refuse here and replay verbatim.
+    - **The opener must be groupby-family.** ``rolling``/``coarsen`` and ``weighted`` have
+      their own nodes, fused by the two functions below, so they refuse here.
     - **The grouper must be a string** — a dim name (``groupby("lat")``) or a component
       of a dim coordinate (``groupby("time.month")``), from which ``group_dim`` reads
       off directly. A ``DataArray`` grouper, a non-dim coordinate or a ``Grouper`` object
@@ -269,6 +272,62 @@ def _window_spec(opener: ContextOpen) -> frozendict[Hashable, int]:
     return frozendict({dim: size for dim, size in raw.items() if isinstance(size, int)})
 
 
+def _fuse_weighted(opener: ContextOpen, closer: FluentOp) -> WeightedReduce | None:
+    """Fuse a weighted pair into a :class:`~xrexpr.ir.WeightedReduce`, or refuse.
+
+    Unlike :func:`_fuse_windowed`, a closer that named dims is **fused, not refused**, and
+    the asymmetry is a fact about the two signatures rather than a judgement:
+    ``DatasetWeighted.mean`` is ``(dim=None, *, skipna=None, keep_attrs=None)`` — it really
+    does take a dim — whereas ``DatasetRolling.mean`` takes none, which is what makes
+    ``rolling(time=3).mean("lat")`` a misparse. So ``to_opnode``'s parsed dim spec is
+    meaningful here and carries over untouched, :data:`~xrexpr.ir.ALL_DIMS` included.
+
+    The one thing that must be read off the opener is the **weights' dims**, because they
+    have a dim effect of their own (see :class:`~xrexpr.ir.WeightedReduce`). Reading
+    ``w.dims`` materialises nothing — it is metadata, the same class of access
+    ``SchemaState.from_dataset`` already makes. Duck-typed rather than
+    ``isinstance(w, xr.DataArray)`` so this module keeps needing no xarray import; anything
+    with no ``dims`` tuple refuses, which covers the weights xarray would itself reject
+    (it raises ``ValueError: `weights` must be a DataArray``) and costs only a fusion the
+    plan could not have replayed anyway.
+
+    An untabulated closer refuses for free by not being a ``Reduce``, which is the right
+    answer for the weighted-only methods: ``sum_of_weights``/``sum_of_squares``/``quantile``
+    are not in ``OP_TABLE``, and ``quantile`` in particular takes ``q`` first positionally,
+    which a reduce's dim-spec parse would misread.
+    """
+    if opener.name != "weighted" or not isinstance(closer, Reduce):
+        return None
+
+    weight_dims = _weight_dims(opener)
+    if weight_dims is None:
+        return None
+
+    return WeightedReduce(
+        name="weighted",
+        reduce=closer.name,
+        weight_dims=weight_dims,
+        args=opener.args,
+        kwargs=opener.kwargs,
+        reduce_args=closer.args,
+        reduce_kwargs=closer.kwargs,
+        consumes=closer.consumes,
+    )
+
+
+def _weight_dims(opener: ContextOpen) -> frozenset[Hashable] | None:
+    """The dims the weights carry, or ``None`` if the weights aren't a shape we can read.
+
+    ``Dataset.weighted`` takes exactly one argument, so the weights are ``args[0]`` or the
+    ``weights=`` keyword. A 0-d weights array answers the empty set, which is honest: it
+    broadcasts nothing and aligns nothing, so such a node's dim effect really is a plain
+    reduce's.
+    """
+    weights = opener.args[0] if opener.args else opener.kwargs.get("weights")
+    dims = getattr(weights, "dims", None)
+    return frozenset(dims) if isinstance(dims, tuple) else None
+
+
 def _grouper_dims(opener: ContextOpen) -> tuple[Hashable, Hashable] | None:
     """``(group_dim, new_dim)`` for a groupby-family opener, or ``None`` if not statically known.
 
@@ -344,6 +403,15 @@ def _emit_node(node: LoweredOp) -> tuple[Call, ...]:
                     name=windowed.reduce,
                     args=windowed.reduce_args,
                     kwargs=windowed.reduce_kwargs,
+                ),
+            )
+        case WeightedReduce() as weighted:
+            return (
+                Call(name=weighted.name, args=weighted.args, kwargs=weighted.kwargs),
+                Call(
+                    name=weighted.reduce,
+                    args=weighted.reduce_args,
+                    kwargs=weighted.reduce_kwargs,
                 ),
             )
         case Reduce() | Select() | Scan() | Project() | Rechunk() | Opaque():
