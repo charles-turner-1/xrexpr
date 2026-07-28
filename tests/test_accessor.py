@@ -389,12 +389,17 @@ def test_unregistered_terminal_is_not_routed(ds):
 @pytest.fixture
 def dated_ds() -> xr.Dataset:
     # ``ds`` has an integer ``time`` coord; ``resample`` needs a real datetime index.
+    # ``lon`` and the ``area`` aux coord are here for the fused-reduce pushdown tests: a
+    # third dim gives the select somewhere disjoint to go, and a non-dimension coord
+    # spanning the selected dims checks the reorder carries it along.
     rng = np.random.default_rng(0)
     return xr.Dataset(
-        {"temperature": (("time", "lat"), rng.random((8, 3)))},
+        {"temperature": (("time", "lat", "lon"), rng.random((8, 3, 4)))},
         coords={
             "time": pd.date_range("2000-01-01", periods=8, freq="D"),
             "lat": np.arange(3),
+            "lon": np.arange(4),
+            "area": (("lat", "lon"), rng.random((3, 4))),
         },
     )
 
@@ -444,12 +449,61 @@ def test_ops_after_an_unfusable_context_are_modelled_again(ds):
     assert_equal(chain.collect(), ds.groupby("lat").first().mean("time"))
 
 
-def test_grouped_chain_still_replays_as_written(ds):
-    # PR 3 adds no rules for GroupedReduce, so a fused chain must replay exactly as the
-    # barrier made it -- the node is modelled, nothing moves across it yet.
+def test_select_on_a_grouped_nodes_own_dim_stays_put(ds):
+    # ``groupby("time")`` mints the dim it grouped over, so ``isel(time=0)`` indexes the
+    # *minted* ``time`` -- valid eagerly, and immovable. Pinned end to end because it is
+    # the case W2 PR 6's rule must decline: hopping this in front would index the original
+    # ``time`` instead of the group labels. (Before that rule existed this test passed
+    # because no rule touched a fused node at all; now it passes for the right reason.)
     chain = ds.plan.groupby("time").mean().isel(time=0)
     assert [c.name for c in emit(chain._optimized())] == ["groupby", "mean", "isel"]
     assert_equal(chain.collect(), ds.groupby("time").mean().isel(time=0))
+
+
+def test_climatology_select_is_pushed_in_front_of_the_grouping(dated_ds):
+    # The payoff the whole lowering workstream was built for: the grouping runs over one
+    # latitude instead of over all of them and then discarding the rest. Both halves are
+    # asserted -- that the rewrite *fires*, so this cannot pass vacuously, and that it
+    # still equals eager.
+    chain = dated_ds.plan.groupby("time.month").mean().isel(lat=0)
+
+    assert [c.name for c in emit(chain._optimized())] == ["isel", "groupby", "mean"]
+    assert_equal(chain.collect(), dated_ds.groupby("time.month").mean().isel(lat=0))
+
+
+@pytest.mark.parametrize(
+    "chain",
+    [
+        lambda o: o.groupby("time.month").mean().isel(lat=0),
+        lambda o: o.groupby("time.month").mean().isel(lat=[0, 2]),
+        lambda o: o.groupby("time.month").mean().sel(lon=slice(1, 3)),
+        lambda o: o.groupby("time.month").mean().isel(lat=0, lon=1),
+        # immovable, and valid: the select indexes the minted dim
+        lambda o: o.groupby("time.month").mean().isel(month=0),
+        lambda o: o.resample(time="2D").mean().isel(lat=0),
+        lambda o: o.rolling(time=3).mean().isel(lat=0),
+        lambda o: o.rolling(time=3, center=True, min_periods=1).mean().isel(lat=0),
+        lambda o: o.coarsen(time=5, boundary="trim").mean().isel(lat=0),
+        # immovable, and valid: rolling keeps its dim, so indexing it is fine
+        lambda o: o.rolling(time=3).mean().isel(time=0),
+        # the select empties a disjoint dim, which the grouping must survive
+        lambda o: o.groupby("time.month").mean().isel(lat=[]),
+    ],
+)
+def test_select_across_a_fused_reduce_matches_eager(dated_ds, chain):
+    # Whether the select moved or not, the answer must not change -- which is the only
+    # thing that makes "hop when disjoint, leave otherwise" worth anything.
+    assert_equal(chain(dated_ds.plan).collect(), chain(dated_ds))
+
+
+def test_select_on_a_consumed_group_dim_still_raises_from_xarray(dated_ds):
+    # Left rather than raised, so the error comes from xarray at replay in its own words
+    # -- not an ``InvalidExpressionError`` the optimiser guessed at. ``pushdown_selects``
+    # raises for a plain reduce because a reduce always removes what it names; a grouped
+    # one mints as well, so the same inference would reject valid chains.
+    chain = dated_ds.plan.groupby("time.month").mean().isel(time=0)
+    with pytest.raises(ValueError, match="Dimensions"):
+        chain.collect()
 
 
 def test_builder_only_method_records_and_replays(ds):
@@ -475,8 +529,11 @@ def test_resample_matches_eager(dated_ds):
 
 
 def test_rolling_then_select_matches_eager(ds):
+    # The select now hops in front: ``lat`` is disjoint from the window, so the rolling
+    # mean runs over one latitude instead of three. Expectation flipped deliberately in
+    # W2 PR 6 -- it read ``[WindowedReduce, Select]`` while the fused nodes had no rules.
     chain = ds.plan.rolling(time=2).mean().isel(lat=0)
-    assert [type(n) for n in chain._optimized()] == [WindowedReduce, Select]
+    assert [type(n) for n in chain._optimized()] == [Select, WindowedReduce]
     assert_equal(chain.collect(), ds.rolling(time=2).mean().isel(lat=0))
 
 

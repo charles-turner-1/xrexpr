@@ -486,6 +486,22 @@ node. One dispatch site instead of N.
 The trigger for doing it: the third rule that would otherwise be written twice. Until
 then it is a note.
 
+> **The trigger is now met** (2026-07, W2 PR 6). `pushdown_selects_past_fused_reduces` is
+> the third select-pushdown rule, joining `pushdown_selects` (crosses a `Reduce`) and
+> `pushdown_selects_past_rechunks` (crosses a `Rechunk`). All three are the same rule
+> modulo two things: *which dims the crossed node involves*, and *what to do when they
+> intersect* — raise for a plain reduce, leave for a rechunk or a fused one. That second
+> axis is worth noting, because it means the unification needs a `DimEffect` **plus** an
+> intersection policy, not the dim sets alone; the sketch above only accounts for the
+> first.
+>
+> Not taken here, deliberately: PR 6's scope is the rule, and §12 already places the
+> unification outside the sequence as needing its own decision. What PR 6 does do is keep
+> the seam clean — `optimize._fused_dims` is a single `assert_never`-closed match over the
+> fused variants, i.e. one shard of `dim_effect` in the shape §11.1 describes, so the
+> unification has somewhere obvious to grow from rather than three inlined dim sets to
+> gather up. PR 7's projection arm will be the fourth instance.
+
 ### 11.2 Legality is not profitability
 
 Every rule in `_RULES` today conflates two questions: *may* these ops commute, and
