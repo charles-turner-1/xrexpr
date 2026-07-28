@@ -26,6 +26,7 @@ from xrexpr.ir import (
     Opaque,
     Reduce,
     Select,
+    WeightedReduce,
     WindowedReduce,
 )
 from xrexpr.lower import emit
@@ -523,7 +524,55 @@ def test_ops_after_a_windowed_reduce_are_modelled(ds):
 def test_weighted_matches_eager(ds):
     weights = ds["area"]
     chain = ds.plan.weighted(weights).mean(("lat", "lon"))
+    assert [type(n) for n in chain._optimized()] == [WeightedReduce]
     assert_equal(chain.collect(), ds.weighted(weights).mean(("lat", "lon")))
+
+
+def test_weighted_bare_closer_matches_eager(ds):
+    # A bare closer really does reduce every dim here (unlike a *grouped* bare closer,
+    # which reduces only along the group dim) -- ``DatasetWeighted.mean`` takes ``dim`` and
+    # ``dim=None`` means all of them, so the recorded ALL_DIMS carries over untouched.
+    chain = ds.plan.weighted(ds["area"]).mean()
+    assert [type(n) for n in chain._optimized()] == [WeightedReduce]
+    assert_equal(chain.collect(), ds.weighted(ds["area"]).mean())
+
+
+def test_select_after_a_weighted_reduce_does_not_move(ds):
+    # The rewrite the variant exists to block, checked end to end: pushing the ``isel``
+    # left would leave the weights un-subset. The plan replays in the order written.
+    weights = ds["area"]
+    chain = ds.plan.weighted(weights).mean("lat").isel(time=0)
+    assert [c.name for c in emit(chain._optimized())] == ["weighted", "mean", "isel"]
+    assert_equal(chain.collect(), ds.weighted(weights).mean("lat").isel(time=0))
+
+
+def test_ops_after_a_weighted_reduce_are_modelled(ds):
+    # Lowering opaques only the *pair*, so the trailing reduce is a real ``Reduce`` again --
+    # the half of the barrier's retirement that ``weighted`` had been waiting for.
+    weights = ds["area"]
+    chain = ds.plan.weighted(weights).mean("lat").mean("time")
+    assert [type(n) for n in chain._optimized()] == [WeightedReduce, Reduce]
+    assert_equal(chain.collect(), ds.weighted(weights).mean("lat").mean("time"))
+
+
+@pytest.mark.parametrize("closer", ["sum_of_weights", "sum_of_squares"])
+def test_weighted_only_closers_still_match_eager(ds, closer):
+    # The other half of a refusal to fuse: the verbatim replay has to *work*. These are not
+    # tabulated reductions, so they record ``Opaque`` and the pair stays opaque.
+    weights = ds["area"]
+    chain = getattr(ds.plan.weighted(weights), closer)()
+    assert [type(n) for n in chain._optimized()] == [Opaque, Opaque]
+    assert_equal(chain.collect(), getattr(ds.weighted(weights), closer)())
+
+
+def test_weights_carrying_a_dim_the_dataset_lacks_match_eager(ds):
+    # ``dot`` broadcasts, so this *adds* ``member`` to every variable -- the fact
+    # ``weight_dims`` exists for. Nothing moves across the node, so replay is verbatim;
+    # what is being checked is that the modelled schema did not mislead a later rule.
+    weights = xr.DataArray([1.0, 2.0], dims="member", coords={"member": [0, 1]})
+    chain = ds.plan.weighted(weights).mean("lat").mean("member")
+    assert [type(n) for n in chain._optimized()] == [WeightedReduce, Reduce]
+    assert_equal(chain.collect(), ds.weighted(weights).mean("lat").mean("member"))
 
 
 def test_terminal_after_context_matches_eager(ds):

@@ -39,6 +39,7 @@ from xrexpr.ir import (
     Reduce,
     Scan,
     Select,
+    WeightedReduce,
     WindowedReduce,
 )
 from xrexpr.operations import CONTEXT_METHODS
@@ -132,6 +133,11 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
     - :class:`~xrexpr.ir.GroupedReduce` removes its ``group_dim`` and any extra
       ``consumes``, and mints ``new_dim`` — of *unknown* size, since the group count is a
       fact about coordinate values — onto every variable;
+    - :class:`~xrexpr.ir.WindowedReduce` keeps every dim and *resizes* the windowed ones
+      (``coarsen`` only);
+    - :class:`~xrexpr.ir.WeightedReduce` removes its ``consumes`` like a plain reduce, and
+      then marks every surviving ``weight_dims`` entry unknown — the weights broadcast in
+      the dims the dataset lacks and align (so possibly *shrink*) the ones it shares;
     - :class:`~xrexpr.ir.Scan`/:class:`~xrexpr.ir.Rechunk`/:class:`~xrexpr.ir.Opaque`
       leave dims untouched (a rechunk changes only chunk topology);
     - a coordinate sharing a name with a removed dim disappears (all cases), and a
@@ -147,6 +153,9 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
     """
     dims = dict(schema.dims)
     data_vars = dict(schema.data_vars)
+    # Dims this node *adds*. Collected by the arms and applied to every variable once
+    # below, because two arms mint now and both mint onto every variable alike.
+    minted: set[Hashable] = set()
 
     match node:
         case Reduce(consumes=consumes):
@@ -178,6 +187,27 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
             # The minted dim's extent is the number of groups -- a fact about coordinate
             # *values*, which this layer does not read. ``None`` rather than a guess.
             dims[grouped.new_dim] = None
+            minted.add(grouped.new_dim)
+        case WeightedReduce() as weighted:
+            match weighted.consumes:
+                case AllDims():
+                    dims.clear()  # a bare weighted closer, like a bare ``mean()``
+                case frozenset() as named:
+                    for dim in named:
+                        dims.pop(dim, None)
+                    for dim in weighted.weight_dims - named:
+                        # The weights have a dim effect of their own, via ``dot``'s
+                        # broadcast and alignment -- see ``WeightedReduce``. A weight dim
+                        # the dataset lacks is *minted*; one it shares may be *resized*
+                        # (misaligned weights inner-join and shrink it). Either way the
+                        # name is known and the extent is not, which is the answer W3's
+                        # ``int | None`` exists for. Under ``ALL_DIMS`` above there is
+                        # nothing to do: a bare closer clears the weight dims too.
+                        if dim not in dims:
+                            minted.add(dim)
+                        dims[dim] = None
+                case _:
+                    assert_never(weighted.consumes)
         case WindowedReduce() as windowed:
             for dim, window in windowed.window.items():
                 if dim in dims:
@@ -193,17 +223,32 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
         name: tuple(d for d in var_dims if d not in removed)
         for name, var_dims in data_vars.items()
     }
-    if isinstance(node, GroupedReduce):
-        # Verified against xarray 2026.7.0, and the non-obvious half of the arm above:
-        # *every* variable comes back carrying the minted dim, including ones that never
-        # carried the group dim -- ``elevation(lat, lon)`` under ``groupby("time.month")``
-        # is ``(month, lat, lon)``. So this is an addition to each variable, not a
-        # substitution of one dim for another. The minted dim is also a coordinate.
-        coords = coords | {node.new_dim}
+    if minted:
+        # Verified against xarray 2026.7.0, and the non-obvious half of the arms above:
+        # *every* variable comes back carrying a minted dim, including ones that could not
+        # have had it -- ``elevation(lat, lon)`` under ``groupby("time.month")`` is
+        # ``(month, lat, lon)``, and under ``weighted(w)`` with ``w(lat, member)`` it is
+        # ``(lon, member)``. So this is an addition to each variable, not a substitution of
+        # one dim for another.
+        #
+        # Sorted because ``minted`` is a set and :class:`SchemaState` is a *value*: an
+        # iteration-order-dependent dim tuple would make two snapshots folded from identical
+        # inputs unequal between processes. ``str`` is the key for the same reason
+        # ``pushdown_selects`` uses it — a dim name is only ``Hashable``, so it is the one
+        # total order available. Dim order is not otherwise meaningful here (``var_dims``
+        # unions into a set, and ``Dataset.sizes`` promises no order either).
+        ordered = sorted(minted, key=str)
         data_vars = {
-            name: (node.new_dim, *(d for d in var_dims if d != node.new_dim))
+            name: (*ordered, *(d for d in var_dims if d not in minted))
             for name, var_dims in data_vars.items()
         }
+    if isinstance(node, GroupedReduce):
+        # A minted *coordinate*, which is grouped-specific: the group labels become one.
+        # A weight dim broadcast in need not have a coord at all, and under-reporting one
+        # is allowed where under-reporting a dim is not -- ``coords`` is only ever asserted
+        # to be a *subset* of the result's (``test_tracked_schema_agrees_with_evaluation``),
+        # because a scalar select already leaves a coord this layer does not model.
+        coords = coords | {node.new_dim}
     return SchemaState(
         dims=frozendict(dims), coords=coords, data_vars=frozendict(data_vars)
     )

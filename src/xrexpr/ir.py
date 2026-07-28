@@ -32,6 +32,21 @@ expansion is deferred to a reader that has an exact schema. It is a *sentinel*, 
 narrow it with a match arm rather than an ``assert``, so the two cases are handled where
 the field is used.
 
+**Immutability is unconditional; hashability is not.** Every variant is frozen and
+coerces its containers, so a node cannot be mutated or drift from itself — and each is
+hashable and comparable **when its payload is**. Some payloads aren't:
+``xr.DataArray.__hash__`` is ``None``, so a node carrying an array (``weighted(w)``, a
+boolean-mask ``__getitem__``, ``where(cond)``) raises ``TypeError`` on ``hash()``, and
+``==`` between two such nodes holding *distinct but equal* arrays raises ``ValueError``
+(the elementwise comparison has no truth value). The stronger claim is deliberately not
+wanted: making an array payload hashable means hashing its *values*, which for a
+dask-backed array means computing it at plan time — the one thing this package promises
+never to do. (``indexers.Mask`` normalises to a tuple of booleans for a related reason,
+but that payload is small and already realised, so the precedent does not transfer.)
+Nothing here hashes a node, and plan-equality compares nodes that *share* the payload
+object, where tuple comparison's identity check applies — see ``test_ir.py``, which pins
+all three behaviours.
+
 Only **unary** ops are modelled here. Binary/n-ary ops (``merge``/``concat``/``where``)
 would add their own variants carrying plan-typed children and promote the container from
 a list to a tree — an additive, orthogonal change deferred until such an op is in scope.
@@ -62,6 +77,7 @@ __all__ = [
     "Reduce",
     "Scan",
     "Select",
+    "WeightedReduce",
     "WindowedReduce",
     "frozendict",
 ]
@@ -100,7 +116,8 @@ class Reduce:
     from the ``dim`` spec. A bare ``mean()`` names no dim and so consumes
     :data:`ALL_DIMS`, left symbolic rather than expanded against the record-time schema
     (see the module docstring). ``args``/``kwargs`` are coerced to immutable containers
-    so the node is hashable and safe to share between plans.
+    so the node is safe to share between plans, and hashable when its payload is (see the
+    module docstring on why that last part is conditional).
     """
 
     name: str  # open set of tabulated reductions → str (kind-safety via OP_TABLE)
@@ -369,6 +386,62 @@ class WindowedReduce:
         object.__setattr__(self, "reduce_kwargs", frozendict(self.reduce_kwargs))
 
 
+@dataclass(frozen=True)
+class WeightedReduce:
+    """A weighted aggregation — ``ds.weighted(w).mean("time")`` — as *one* node.
+
+    The variant exists as much for what it **blocks** as for what it describes. Lowered to
+    a plain :class:`Reduce` it would be indistinguishable from one, so ``pushdown_selects``
+    would match it and hop a select in front of a weighted mean with the weights left
+    un-subset — a wrong plan, silently. Nothing here fires any rule (see
+    ``docs/roadmap/02-lowering.md`` §8.1: subsetting ``w`` alongside would be the first
+    rewrite in this package to transform an *array* rather than reorder metadata, and that
+    needs its own workstream).
+
+    The dim algebra, verified against xarray 2026.7.0 — and **not** a plain ``Reduce``'s,
+    which is what ``weight_dims`` is for. ``consumes`` is exactly a reduce's, symbolic
+    :data:`ALL_DIMS` for a bare closer (``DatasetWeighted.mean`` really does take ``dim``,
+    unlike ``DatasetRolling.mean``). But the *weights* have a dim effect of their own,
+    because ``dot`` broadcasts and aligns:
+
+    - a weight dim the dataset **lacks** is broadcast in, onto *every* variable —
+      ``w(lat, member)`` makes ``ds.weighted(w).mean("lat")`` return ``{time, lon, member}``
+      and ``elevation(lat, lon)`` come back as ``(lon, member)``;
+    - a weight dim the dataset **shares** is aligned, and a misaligned one *shrinks* it —
+      ``w`` on ``lat`` labelled ``[0, 1]`` against a ``lat`` of ``[0, 1, 2]`` inner-joins to
+      size 2.
+
+    So a surviving weight dim is a dim whose *name* is known and whose *extent* is not:
+    :class:`~xrexpr.schema.SchemaState` records it ``None``, the answer W3 added for exactly
+    this. A bare closer clears everything, weight dims included (also verified).
+
+    Only the dim **names** are kept, not the weights' sizes: sizes would be a guess about
+    the post-alignment extent, and the names are what every rule reasons about. The weights
+    themselves stay in the verbatim payload, which is why this node inherits the
+    array-payload hashability caveat in the module docstring.
+    """
+
+    name: Literal["weighted"]  # closed set → Literal
+    reduce: str  # the closing method: mean/sum/std/var (open set → str)
+    #: The dims the weights carry. Read off ``w.dims`` at fusion time — metadata only,
+    #: materialising nothing — and the reason this node is not a relabelled ``Reduce``.
+    weight_dims: frozenset[Hashable] = frozenset()
+    args: tuple[Any, ...] = ()  # the opener's header, verbatim (holds the weights)
+    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    reduce_args: tuple[Any, ...] = ()  # the closer's header, verbatim
+    reduce_kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    consumes: DimSet = frozenset()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "weight_dims", frozenset(self.weight_dims))
+        object.__setattr__(self, "args", tuple(self.args))
+        object.__setattr__(self, "kwargs", frozendict(self.kwargs))
+        object.__setattr__(self, "reduce_args", tuple(self.reduce_args))
+        object.__setattr__(self, "reduce_kwargs", frozendict(self.reduce_kwargs))
+        if not isinstance(self.consumes, AllDims):
+            object.__setattr__(self, "consumes", frozenset(self.consumes))
+
+
 #: The optimiser's IR node: a sum over the structural op *kinds*. ``match`` over this
 #: binds different fields per arm; ``typing.assert_never`` on the ``case _`` arm makes
 #: the union exhaustive (adding a variant fails type-check at every unhandled site).
@@ -382,4 +455,4 @@ FluentOp = Op | ContextOpen
 #: express in a single call, and *minus* the opener, which lowering must have consumed.
 #: The asymmetry is the point — a :class:`ContextOpen` that outlived ``to_lower_ir``
 #: fails type-check at every site downstream of it.
-LoweredOp = Op | GroupedReduce | WindowedReduce
+LoweredOp = Op | GroupedReduce | WindowedReduce | WeightedReduce
