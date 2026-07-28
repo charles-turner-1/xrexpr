@@ -198,3 +198,27 @@ weighted **projection** rule (§8.1, #88) once `07-small-wins.md` §8 retired th
 that had excluded it. The weighted **select** rule is the one phase-4 item still genuinely
 deferred, and the reason is unchanged: it needs a rewrite that transforms an array rather
 than reordering metadata. The Rust spike remains untouched and gated on W4.
+
+### Everything left, in one list
+
+The three subsections above split the remainder by *why* it is outstanding, which is the
+useful cut for a reviewer and the wrong one for picking up the next job. So, flat — once
+#84–#89 land, this is the whole of it:
+
+| Item | State | Note |
+|---|---|---|
+| **W4** — chunk taxonomy | not started | `Rechunk.chunks` typing + the last `isinstance` ladder. **The only thing holding the W8 Rust gate shut**, so it is the highest-leverage item left. |
+| **W5** — `Elementwise` | not started | Nothing in `src/` at all; §"What remains" gap 3. |
+| **W6** — `Scan` dims | not started | Also unblocks W7 §3's `Scan` arm. |
+| **W7 §1** — merge adjacent `Project`s | not started | Independent, small. |
+| **W7 §2** — merge adjacent `Rechunk`s | deferred | Its own note parks it behind W4. |
+| **W7 §3** — projections across `Scan`/`Rechunk` | part-blocked | `Scan` arm needs W6; `Rechunk` arm needs the empirical check §3 asks for. |
+| **W7 §5** — `.plan` for `DataArray` | not started | Independent, and the largest surface change of the four. |
+| **W2 §8.1** — the weighted **select** rule | deferred, undecided | The only item left of the lowering memo, and it was never in §12's sequence. Unchanged reason: it needs a rewrite that *transforms an array* (subsetting the weights alongside the select) rather than one that reorders metadata — the first in the package to do so. |
+| **W8** — the Rust spike | gated | On W4 alone now. |
+
+One item not in any workstream, found while writing #89: **the README never mentions
+`groupby`** — no builder-chain section at all, though fused nodes are W2's headline result.
+#89 adds a single grouped `explain()` example because the format change needed one; a real
+"grouped and windowed operations" section is still owed, and is a docs job rather than part
+of any workstream above.
