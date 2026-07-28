@@ -586,14 +586,23 @@ def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
     **input**: ``{group_dim} | consumes`` for a grouped reduce, the ``window`` keys for a
     windowed one. Both differ from :func:`_fused_dims` — see the ``GroupedReduce`` arm.
 
-    :class:`~xrexpr.ir.WeightedReduce` is excluded, and for a *second* reason beyond the
-    weights argument that keeps it out of the select rule (§8.1). A weighted reduce is
-    applied per variable and **raises** when any variable lacks the named dim, unlike a
-    plain reduce, which skips it: with ``w(lat, lon)``, ``ds.weighted(w).mean("time")``
-    raises on ``elevation`` while ``ds[["temperature"]].weighted(w).mean("time")``
-    succeeds. Hopping the projection in front would turn a raising chain into a quietly
-    succeeding one — the silent-divergence failure mode this package has been bitten by
-    before, and worse than the missed optimisation.
+    **This rule may skip an error, and that is deliberate.** Moving a projection earlier
+    means the discarded variables are never computed — usually just cheaper, occasionally
+    also error-free: ``ds.std("time")[["temperature"]]`` raises while reducing
+    ``elevation``, which the chain throws away, whereas the rewritten plan never touches
+    it. The optimised answer is the better one, and it is safe because the *values* cannot
+    move: the guard above has already established that the projected variables carry the
+    dims the crossed op names, so they reduce identically either way. The sharpened
+    contract — preserve every value the plan asks for, never introduce an error, but feel
+    free to skip one raised by discarded work — is written up in
+    ``docs/roadmap/07-small-wins.md`` §8.
+
+    :class:`~xrexpr.ir.WeightedReduce` is nonetheless still excluded, now on narrower
+    grounds than when the arm was written: it is simply not modelled here yet. The
+    original argument — that a weighted reduce *refuses* a variable lacking a named dim
+    where a plain one skips it, so the hop would mask an error — is the very thing §8
+    reclassifies as a win, and a projection (unlike a select) never has to subset the
+    weights. Admitting it is an open decision, recorded in §8 rather than taken here.
 
     One hop per call, returning the rewritten plan; ``None`` when nothing moves.
     :func:`optimize`'s fixpoint composes hops so a projection walks to the front of the

@@ -276,9 +276,14 @@ NON_FLOAT_EMPTY_UNSAFE_REDUCES = frozenset({"median"})
 #: xarray 2026.7.0 *and* 2025.6.1, so it is not a recent regression; ``mean`` and the rest
 #: are fine, as are ``rolling``/``coarsen`` (which only touch variables having the window
 #: dim). Reachable only with a variable that lacks a dim — i.e. only since the generator
-#: grew one — and it is an upstream bug, so it is filtered rather than reported. But see
-#: ``docs/roadmap/07-small-wins.md`` §8: it also exposes a real divergence in
-#: ``pushdown_projections``, which is *not* filtered away.
+#: grew one.
+#:
+#: Filtered because such a chain has **no usable eager reference**, not to hide anything:
+#: the properties below assert ``optimised == eager``, and eager here *raises*. What the
+#: optimiser does with one is deliberate and good — ``pushdown_projections`` skips the
+#: failing computation precisely because the plan discards it — but that is the sharpened
+#: contract in ``docs/roadmap/07-small-wins.md`` §8, which an equality assertion cannot
+#: express. It is pinned by a hand-written test instead.
 EMPTY_AXIS_UNSAFE_REDUCES = frozenset({"std", "var"})
 
 

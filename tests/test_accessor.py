@@ -547,11 +547,48 @@ def test_projection_past_a_windowed_reduce_is_left_when_the_dim_would_go(dated_d
     assert_equal(chain.collect(), ds.rolling(time=3).mean()[["elevation"]])
 
 
-def test_projection_past_a_weighted_reduce_would_mask_an_error_so_is_left(dated_ds):
-    # The weighted exclusion, end to end and in its sharpest form: eager *raises* because
-    # ``elevation`` has no ``time`` and a weighted reduce -- unlike a plain one -- refuses
-    # rather than skipping. Hopping the projection in front would drop ``elevation`` and
-    # quietly succeed, which is a worse outcome than the missed optimisation.
+def test_projection_pushdown_skips_an_error_from_a_discarded_variable(dated_ds):
+    """Pushing a projection down skips work the plan discards — errors included.
+
+    ``elevation`` has no ``time``, and a Dataset ``std("time")`` hands it ``dim=[]``, which
+    xarray then fails on. Eager therefore raises while computing a standard deviation the
+    chain explicitly throws away; the rewrite never computes it. The optimised answer is
+    the better one — see ``docs/roadmap/07-small-wins.md`` §8, which settles this as a
+    deliberate property rather than a divergence to be repaired.
+
+    Safe because the values cannot move: the rule fires only once the projected variables
+    are known to carry the dims the crossed op names, so they reduce identically either
+    way, and the sole difference is a discarded variable's error.
+    """
+    ds = dated_ds.assign(elevation=(("lat", "lon"), np.zeros((3, 4))))
+
+    with pytest.raises(ValueError, match="ndim=0"):
+        ds.std(dim=["time"])[["temperature"]]
+
+    planned = ds.plan.std(dim=["time"])[["temperature"]].collect()
+    # the reference is the same chain with the discarded variable simply absent
+    assert_equal(planned, ds[["temperature"]].std(dim=["time"]))
+
+
+def test_projection_pushdown_introduces_no_error_of_its_own(dated_ds):
+    # The other half of §8's contract: skipping a discarded variable's failure is allowed,
+    # inventing one is not. ``mean`` skips a variable lacking the dim rather than refusing,
+    # so both orders succeed and must agree exactly.
+    ds = dated_ds.assign(elevation=(("lat", "lon"), np.zeros((3, 4))))
+    assert_equal(
+        ds.plan.mean(dim=["time"])[["temperature"]].collect(),
+        ds.mean(dim=["time"])[["temperature"]],
+    )
+
+
+def test_projection_past_a_weighted_reduce_is_left(dated_ds):
+    # Pins the *current* behaviour rather than defending it. ``WeightedReduce`` is absent
+    # from this rule's match, so nothing crosses it and both orders raise alike. The
+    # argument that originally justified the exclusion -- that hopping the projection in
+    # front would mask ``elevation``'s error -- has since been retired: by the test above
+    # and ``07-small-wins.md`` §8, skipping a discarded variable's failure is the *better*
+    # answer. Whether weighted should now join the rule is an open decision recorded in §8;
+    # a projection, unlike a select, never has to subset the weights.
     ds = dated_ds.assign(elevation=(("lat", "lon"), np.zeros((3, 4))))
     weights = ds["area"]
     chain = ds.plan.weighted(weights).mean("time")[["temperature"]]
