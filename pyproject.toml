@@ -38,6 +38,7 @@ dev = [
     "dask",  # testing: rechunk rewrites need a chunk manager to replay
     "hypothesis",  # testing (property-based)
     "mypy",  # linting
+    "numbagg",  # testing: xarray's rolling_exp refuses to run without it
     "pytest",  # testing
     "ruff",  # linting
     "xarray",
@@ -174,6 +175,9 @@ hypothesis = "*"
 # not a runtime dependency: xrexpr must keep working dask-free. The rechunk tests
 # skip themselves without it (``pytest.importorskip``).
 dask = "*"
+# xarray's ``rolling_exp`` refuses to run without it, so without this the one opener
+# lowering deliberately leaves unfused could not be exercised end to end at all.
+numbagg = "*"
 
 [tool.pixi.feature.test.tasks]
 test = { cmd = "pytest tests", description = "Run tests" }

@@ -24,6 +24,7 @@ from xrexpr.ir import (
     Reduce,
     Scan,
     Select,
+    WindowedReduce,
 )
 from xrexpr.lower import Call, emit, to_lower_ir
 from xrexpr.schema import to_opnode
@@ -156,16 +157,17 @@ def test_within_group_map_does_not_fuse():
 @pytest.mark.parametrize(
     "opener",
     [
-        ("rolling", (), {"time": 3}),
-        ("coarsen", (), {"time": 2}),
         ("weighted", ("w",), {}),
-        ("cumulative", ("time",), {}),
+        # not a fixed window: an exponential weighting, which ``window`` cannot describe
         ("rolling_exp", (), {"time": 3}),
+        # a scan wearing a builder's clothes
+        ("cumulative", ("time",), {}),
     ],
 )
 def test_openers_without_a_fusion_rule_demote_the_whole_pair(opener):
-    # Until their own PRs land these behave exactly as the accessor's barrier made them:
-    # both halves opaque, so no rule can fire on or across the pair.
+    # Until their own PRs land (or never, for the two that no node describes) these
+    # behave exactly as the accessor's barrier made them: both halves opaque, so no rule
+    # can fire on or across the pair.
     lowered = _lower(opener, ("mean", (), {}))
     assert [type(n) for n in lowered] == [Opaque, Opaque]
 
@@ -173,10 +175,70 @@ def test_openers_without_a_fusion_rule_demote_the_whole_pair(opener):
 def test_demoting_the_closer_is_not_optional():
     # The failure this guards: leaving the closer as the ``Reduce`` ``to_opnode``
     # provisionally built keeps a *Dataset-level* reading of a call that was never
-    # Dataset-level -- a bare grouped ``mean()`` would carry ALL_DIMS and a following
-    # select would be rejected against dims it never removed.
-    lowered = _lower(("rolling", (), {"time": 3}), ("mean", (), {}))
+    # Dataset-level -- a bare ``mean()`` after an unfusable opener would carry ALL_DIMS
+    # and a following select would be rejected against dims it never removed.
+    lowered = _lower(("rolling_exp", (), {"time": 3}), ("mean", (), {}))
     assert not any(isinstance(n, Reduce) for n in lowered)
+
+
+# --- fusing rolling and coarsen ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("opener", "window"),
+    [
+        (("rolling", (), {"time": 3}), {"time": 3}),
+        (("rolling", ({"time": 3},), {}), {"time": 3}),
+        (("rolling", (), {"time": 3, "center": True}), {"time": 3}),
+        (("rolling", (), {"time": 3, "lat": 2}), {"time": 3, "lat": 2}),
+        (("coarsen", (), {"time": 2}), {"time": 2}),
+        (("coarsen", (), {"time": 2, "boundary": "trim"}), {"time": 2}),
+    ],
+)
+def test_window_spec_is_read_off_the_opener(opener, window):
+    (node,) = _lower(opener, ("mean", (), {}))
+    assert isinstance(node, WindowedReduce)
+    assert dict(node.window) == window
+    assert node.reduce == "mean"
+
+
+def test_a_windowed_closer_with_a_parsed_dim_spec_does_not_fuse():
+    # The trap: ``DatasetRolling.mean`` is ``(keep_attrs=None, **kwargs)`` -- it takes no
+    # dim argument, so ``rolling(time=3).mean("lat")`` passes "lat" as *keep_attrs* and
+    # reduces nothing. ``to_opnode`` cannot know that and records consumes={"lat"}.
+    # Fusing would import a dim effect invented by a misparse.
+    lowered = _lower(("rolling", (), {"time": 3}), ("mean", ("lat",), {}))
+    assert [type(n) for n in lowered] == [Opaque, Opaque]
+
+
+def test_windowed_option_kwargs_are_not_windows():
+    # ``center``/``boundary`` are options; only real dim keywords are windows -- but they
+    # stay in ``kwargs`` verbatim, because ``boundary`` decides coarsen's output size.
+    (node,) = _lower(
+        ("coarsen", (), {"time": 2, "boundary": "pad", "side": "right"}),
+        ("sum", (), {}),
+    )
+    assert dict(node.window) == {"time": 2}
+    assert node.kwargs["boundary"] == "pad"
+
+
+def test_a_windowless_opener_does_not_fuse():
+    # ``rolling()`` with no dim keyword names no window, so there is nothing to model.
+    lowered = _lower(("rolling", (), {}), ("mean", (), {}))
+    assert [type(n) for n in lowered] == [Opaque, Opaque]
+
+
+def test_non_integer_window_does_not_fuse():
+    lowered = _lower(("rolling", (), {"time": "3D"}), ("mean", (), {}))
+    assert [type(n) for n in lowered] == [Opaque, Opaque]
+
+
+def test_windowed_node_emits_both_calls_verbatim():
+    (node,) = _lower(("rolling", (), {"time": 3, "center": True}), ("mean", (), {}))
+    assert emit([node]) == [
+        Call(name="rolling", kwargs=frozendict({"time": 3, "center": True})),
+        Call(name="mean"),
+    ]
 
 
 def test_non_string_grouper_does_not_fuse():

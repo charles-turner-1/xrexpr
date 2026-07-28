@@ -13,7 +13,15 @@ import pandas as pd
 import pytest
 import xarray as xr
 
-from xrexpr.ir import ALL_DIMS, GroupedReduce, Project, Reduce, Scan, Select
+from xrexpr.ir import (
+    ALL_DIMS,
+    GroupedReduce,
+    Project,
+    Reduce,
+    Scan,
+    Select,
+    WindowedReduce,
+)
 from xrexpr.schema import SchemaState, apply_schema
 
 
@@ -257,6 +265,107 @@ def test_grouped_reduce_adds_the_new_dim_to_a_variable_that_lacked_the_group_dim
     )
     after = apply_schema(SchemaState.from_dataset(dated_ds), node)
     assert set(after.data_vars["elevation"]) == {"month", "lat", "lon"}
+
+
+# --- windowed reduces ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("calls", "node"),
+    [
+        (
+            [("rolling", (), {"time": 3}), ("mean", (), {})],
+            WindowedReduce(name="rolling", reduce="mean", window={"time": 3}),
+        ),
+        (
+            [("rolling", (), {"time": 3, "center": True}), ("mean", (), {})],
+            WindowedReduce(
+                name="rolling",
+                reduce="mean",
+                window={"time": 3},
+                kwargs={"time": 3, "center": True},
+            ),
+        ),
+        (
+            [("coarsen", (), {"time": 2, "boundary": "trim"}), ("mean", (), {})],
+            WindowedReduce(
+                name="coarsen",
+                reduce="mean",
+                window={"time": 2},
+                kwargs={"time": 2, "boundary": "trim"},
+            ),
+        ),
+        (
+            [("coarsen", (), {"time": 2, "boundary": "pad"}), ("mean", (), {})],
+            WindowedReduce(
+                name="coarsen",
+                reduce="mean",
+                window={"time": 2},
+                kwargs={"time": 2, "boundary": "pad"},
+            ),
+        ),
+    ],
+)
+def test_windowed_reduce_arm_agrees_with_xarray(dated_ds, calls, node):
+    # ``time`` is 24 here, so ``trim`` and ``pad`` agree; the odd-length case below is
+    # what actually tells the two roundings apart.
+    eager = dated_ds
+    for name, args, kwargs in calls:
+        eager = getattr(eager, name)(*args, **kwargs)
+
+    after = apply_schema(SchemaState.from_dataset(dated_ds), node)
+    assert dict(after.dims) == dict(eager.sizes)
+
+
+@pytest.mark.parametrize(
+    ("boundary", "expected"), [("trim", 3), ("pad", 4), ("exact", 3)]
+)
+def test_coarsen_rounding_follows_the_boundary_kwarg(boundary, expected):
+    # 7 // 2 rounds three ways. ``exact`` would raise at replay rather than produce 3,
+    # so agreeing with ``trim`` here costs nothing: the plan never gets that far.
+    ds = xr.Dataset({"t": ("time", np.arange(7.0))}, coords={"time": np.arange(7)})
+    node = WindowedReduce(
+        name="coarsen",
+        reduce="mean",
+        window={"time": 2},
+        kwargs={"time": 2, "boundary": boundary},
+    )
+    after = apply_schema(SchemaState.from_dataset(ds), node)
+    assert after.dims["time"] == expected
+    if boundary != "exact":  # exact raises on a length it cannot divide
+        assert (
+            after.dims["time"]
+            == ds.coarsen(time=2, boundary=boundary).mean().sizes["time"]
+        )
+
+
+def test_rolling_leaves_every_size_alone(dated_ds):
+    # One output position per input position: ``center``/``min_periods`` change values,
+    # never shape -- which is what makes rolling's dim algebra simpler than groupby's.
+    node = WindowedReduce(name="rolling", reduce="mean", window={"time": 5})
+    after = apply_schema(SchemaState.from_dataset(dated_ds), node)
+    assert dict(after.dims) == dict(dated_ds.sizes)
+    assert after.coords == frozenset(dated_ds.coords)
+
+
+def test_unrecognised_boundary_marks_the_size_unknown():
+    # A future spelling should cost precision, not correctness.
+    ds = xr.Dataset({"t": ("time", np.arange(7.0))}, coords={"time": np.arange(7)})
+    node = WindowedReduce(
+        name="coarsen",
+        reduce="mean",
+        window={"time": 2},
+        kwargs={"time": 2, "boundary": "something-new"},
+    )
+    assert apply_schema(SchemaState.from_dataset(ds), node).dims["time"] is None
+
+
+def test_windowing_an_unknown_size_stays_unknown():
+    unknown = SchemaState(dims={"time": None}, coords={"time"})
+    node = WindowedReduce(
+        name="coarsen", reduce="mean", window={"time": 2}, kwargs={"time": 2}
+    )
+    assert apply_schema(unknown, node).dims["time"] is None
 
 
 def test_scan_leaves_schema_unchanged(ds):
