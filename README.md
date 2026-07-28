@@ -56,12 +56,18 @@ Use `.explain()` to see the optimised plan without running it:
 ```python
 >>> print(ds.plan.mean(dim="lat").mean(dim="lon").isel(time=0).explain())
 plan (3 ops):
-  1. isel(time=0)
-  2. mean(dim='lat')
-  3. mean(dim='lon')
+  1. Select  isel(time=0)
+  2. Reduce  mean(dim='lat')  [consumes={lat}]
+  3. Reduce  mean(dim='lon')  [consumes={lon}]
 ```
 
 The `isel` has been hoisted to the front — that's the reorder that buys the speed-up.
+
+Each line is one operation as `xrexpr` understands it: **what kind** it is, **the calls it
+will replay as**, and in brackets **what the calls don't say** — here, which dimensions
+each reduction removes. A bare `.mean()` shows `consumes=every dim`, and anything `xrexpr`
+does not model shows as `Opaque  ...  [not modelled -- nothing crosses it]`, which is where
+to look when a rewrite you expected didn't happen.
 
 Picking variables out of a dataset moves too, so the work is never done on variables you
 were about to discard:
@@ -69,9 +75,25 @@ were about to discard:
 ```python
 >>> print(ds.plan.mean(dim="time")[["temperature"]].explain())
 plan (2 ops):
-  1. [['temperature']]
-  2. mean(dim='time')
+  1. Project  [['temperature']]
+  2. Reduce  mean(dim='time')  [consumes={time}]
 ```
+
+Builder pairs like `groupby(...).mean()` are *one* operation, and selections move in front
+of them as well — the climatology case, where the grouping runs over one latitude instead
+of over all of them and then discarding the rest:
+
+```python
+>>> print(ds.plan.groupby("time.month").mean().isel(lat=0).explain())
+plan (2 ops):
+  1. Select  isel(lat=0)
+  2. GroupedReduce  groupby('time.month').mean()  [time -> month]
+```
+
+`time -> month` is the fact worth knowing about a grouped reduce: the result is indexed by
+a *new* `month` dimension and the original `time` is gone, so a selection on `time` after
+it means something quite different from one before it — and `xrexpr` leaves those where you
+put them.
 
 ## How it optimises
 
@@ -117,7 +139,7 @@ the rechunk named, the rechunk has nothing left to do and disappears:
 ```python
 >>> print(ds.plan.chunk({"time": 100}).isel(time=0).explain())
 plan (1 ops):
-  1. isel(time=0)
+  1. Select  isel(time=0)
 ```
 
 Selecting a *range* keeps the rechunk, and lands on better blocks than the eager order
