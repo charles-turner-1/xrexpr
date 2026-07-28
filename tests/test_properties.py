@@ -151,6 +151,12 @@ def datasets(draw, dated=False):
     has no component to read off an integer coord. It is off by default so the plain
     properties keep the coords they were written against — a ``sel`` label there is an
     ``int``, and shrinking reports one.
+
+    The resolution of the index here is **not pinned**, deliberately: it is whatever the
+    installed pandas produces (``us`` on pandas 3, ``ns`` on pandas 2), so both are
+    exercised across the supported matrix rather than only the newest. That makes
+    :func:`_label` load-bearing — see its docstring for the trap, which was live and
+    invisible until CI ran the older environment.
     """
     ndim = draw(st.integers(min_value=2, max_value=3))
     dims = DIM_NAMES[:ndim]
@@ -162,6 +168,28 @@ def datasets(draw, dated=False):
         # ``resample(time="2D")`` halves it. Both are legal, which is all that is needed.
         coords["time"] = pd.date_range("2000-01-01", periods=sizes[0], freq="D")
     return xr.Dataset({"temperature": (dims, values)}, coords=coords)
+
+
+def _label(value):
+    """A ``sel``-able Python label for one coordinate value.
+
+    ``.item()`` is the obvious spelling and is **wrong for datetimes**, in a way that only
+    shows up on some dependency sets: ``np.datetime64`` unpacks to a ``datetime.datetime``
+    at microsecond resolution but to a bare ``int`` of nanoseconds-since-epoch at
+    nanosecond resolution, because ``datetime`` cannot represent the latter. Which one a
+    ``pd.date_range`` produces depends on the pandas version — pandas 3 gives ``us``,
+    pandas 2 gives ``ns`` — so ``sel(time=946684800000000000)`` reached xarray on the older
+    pinned environment and raised ``KeyError``, while every newer one passed.
+
+    ``pd.Timestamp`` is exact at either resolution and is a label ``sel`` accepts, so it
+    sidesteps the version split rather than pinning around it. Numbers keep ``.item()``,
+    which is what makes a shrunk example report ``lat=0`` rather than ``np.int64(0)``.
+    """
+    return (
+        pd.Timestamp(value)
+        if np.issubdtype(value.dtype, np.datetime64)
+        else value.item()
+    )
 
 
 @st.composite
@@ -183,7 +211,7 @@ def indexers(draw, obj, dim, name):
         values = list(range(size))
         bounds = st.integers(min_value=0, max_value=size)
     else:
-        values = [v.item() for v in obj[dim].values]
+        values = [_label(v) for v in obj[dim].values]
         # a label slice is inclusive of both ends, and needs labels that exist
         bounds = st.sampled_from(values) if values else st.none()
 
