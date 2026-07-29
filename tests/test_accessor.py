@@ -44,6 +44,15 @@ requires_matplotlib = pytest.mark.skipif(
     importlib.util.find_spec("matplotlib") is None, reason="matplotlib is not installed"
 )
 
+#: ``rolling_exp`` is the one opener xarray refuses outright without numbagg (an explicit
+#: ``ImportError``, not a slow fallback), so only its *replay* needs this -- the lowering
+#: half of those tests asserts fine either way. Nothing else in the suite needs numbagg
+#: **installed**; the ``test-nonumbagg`` environment exists because numbagg changes
+#: reduction *results*, not because it gates features.
+requires_numbagg = pytest.mark.skipif(
+    importlib.util.find_spec("numbagg") is None, reason="numbagg is not installed"
+)
+
 
 # A richer dataset than the shared ``conftest.ds``: this module shadows it to add an
 # auxiliary (non-dimension) ``area`` coord, exercising that projection pushdown preserves
@@ -703,8 +712,10 @@ def test_rolling_closer_that_looks_like_a_dim_spec_still_matches_eager(ds):
     "chain",
     [
         # an exponential weighting, not a fixed window -- ``window`` cannot describe it
-        lambda o: o.rolling_exp(time=3).mean(),
-        lambda o: o.rolling_exp(time=3).mean().isel(lat=0),
+        pytest.param(lambda o: o.rolling_exp(time=3).mean(), marks=requires_numbagg),
+        pytest.param(
+            lambda o: o.rolling_exp(time=3).mean().isel(lat=0), marks=requires_numbagg
+        ),
         # a scan wearing a builder's clothes
         lambda o: o.cumulative("time").sum(),
     ],
