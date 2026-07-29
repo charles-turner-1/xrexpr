@@ -583,19 +583,43 @@ def test_projection_past_a_windowed_reduce_is_left_when_the_dim_would_go(dated_d
 def test_projection_pushdown_skips_an_error_from_a_discarded_variable(dated_ds):
     """Pushing a projection down skips work the plan discards — errors included.
 
-    ``elevation`` has no ``time``, and a Dataset ``std("time")`` hands it ``dim=[]``, which
-    xarray then fails on. Eager therefore raises while computing a standard deviation the
-    chain explicitly throws away; the rewrite never computes it. The optimised answer is
-    the better one — see ``docs/roadmap/07-small-wins.md`` §8, which settles this as a
-    deliberate property rather than a divergence to be repaired.
+    ``station`` is a *string* variable, so a Dataset ``std("time")`` raises while reducing
+    it. Eager therefore fails computing a standard deviation the chain explicitly throws
+    away; the rewrite never computes it. The optimised answer is the better one — see
+    ``docs/roadmap/07-small-wins.md`` §8, which settles this as a deliberate property
+    rather than a divergence to be repaired.
 
     Safe because the values cannot move: the rule fires only once the projected variables
     are known to carry the dims the crossed op names, so they reduce identically either
     way, and the sole difference is a discarded variable's error.
     """
-    ds = dated_ds.assign(elevation=(("lat", "lon"), np.zeros((3, 4))))
+    # ------------------------------------------------------------------------------
+    # WHY A *STRING* VARIABLE, AND NOT THE OBVIOUS FLOAT ONE. Read before "simplifying".
+    #
+    # What this test asserts is a fact about *xrexpr*: ``pushdown_projections`` skips work
+    # on a discarded variable, errors included. To assert it we need eager to fail, and any
+    # failure will do -- the failure is a *prop*, not the subject.
+    #
+    # This test used to source that failure from a float variable lacking ``time``: a
+    # Dataset reduce hands such a variable an empty axis set, and ``std``/``var`` blow up on
+    # it. That looks like the natural choice and it is a trap, because **the blow-up is a
+    # numbagg bug, not xarray behaviour** -- numbagg reads ``axis=()`` as ``axis=None`` and
+    # returns a scalar (07-small-wins.md §8 has the full account). Pinning it meant this
+    # test asserted that a third-party bug was *present*: it failed under
+    # ``use_numbagg=False``, and it would fail again the day numbagg fixed it -- in both
+    # cases reporting DID NOT RAISE, as though xrexpr had regressed.
+    #
+    # numpy refusing to ``std`` a ``<U4`` array is xarray/numpy's own semantics and reaches
+    # numbagg not at all -- its dispatch gate requires ``dtype.kind in "uif"``. So the prop
+    # holds still with numbagg present, absent, or fixed. Swapping back to a float variable
+    # re-couples this test to numbagg's release schedule.
+    #
+    # NOTE this changes nothing about the numbagg bug itself, which is not ours to fix and
+    # is still live in this environment -- see EMPTY_AXIS_UNSAFE_REDUCES in test_properties.
+    # ------------------------------------------------------------------------------
+    ds = dated_ds.assign(station=(("lat", "lon"), np.full((3, 4), "buoy")))
 
-    with pytest.raises(ValueError, match="ndim=0"):
+    with pytest.raises(TypeError, match="resolved dtypes"):
         ds.std(dim=["time"])[["temperature"]]
 
     planned = ds.plan.std(dim=["time"])[["temperature"]].collect()

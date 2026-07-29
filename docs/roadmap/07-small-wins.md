@@ -236,14 +236,14 @@ property rather than an accident.
 never computed. Usually that only saves time. Occasionally it also skips an *error*:
 
 ```python
-ds = xr.Dataset({"temperature": (("time", "lat"), ...),   # has time
-                 "elevation":   ("lat", ...)})            # no time
+ds = xr.Dataset({"temperature": (("time", "lat"), ...),    # float, has time
+                 "station":     ("lat", ["alpha", ...])})  # str, no time
 
-ds.std("time")[["temperature"]]                  # ValueError, raised by `elevation`
+ds.std("time")[["temperature"]]                  # TypeError, raised by `station`
 ds.plan.std("time")[["temperature"]].collect()   # succeeds
 ```
 
-**This is the better answer, not a bug.** The projection says outright that `elevation` is
+**This is the better answer, not a bug.** The projection says outright that `station` is
 not wanted; eager computes its standard deviation anyway, purely because it happens to be
 in the Dataset, and falls over doing it. The rewrite computes exactly what was asked for.
 So the optimiser turns a footgun into an answer — a small win, and the kind a plan-then-
@@ -268,15 +268,55 @@ first and third; it may not rely on failures being preserved.
 
 ### What triggers it
 
-- **`std`/`var`.** A Dataset reduce hands `dim=[]` to a variable lacking every dim it
-  named, and those two build a 0-d result while still claiming the variable's dims
-  (`dimensions ('lat',) must have the same length as … ndim=0`). Arguably an upstream bug
-  — `std(dim=[])` should be a no-op — and present in both supported xarray versions.
-  `mean` and the rest simply skip such a variable, so nothing diverges for them.
+- **A string variable.** The example above: numpy will not take a standard deviation of
+  `<U4` data, so a Dataset `std("time")` raises `TypeError: the resolved dtypes are not
+  compatible with add.reduce` while reducing a variable the projection discards. Plain
+  xarray/numpy semantics, owned upstream and stable, which is why the hand-written test
+  uses this trigger.
+
+- **`std`/`var` over an empty axis set — real for us, but the culprit is numbagg.**
+
+  **Corrected (2026-07).** This bullet read "arguably an upstream bug — `std(dim=[])`
+  should be a no-op — present in both supported xarray versions". Wrong three times, and
+  worth restating because it changes how much weight §8 can put on this trigger.
+
+  Every step up to the failure is *correct*. A Dataset reduce is applied per variable, and
+  a variable carrying none of the named dims is reduced over the **empty axis set** — which
+  is exactly how such a variable survives a `ds.mean("time")` untouched.
+  `namedarray.core.reduce` then computes the surviving dims, which for an empty axis set is
+  all of them (`('lat',)`), and finds a 0-d array where a 1-d one was promised
+  (`dimensions ('lat',) must have the same length as … ndim=0`).
+
+  That 0-d array comes from **numbagg**, which reads `axis=()` ("reduce over no axes") as
+  `axis=None` ("reduce over all of them"):
+
+  ```python
+  np.nanstd(a, axis=())         # [0. 0. 0.]   correct, shape preserved
+  numbagg.nanstd(a, axis=())    # 1.0          a scalar
+  ```
+
+  So xarray's error message is xarray *catching* numbagg's mistake, and
+  `xr.set_options(use_numbagg=False)` makes it go away. The right answer is also **zeros,
+  not a no-op**: reducing over nothing is the identity for `sum`/`mean`, but zero for
+  `std`/`var`.
+
+  That is why only these two break, and the reason inverts the old reading.
+  `duck_array_ops._create_nan_agg_method` short-circuits `axis == ()` for every reduce that
+  *is* the identity there (`invariant_0d=True`: `max min sum median prod mean cumsum
+  cumprod`), returning before dispatch. `std`/`var` are excluded **correctly** — the
+  shortcut would be wrong for them — so they are the only two that reach numbagg, and they
+  reach it *because* xarray classified them right. numbagg is equally wrong for
+  `nanmean`/`nansum`/`nanmedian`; the fast path merely masks it.
+
+  **Consequence: this trigger is environment-conditional, not version-conditional.** It is
+  present in any xarray with numbagg installed and absent in any without. We have numbagg
+  because `rolling_exp` needs it (`pyproject.toml`), so it is real for our CI — but a
+  numbagg release could retire it, which is why neither §8's example nor its test depends
+  on it any more.
 - **`weighted`** is the same shape, and the sharpest instance of it: a weighted reduce
   *refuses* a variable lacking a named dim where a plain one merely skips it, so
-  `ds.weighted(w).mean("time")[["temperature"]]` raises eagerly over `elevation` and
-  succeeds once the projection runs first.
+  `ds.weighted(w).mean("time")[["temperature"]]` raises eagerly over a discarded variable
+  lacking `time` and succeeds once the projection runs first.
 
   **Decided (2026-07, W2 PR 9): admitted.** The error-masking argument that had excluded
   `WeightedReduce` from `pushdown_projections` is exactly what this section retires, and

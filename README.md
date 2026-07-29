@@ -166,19 +166,19 @@ InvalidExpressionError: isel() indexes ['lon'], which mean() has already reduced
 *not* walking into an error eager evaluation walks straight into:
 
 ```python
-ds  # temperature(time, lat, lon) and elevation(lat, lon) -- no time on elevation
+ds  # temperature(time, lat, lon) float, and station(lat, lon) -- strings, no time
 
-ds.std("time")[["temperature"]]                  # ValueError, raised by `elevation`
+ds.std("time")[["temperature"]]                  # TypeError, raised by `station`
 ds.plan.std("time")[["temperature"]].collect()   # succeeds
 ```
 
-The projection says outright that `elevation` isn't wanted. Eager computes its standard
+The projection says outright that `station` isn't wanted. Eager computes its standard
 deviation anyway — purely because it happens to be in the Dataset — and falls over doing
-it, because a Dataset-level reduce hands `dim=[]` to a variable that lacks `time` and
-xarray refuses that. The plan drops `elevation` before the reduction runs, so the failure
-never happens. `weighted` chains get the same treatment, and there the eager failure is
-even easier to hit: a weighted reduce *refuses* a variable lacking the reduced dim, where
-a plain `.mean("time")` merely wastes effort on it.
+it, because numpy has no standard deviation for strings. The plan drops `station` before
+the reduction runs, so the failure never happens. `weighted` chains get the same
+treatment, and there the eager failure is even easier to hit: a weighted reduce *refuses*
+a variable lacking the reduced dim, where a plain `.mean("time")` merely wastes effort
+on it.
 
 This isn't the optimiser playing fast and loose. The invariant, stated precisely:
 
