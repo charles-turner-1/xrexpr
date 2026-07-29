@@ -129,7 +129,8 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
       is finally cashed in against a schema that is exact;
     - :class:`~xrexpr.ir.Select` removes the dims it drops (scalar indices) and
       *resizes* the dims it keeps (slice/sequence indices);
-    - :class:`~xrexpr.ir.Project` restricts the variables, leaving dims alone;
+    - :class:`~xrexpr.ir.Project` restricts the variables, and drops any dim the survivors
+      no longer span — xarray orphans it rather than keeping it empty;
     - :class:`~xrexpr.ir.GroupedReduce` removes its ``group_dim`` and any extra
       ``consumes``, and mints ``new_dim`` — of *unknown* size, since the group count is a
       fact about coordinate values — onto every variable;
@@ -181,6 +182,20 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
                     dims[dim] = _selected_size(select.name, index, dims[dim])
         case Project(variables=variables):
             data_vars = {v: data_vars[v] for v in variables if v in data_vars}
+            if all(v in schema.data_vars for v in variables):
+                # A projection **orphans** dims, which this arm used to miss: xarray keeps
+                # only the dims the selected variables span, so ``ds[["elevation"]]``
+                # (``lat``, ``lon``) drops ``time`` outright rather than leaving it empty.
+                # Coordinates do not keep one alive either -- an aux coord over a dropped
+                # dim goes with it (verified against xarray 2026.7.0), so the ``removed``
+                # tail below handles coords with no extra work.
+                #
+                # Guarded on every projected name being a *tracked* variable: a name this
+                # layer doesn't know (a coord, or something an unmodelled op introduced)
+                # would make the union an under-report, and under-reporting dims is the
+                # unsafe direction. Unknown name → leave ``dims`` alone, as before.
+                spanned = {d for var_dims in data_vars.values() for d in var_dims}
+                dims = {d: size for d, size in dims.items() if d in spanned}
         case GroupedReduce() as grouped:
             for dim in (grouped.group_dim, *grouped.consumes):
                 dims.pop(dim, None)

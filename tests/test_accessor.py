@@ -24,6 +24,7 @@ from xrexpr.ir import (
     ContextOpen,
     GroupedReduce,
     Opaque,
+    Project,
     Reduce,
     Select,
     WeightedReduce,
@@ -494,6 +495,133 @@ def test_select_across_a_fused_reduce_matches_eager(dated_ds, chain):
     # Whether the select moved or not, the answer must not change -- which is the only
     # thing that makes "hop when disjoint, leave otherwise" worth anything.
     assert_equal(chain(dated_ds.plan).collect(), chain(dated_ds))
+
+
+def test_projection_is_pushed_in_front_of_the_grouping(dated_ds):
+    # W2 PR 7: aggregate one variable instead of two and then discarding one.
+    ds = dated_ds.assign(elevation=(("lat", "lon"), np.zeros((3, 4))))
+    chain = ds.plan.groupby("time.month").mean()[["temperature"]]
+
+    assert [c.name for c in emit(chain._optimized())] == [
+        "__getitem__",
+        "groupby",
+        "mean",
+    ]
+    assert_equal(chain.collect(), ds.groupby("time.month").mean()[["temperature"]])
+
+
+@pytest.mark.parametrize(
+    "chain",
+    [
+        lambda o: o.groupby("time.month").mean()[["temperature"]],
+        lambda o: o.resample(time="2D").mean()[["temperature"]],
+        lambda o: o.rolling(time=3).mean()[["temperature"]],
+        lambda o: o.coarsen(time=2, boundary="trim").mean()[["temperature"]],
+        # immovable: ``elevation`` has no ``time``, so projecting first would drop the
+        # ``time`` coord and the fused op would raise
+        lambda o: o.groupby("time.month").mean()[["elevation"]],
+        lambda o: o.rolling(time=3).mean()[["elevation"]],
+        # both variables kept: ``time`` survives the projection via ``temperature``
+        lambda o: o.groupby("time.month").mean()[["temperature", "elevation"]],
+        # projection and select both crossing
+        lambda o: o.groupby("time.month").mean().isel(lat=0)[["temperature"]],
+    ],
+)
+def test_projection_across_a_fused_reduce_matches_eager(dated_ds, chain):
+    ds = dated_ds.assign(elevation=(("lat", "lon"), np.zeros((3, 4))))
+    assert_equal(chain(ds.plan).collect(), chain(ds))
+
+
+def test_projection_past_a_windowed_reduce_is_left_when_the_dim_would_go(dated_ds):
+    # Pinned end to end because the failure would be loud rather than wrong: projecting
+    # first drops the ``time`` coord (no surviving variable uses it) and ``rolling``
+    # raises ``Window dimensions ('time',) not found``. The rule must not create that.
+    ds = dated_ds.assign(elevation=(("lat", "lon"), np.zeros((3, 4))))
+    chain = ds.plan.rolling(time=3).mean()[["elevation"]]
+
+    assert [c.name for c in emit(chain._optimized())] == [
+        "rolling",
+        "mean",
+        "__getitem__",
+    ]
+    assert_equal(chain.collect(), ds.rolling(time=3).mean()[["elevation"]])
+
+
+def test_projection_pushdown_skips_an_error_from_a_discarded_variable(dated_ds):
+    """Pushing a projection down skips work the plan discards — errors included.
+
+    ``station`` is a *string* variable, so a Dataset ``std("time")`` raises while reducing
+    it. Eager therefore fails computing a standard deviation the chain explicitly throws
+    away; the rewrite never computes it. The optimised answer is the better one — see
+    ``docs/roadmap/07-small-wins.md`` §8, which settles this as a deliberate property
+    rather than a divergence to be repaired.
+
+    Safe because the values cannot move: the rule fires only once the projected variables
+    are known to carry the dims the crossed op names, so they reduce identically either
+    way, and the sole difference is a discarded variable's error.
+    """
+    # ------------------------------------------------------------------------------
+    # WHY A *STRING* VARIABLE, AND NOT THE OBVIOUS FLOAT ONE. Read before "simplifying".
+    #
+    # What this test asserts is a fact about *xrexpr*: ``pushdown_projections`` skips work
+    # on a discarded variable, errors included. To assert it we need eager to fail, and any
+    # failure will do -- the failure is a *prop*, not the subject.
+    #
+    # This test used to source that failure from a float variable lacking ``time``: a
+    # Dataset reduce hands such a variable an empty axis set, and ``std``/``var`` blow up on
+    # it. That looks like the natural choice and it is a trap, because **the blow-up is a
+    # numbagg bug, not xarray behaviour** -- numbagg reads ``axis=()`` as ``axis=None`` and
+    # returns a scalar (07-small-wins.md §8 has the full account). Pinning it meant this
+    # test asserted that a third-party bug was *present*: it failed under
+    # ``use_numbagg=False``, and it would fail again the day numbagg fixed it -- in both
+    # cases reporting DID NOT RAISE, as though xrexpr had regressed.
+    #
+    # numpy refusing to ``std`` a ``<U4`` array is xarray/numpy's own semantics and reaches
+    # numbagg not at all -- its dispatch gate requires ``dtype.kind in "uif"``. So the prop
+    # holds still with numbagg present, absent, or fixed. Swapping back to a float variable
+    # re-couples this test to numbagg's release schedule.
+    #
+    # NOTE this changes nothing about the numbagg bug itself, which is not ours to fix and
+    # is still live in this environment -- see EMPTY_AXIS_UNSAFE_REDUCES in test_properties.
+    # ------------------------------------------------------------------------------
+    ds = dated_ds.assign(station=(("lat", "lon"), np.full((3, 4), "buoy")))
+
+    with pytest.raises(TypeError, match="resolved dtypes"):
+        ds.std(dim=["time"])[["temperature"]]
+
+    planned = ds.plan.std(dim=["time"])[["temperature"]].collect()
+    # the reference is the same chain with the discarded variable simply absent
+    assert_equal(planned, ds[["temperature"]].std(dim=["time"]))
+
+
+def test_projection_pushdown_introduces_no_error_of_its_own(dated_ds):
+    # The other half of §8's contract: skipping a discarded variable's failure is allowed,
+    # inventing one is not. ``mean`` skips a variable lacking the dim rather than refusing,
+    # so both orders succeed and must agree exactly.
+    ds = dated_ds.assign(elevation=(("lat", "lon"), np.zeros((3, 4))))
+    assert_equal(
+        ds.plan.mean(dim=["time"])[["temperature"]].collect(),
+        ds.mean(dim=["time"])[["temperature"]],
+    )
+
+
+def test_projection_past_a_weighted_reduce_is_left(dated_ds):
+    # Pins the *current* behaviour rather than defending it. ``WeightedReduce`` is absent
+    # from this rule's match, so nothing crosses it and both orders raise alike. The
+    # argument that originally justified the exclusion -- that hopping the projection in
+    # front would mask ``elevation``'s error -- has since been retired: by the test above
+    # and ``07-small-wins.md`` §8, skipping a discarded variable's failure is the *better*
+    # answer. Whether weighted should now join the rule is an open decision recorded in §8;
+    # a projection, unlike a select, never has to subset the weights.
+    ds = dated_ds.assign(elevation=(("lat", "lon"), np.zeros((3, 4))))
+    weights = ds["area"]
+    chain = ds.plan.weighted(weights).mean("time")[["temperature"]]
+
+    assert [type(n) for n in chain._optimized()] == [WeightedReduce, Project]
+    with pytest.raises(ValueError, match="do not exist"):
+        chain.collect()
+    with pytest.raises(ValueError, match="do not exist"):
+        ds.weighted(weights).mean("time")[["temperature"]]
 
 
 def test_select_on_a_consumed_group_dim_still_raises_from_xarray(dated_ds):

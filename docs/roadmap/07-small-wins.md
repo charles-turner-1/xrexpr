@@ -138,6 +138,24 @@ PR that lands the feature, or immediately after:
 | W2 phase 1 | assert `emit(to_lower_ir(p))` replays equal to eager, and that `to_lower_ir` is idempotent, over the existing generated chains |
 | W3 | assert rewrites survive unknown dim sizes |
 | W2 PRs 3–5 | ~~add `groupby`/`resample`/`rolling`/`coarsen`/`weighted` builder chains~~ — **paid in the PR after W2 PR 5** (see below) |
+| W2 PR 7 | ~~multi-variable datasets and `__getitem__` projections~~ — **paid in W2 PR 7** (see below) |
+
+> **Paid (2026-07) in W2 PR 7, having first been measured.** Instrumenting
+> `pushdown_projections` over 5000 generated chains fired it **0 times**: `_calls` never
+> drew `__getitem__`, and `datasets()` built a single variable, so even a projection would
+> have been vacuous — the rule's whole question is whether the *projected subset* still
+> carries the dims the crossed op names, which needs a variable that lacks one. The gap had
+> been open since `pushdown_projections` landed (#32); PR 7's fused arms only inherited it.
+>
+> `datasets()` now builds a second variable over a proper subset of the dims (the
+> `elevation(lat, lon)` shape the hand-written fixtures use) and `_calls` draws list-form
+> projections. The rule fires on **10.7%** of generated chains. List form only: a bare name
+> yields a `DataArray`, whose downstream algebra is a different thing and whose accessor
+> does not exist yet (§5).
+>
+> It paid for itself immediately — see §8, and the corrected `Project` arm in
+> `apply_schema` (a projection *orphans* dims, which that arm used to miss, and a
+> hand-written test had encoded the wrong behaviour).
 
 > **Paid (2026-07), one PR late and in one go.** Deferred when W2 PR 5 landed, because PRs
 > 3, 4 and 5 had each left it and there was no later fused node to re-pledge it against;
@@ -207,3 +225,108 @@ like any other. That is a real latent bug, not just a generator limitation.
 The invariant asserted is always the same and is the project's crown jewel:
 `ds.plan.<chain>.collect()` equals the eager chain, for generated datasets and
 chains, plus idempotence of `optimize`.
+
+## 8. Projection pushdown eliminates discarded work — errors included
+
+Found by the property widening in §7 (2026-07, during W2 PR 7). Raised as a possible
+divergence, **settled as a deliberate and desirable one**, and specified here so it is a
+property rather than an accident.
+
+`pushdown_projections` moves a projection earlier, so variables the plan throws away are
+never computed. Usually that only saves time. Occasionally it also skips an *error*:
+
+```python
+ds = xr.Dataset({"temperature": (("time", "lat"), ...),    # float, has time
+                 "station":     ("lat", ["alpha", ...])})  # str, no time
+
+ds.std("time")[["temperature"]]                  # TypeError, raised by `station`
+ds.plan.std("time")[["temperature"]].collect()   # succeeds
+```
+
+**This is the better answer, not a bug.** The projection says outright that `station` is
+not wanted; eager computes its standard deviation anyway, purely because it happens to be
+in the Dataset, and falls over doing it. The rewrite computes exactly what was asked for.
+So the optimiser turns a footgun into an answer — a small win, and the kind a plan-then-
+execute design is *for*.
+
+What makes it safe rather than merely convenient is that the values can't move. The rule
+only fires once the guard has established that the projected variables carry the dims the
+crossed op names, so the surviving variables are reduced identically either way; the sole
+observable difference is whether a discarded variable raised on the way. Verified against
+evaluation, and pinned by `test_projection_pushdown_skips_an_error_from_a_discarded_variable`.
+
+### The contract, sharpened
+
+The crown-jewel invariant is usually stated as *optimised equals eager*. Strictly it is:
+
+> `optimize` preserves the **values** of everything the plan asks for. It may additionally
+> avoid an error raised by a computation whose result the plan discards. It may never
+> change a value, nor introduce an error.
+
+Only `pushdown_projections` exercises the middle clause today. A new rule may rely on the
+first and third; it may not rely on failures being preserved.
+
+### What triggers it
+
+- **A string variable.** The example above: numpy will not take a standard deviation of
+  `<U4` data, so a Dataset `std("time")` raises `TypeError: the resolved dtypes are not
+  compatible with add.reduce` while reducing a variable the projection discards. Plain
+  xarray/numpy semantics, owned upstream and stable, which is why the hand-written test
+  uses this trigger.
+
+- **`std`/`var` over an empty axis set — real for us, but the culprit is numbagg.**
+
+  **Corrected (2026-07).** This bullet read "arguably an upstream bug — `std(dim=[])`
+  should be a no-op — present in both supported xarray versions". Wrong three times, and
+  worth restating because it changes how much weight §8 can put on this trigger.
+
+  Every step up to the failure is *correct*. A Dataset reduce is applied per variable, and
+  a variable carrying none of the named dims is reduced over the **empty axis set** — which
+  is exactly how such a variable survives a `ds.mean("time")` untouched.
+  `namedarray.core.reduce` then computes the surviving dims, which for an empty axis set is
+  all of them (`('lat',)`), and finds a 0-d array where a 1-d one was promised
+  (`dimensions ('lat',) must have the same length as … ndim=0`).
+
+  That 0-d array comes from **numbagg**, which reads `axis=()` ("reduce over no axes") as
+  `axis=None` ("reduce over all of them"):
+
+  ```python
+  np.nanstd(a, axis=())         # [0. 0. 0.]   correct, shape preserved
+  numbagg.nanstd(a, axis=())    # 1.0          a scalar
+  ```
+
+  So xarray's error message is xarray *catching* numbagg's mistake, and
+  `xr.set_options(use_numbagg=False)` makes it go away. The right answer is also **zeros,
+  not a no-op**: reducing over nothing is the identity for `sum`/`mean`, but zero for
+  `std`/`var`.
+
+  That is why only these two break, and the reason inverts the old reading.
+  `duck_array_ops._create_nan_agg_method` short-circuits `axis == ()` for every reduce that
+  *is* the identity there (`invariant_0d=True`: `max min sum median prod mean cumsum
+  cumprod`), returning before dispatch. `std`/`var` are excluded **correctly** — the
+  shortcut would be wrong for them — so they are the only two that reach numbagg, and they
+  reach it *because* xarray classified them right. numbagg is equally wrong for
+  `nanmean`/`nansum`/`nanmedian`; the fast path merely masks it.
+
+  **Consequence: this trigger is environment-conditional, not version-conditional.** It is
+  present in any xarray with numbagg installed and absent in any without. We have numbagg
+  because `rolling_exp` needs it (`pyproject.toml`), so it is real for our CI — but a
+  numbagg release could retire it, which is why neither §8's example nor its test depends
+  on it any more.
+- **`weighted`** would be the same shape: a weighted reduce refuses a variable lacking a
+  named dim where a plain one skips it. `WeightedReduce` is currently excluded from
+  `pushdown_projections` (W2 PR 7) partly on the error-masking argument this section has
+  now retired. **Open question, worth its own decision:** a projection does not have to
+  subset the weights — that argument belongs to the *select* rule
+  ([`02-lowering.md`](./02-lowering.md) §8.1) — so with §8 settled there may be no reason
+  left to exclude it, and grouped/windowed chains ending in a projection would optimise
+  where weighted ones still do not.
+
+### A note on the property suite
+
+`test_properties.py` asserts `optimised == eager`, which cannot express "eager raises and
+that is fine". Its generator therefore filters the `std`/`var` trigger
+(`EMPTY_AXIS_UNSAFE_REDUCES`) — excluding chains whose *eager reference* is broken, not
+hiding anything about the optimiser. The behaviour itself is pinned by the hand-written
+test named above. Should the property ever be widened to cover it, the assertion has to
+become the sharpened contract, not the equality.

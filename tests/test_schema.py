@@ -531,11 +531,26 @@ def test_scalar_select_strips_the_dim_from_every_variable(ds):
     }
 
 
-def test_project_restricts_variables_but_not_dims_or_coords(ds):
-    # xarray's ``ds[[...]]`` keeps coords and indexes; only the variables narrow
+def test_project_drops_the_dims_the_survivors_no_longer_span(ds):
+    # This test used to assert ``after.dims == schema.dims`` -- that a projection narrows
+    # only the variables. It doesn't: ``elevation`` has no ``time``, and xarray drops an
+    # orphaned dim outright rather than keeping it empty. Corrected against evaluation,
+    # and found by the property suite once its generated datasets grew a second variable.
     schema = SchemaState.from_dataset(ds)
     after = apply_schema(schema, Project(name="__getitem__", variables=("elevation",)))
+    eager = ds[["elevation"]]
+
     assert after.data_vars == {"elevation": ("lat", "lon")}
+    assert after.dim_names == frozenset(eager.sizes) == {"lat", "lon"}
+    assert after.coords <= frozenset(eager.coords)
+
+
+def test_project_keeping_every_dim_leaves_the_schema_alone(ds):
+    # The other side of it: ``temperature`` spans every dim, so nothing is orphaned.
+    schema = SchemaState.from_dataset(ds)
+    after = apply_schema(
+        schema, Project(name="__getitem__", variables=("temperature",))
+    )
     assert after.dims == schema.dims
     assert after.coords == schema.coords
 
@@ -544,6 +559,15 @@ def test_project_of_an_unknown_name_yields_nothing_known(ds):
     schema = SchemaState.from_dataset(ds)
     after = apply_schema(schema, Project(name="__getitem__", variables=("nope",)))
     assert after.data_vars == {}
+
+
+def test_project_of_an_unknown_name_leaves_dims_alone(ds):
+    # The guard on the arm: an untracked name (a coord, or something an unmodelled op
+    # introduced) makes the spanned-dims union an *under*-report, which is the unsafe
+    # direction. Unknown name -> keep every dim, as before.
+    schema = SchemaState.from_dataset(ds)
+    after = apply_schema(schema, Project(name="__getitem__", variables=("nope",)))
+    assert after.dims == schema.dims
 
 
 def test_var_dims_unions_known_names(ds):
