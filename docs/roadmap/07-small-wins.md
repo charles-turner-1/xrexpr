@@ -171,6 +171,17 @@ PR that lands the feature, or immediately after:
 > - **The size-exactness property cannot be widened**, and shouldn't be: a fused node is
 >   entitled to answer "unknown", which is what W3 built `int | None` for. It keeps the
 >   plain generator.
+>
+>   > **Too broad, on review.** True of `GroupedReduce` (mints `None`) and
+>   > `WeightedReduce` (`None` for surviving weight dims), but **not** of
+>   > `WindowedReduce`, which computes its sizes *exactly* via `_windowed_size`. So
+>   > rolling/coarsen chains are size-exact today and excluded from the only property that
+>   > would prove it. The narrowing is on the wrong axis: the property should assert
+>   > exactness **wherever the schema claims to know** — compare the entries that are not
+>   > `None` — rather than restricting the generator by chain kind. That covers the
+>   > windowed nodes for free and needs no revisiting when a node later becomes exact. Not
+>   > done here: it is its own change, and it carries its own risk of discovering that some
+>   > node is less exact than believed.
 > - **The tracked-schema property silently assumed no unmodelled op.** True by accident
 >   while the generator produced none; an unfusable builder pair is an `Opaque`, past which
 >   `apply_schema` is documented to be a guess (`optimize._trusted_prefix`). The assumption
@@ -180,6 +191,31 @@ PR that lands the feature, or immediately after:
 >   builders produce. Both are xarray/numpy limitations, now filtered in one place with the
 >   mapping written down: `median` of a zero-size non-float array raises where a float one
 >   answers NaN, and the *windowed* builders' kernels are float-only on bool.
+>
+> **A fourth, found reviewing the above (2026-07) and fixed in the follow-up.** The
+> per-group **map** case — a grouped closer naming dims that *exclude* the group dim, the
+> one shape lowering deliberately refuses to fuse (`02-lowering.md` §5.1) — was reachable
+> through `groupby` alone. `_closer_dims` drew resample's closer dims from the group dim
+> only, so every generated resample pair aggregated, and the `resample` arm of the
+> anti-vacuity test's `len(lowered) == 1 or kind in {...}` escape was dead code. Confirmed
+> by the `event()` shares before the fix: groupby ~12% `opaque pair`, resample **0%**.
+>
+> It matters because resample reaches the fusion decision by its *own* route —
+> `_grouper_dims` filters `_RESAMPLE_OPTION_KWARGS` out of the kwargs rather than reading
+> `args[0]` as `groupby` does — so a change that made it wrongly infer a group dim would
+> fuse a map into an aggregation and return the wrong shape, with nothing drawing the case.
+> `_closer_dims` now offers every dim to both grouped kinds; both report a nonzero
+> `opaque pair` share.
+>
+> **Forward note.** If the map case is ever modelled (as `GroupedMap` — spec'd in
+> [`02-lowering.md`](./02-lowering.md) §5.6, deferred), the size property above must be
+> reformulated *before* that lands, not after. The tracked-schema property compares dim
+> **names** only (`set(schema.dims) == set(result.sizes)`), and the size property never
+> sees builder chains — so a map arm that cribbed `GroupedReduce`'s size intuition and
+> gave the group dim the group count instead of its original length would be caught by
+> nothing: same names, same replayed data, and a v1 node firing no rules changes nothing
+> observable. Only the wrong size would sit in the schema, feeding every consumer
+> downstream.
 
 One narrowing has no workstream and should get one: `.reduce` is excluded
 (`test_properties.py:28-30`) because its first positional argument is a *function*, which
