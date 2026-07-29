@@ -565,16 +565,16 @@ def _weighted(
         # the rewrite the variant exists to block: hopping this left would run the
         # weighted mean over one latitude with the *weights* left un-subset
         lambda: _node("isel", time=0),
-        lambda: _node("__getitem__", ["temperature"]),
         lambda: _node("chunk", {"time": 2}),
     ],
 )
-def test_no_rule_fires_across_a_weighted_reduce(schema, trailing):
-    # ``WeightedReduce`` carries no novel *dim* obstacle -- ``consumes`` is a plain
-    # reduce's -- so lowered to a ``Reduce`` it would be indistinguishable from one and
-    # ``pushdown_selects`` would match it. It is a separate variant precisely so no rule
-    # can. Subsetting the weights alongside is a data-touching rewrite with its own
-    # workstream (``docs/roadmap/02-lowering.md`` §8.1).
+def test_no_select_or_rechunk_crosses_a_weighted_reduce(schema, trailing):
+    # ``WeightedReduce``'s ``consumes`` is exactly a plain reduce's, so lowered to a
+    # ``Reduce`` it would be indistinguishable from one and ``pushdown_selects`` would
+    # match it. It is a separate variant precisely so no select can. Subsetting the weights
+    # alongside is a data-touching rewrite with its own workstream (§8.1). A *projection*
+    # does cross it -- see ``test_a_projection_hops_past_a_weighted_reduce`` -- because it
+    # discards variables instead of subsetting them, so the weights need no rewriting.
     plan = [_weighted(), trailing()]
     assert optimize(plan, schema) == plan
 
@@ -599,17 +599,19 @@ def test_a_bare_weighted_closer_is_left_alone_too(schema):
 
 
 def test_ops_after_a_weighted_reduce_are_still_optimised(schema):
-    # The payoff for modelling a node that gets no rules of its own: lowering opaques only
-    # the *pair*, so the plan past it is inside the trusted prefix and rewrites normally --
-    # here the projection hops past the trailing reduce (§8.1's closing claim). Under the
-    # accessor's barrier everything from ``weighted`` onward was opaque forever.
+    # The payoff for modelling the pair as one node: lowering opaques only the *pair*, so
+    # the plan past it is inside the trusted prefix and rewrites normally (§8.1's closing
+    # claim). Under the accessor's barrier everything from ``weighted`` onward was opaque
+    # forever. Since W2 PR 9 the projection does not stop at the trailing reduce either --
+    # ``temperature`` carries both the consumed and the weight dims, so it reaches the front
+    # and the weighted mean itself runs over one variable instead of two.
     plan = [
         _weighted(consumes=frozenset({"lat"})),
         _node("mean", "time"),
         _node("__getitem__", ["temperature"]),
     ]
     out = optimize(plan, schema)
-    assert [type(n).__name__ for n in out] == ["WeightedReduce", "Project", "Reduce"]
+    assert [type(n).__name__ for n in out] == ["Project", "WeightedReduce", "Reduce"]
 
 
 # --- select pushdown past the fused reduces (W2 PR 6) ---------------------------------
@@ -766,17 +768,57 @@ def test_projection_needed_set_excludes_the_minted_dim(schema):
     assert [type(n).__name__ for n in out] == ["Project", "GroupedReduce"]
 
 
-def test_no_projection_hops_past_a_weighted_reduce(schema):
-    # Pinned on the narrower ground the docstring now states: a weighted reduce is simply
-    # not modelled here yet, so ``dim_effect`` gives it the conservative answer and nothing
-    # moves. The original reason -- that hopping would mask the error a weighted reduce
-    # raises for a variable lacking the named dim -- is what §8 reclassifies as a win, so
-    # this assertion records a deferral, not a hazard.
+def test_a_projection_hops_past_a_weighted_reduce(schema):
+    # The sharpest instance of §8's contract. As written this chain *raises*: a weighted
+    # reduce maps per variable and ``elevation`` has no ``time``, where a plain
+    # ``.mean("time")`` would merely waste effort on it. Hopping the projection in front
+    # discards ``elevation`` before the reduce sees it, so the value the plan actually asked
+    # for is delivered instead of an error about work it was throwing away.
     plan = [
         _weighted(consumes=frozenset({"time"}), weight_dims=frozenset({"lat"})),
         _node("__getitem__", ["temperature"]),
     ]
+    out = optimize(plan, schema)
+    assert [type(n).__name__ for n in out] == ["Project", "WeightedReduce"]
+
+
+def test_a_projection_is_left_when_it_would_orphan_a_weight_dim(schema):
+    # The guard that makes the hop above sound, and the one case where a weighted reduce's
+    # ``needed`` set is strictly larger than a plain reduce's. ``elevation`` has no ``time``,
+    # so projecting to it drops the ``time`` *coordinate* -- and the weights carry ``time``,
+    # so they would switch from inner-joining against that coord to broadcasting a fresh
+    # one. Verified against xarray: that changes values, not just errors. Drop the
+    # ``weight_dims`` term from ``requires`` and this plan hops, wrongly.
+    plan = [
+        _weighted(consumes=frozenset({"lat"}), weight_dims=frozenset({"time"})),
+        _node("__getitem__", ["elevation"]),
+    ]
     assert optimize(plan, schema) == plan
+
+
+@pytest.mark.parametrize(
+    ("variables", "expected"),
+    [
+        # ``temperature`` spans every dim, so the replayed bare closer reduces the same
+        # ones and no coord can go missing -- a bare closer clears the weight dims too
+        (["temperature"], ["Project", "WeightedReduce"]),
+        # ``elevation`` does not span ``time``, so the bare closer would reduce a different
+        # set of dims after the hop
+        (["elevation"], ["WeightedReduce", "Project"]),
+    ],
+)
+def test_a_bare_weighted_closer_admits_a_projection_spanning_every_dim(
+    schema, variables, expected
+):
+    # ``ALL_DIMS`` needs no ``weight_dims`` term: a bare closer clears every dim, minted
+    # weight dims included, so nothing survives for a coordinate to be missing from. It
+    # also could not have one -- a weight dim the dataset lacks can never be a subset of
+    # the projected variables' dims, so requiring it would refuse every hop.
+    plan = [
+        WeightedReduce(name="weighted", reduce="mean", consumes=ALL_DIMS),
+        _node("__getitem__", variables),
+    ]
+    assert [type(n).__name__ for n in optimize(plan, schema)] == expected
 
 
 def test_projection_and_select_both_cross_a_fused_reduce(schema):
@@ -813,7 +855,15 @@ def test_projection_and_select_both_cross_a_fused_reduce(schema):
         (_node("where", "cond"), None, None),
         (_node("chunk", {"time": 2}), None, None),
         (_node("__getitem__", ["temperature"]), None, None),
-        (_weighted(), None, None),
+        # a select never crosses a weighted reduce (the weights would need subsetting), but
+        # a projection does -- and must supply the weight dims as well as the consumed ones,
+        # or it can orphan the coord the weights align against
+        (_weighted(consumes=frozenset({"time"})), None, frozenset({"time", "lat"})),
+        (
+            WeightedReduce(name="weighted", reduce="mean", consumes=ALL_DIMS),
+            None,
+            ALL_DIMS,
+        ),
     ],
 )
 def test_dim_effect_table(node, blocks, requires):

@@ -136,3 +136,66 @@ on — with `emit` owning payload reconstruction (W2 §7), rules touch semantic 
 which is exactly the clean seam `structural-dispatch-2.md` §5 sets as the precondition.
 The structural work is the payoff either way: each workstream above improves the
 optimisations we can apply whether or not any Rust is ever written.
+
+## Checkpoint — where this stands (2026-07-28)
+
+A status entry, not a revision: nothing below changes a decision above. Written at the
+point where W2 is one PR from complete and the untouched work is all in phase 3.
+
+### Landed on `main`
+
+| WS | What | PRs |
+|---|---|---|
+| **W1** | opaque-context barrier | #75 |
+| **W2 PRs 1–5** | `AllDims`; the `to_lower_ir`/`emit` keystone; `GroupedReduce` + `ContextOpen`; `WindowedReduce`; `WeightedReduce` | #76, #77, #79, #80, #83 |
+| **W3** | `SchemaState` sizes → `int \| None` | #78, #82 |
+
+### In review, as one stacked chain
+
+| PR | What | Item |
+|---|---|---|
+| #84 | property suite generates builder chains | W7 §7 (carries §6 too) |
+| #85 | selects hop past grouped/windowed reduces | W2 PR 6 |
+| #86 | projections hop past grouped/windowed reduces | W2 PR 7 |
+| #87 | the `dim_effect` unification | W2 §11.1 |
+| #88 | projections hop past weighted reduces | W2 §8.1 → "PR 9" |
+
+### Not started
+
+- **W2 PR 8** — `explain()` on the lowered plan. The **last item in §12's sequence**;
+  `accessor.py`'s `explain()` still formats the emitted calls and names PR 8 as the
+  deliberate later change.
+- **W4** — `Rechunk.chunks` is still `frozendict[Hashable, Any]`, and `_pushable_rechunk`'s
+  `isinstance` ladder — §"What remains" item 2 calls it *the last one in the package* — is
+  still there.
+- **W5** — no `Elementwise` in `src/` at all.
+- **W6** — `Scan` still has no dims; its docstring still says the metadata "arrives with the
+  first scan-aware rule".
+- **W8** — gated on *W4 + W2 phase 1*. Phase 1 landed, so **W4 is the only thing holding the
+  gate shut.**
+
+### W7, section by section
+
+Paid: §4 (`AllDims`, promoted to W2 PR 1), §6 (hashability, narrowed not fixed), §7
+(property widening), §8 (written 2026-07, settled, implemented by #88).
+
+Open: §1 (merge adjacent `Project`s), §2 (merge adjacent `Rechunk`s — its own note defers it
+behind W4), §3 (`pushdown_projections` across `Scan`/`Rechunk` — the `Scan` arm needs W6, the
+`Rechunk` arm needs the empirical check the section asks for), §5 (`.plan` for `DataArray`).
+
+### Against this document's own framing
+
+Of the three gaps in §"What remains, honestly": **gap 1 is closed** — grouped ops were
+barriered by W1, then modelled properly by W2, and the trailing barrier is retired. **Gaps 2
+and 3 are untouched**; they are exactly W4 and W5.
+
+By phase: **0 and 1 complete; 2 complete bar PR 8; 3 is where all the untouched work sits.**
+
+One deviation from the sequencing worth recording, since it was not planned: **three of the
+four items parked in phase 4 (gated) were taken ahead of phase 3**, because each became
+answerable in the course of W2 rather than needing its own decision later —
+the dim-effect unification (§11.1, #87) once PR 7 made its shape unambiguous, and the
+weighted **projection** rule (§8.1, #88) once `07-small-wins.md` §8 retired the argument
+that had excluded it. The weighted **select** rule is the one phase-4 item still genuinely
+deferred, and the reason is unchanged: it needs a rewrite that transforms an array rather
+than reordering metadata. The Rust spike remains untouched and gated on W4.

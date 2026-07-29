@@ -443,6 +443,15 @@ def _closer_dims(draw, obj, kind, dim):
         # first, so what each variable ``v`` needs is ``named <= v.dims | w.dims``. The
         # weights here are over ``dim`` alone (see ``_weights``), which makes the safe
         # candidate set the dims *every* variable carries, plus ``dim`` itself.
+        #
+        # Note what this excludes, and why that is not a gap: the raising case is exactly
+        # where ``pushdown_projections`` *skips* an error (W2 PR 9), so eager and optimised
+        # legitimately differ and ``optimised == eager`` could not express it. Same reason
+        # as :data:`EMPTY_AXIS_UNSAFE_REDUCES` -- the chains excluded are the ones whose
+        # eager *reference* is broken. ``07-small-wins.md`` §8 states the sharpened
+        # contract; the behaviour is pinned by hand in ``test_optimize``/``test_accessor``.
+        # The hop itself is still well covered here: it fires on ~21% of generated
+        # weighted-plus-projection plans, all of which assert equality with eager.
         shared = set(obj.sizes)
         for var in obj.data_vars.values():
             shared &= set(var.dims)

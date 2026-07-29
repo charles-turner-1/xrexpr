@@ -17,7 +17,9 @@ Rules (in ``_RULES``):
   expressible — ``groupby("time.month").mean().isel(lat=0)`` groups one latitude instead
   of all of them (W2 PR 6).
 - :func:`pushdown_projections` — hop a variable projection left past a preceding reduce,
-  select or fused reduce, so only the needed variables flow through the plan (#32, W2 PR 7).
+  select or fused reduce, so only the needed variables flow through the plan (#32, W2 PR 7),
+  weighted reduces included (W2 PR 9), where it also disarms a footgun: the discarded
+  variables can no longer raise for lacking a dim they were never asked about.
 - :func:`pushdown_selects_past_rechunks` — hop a select left past a preceding ``chunk``
   so the rechunk moves less data (#57).
 
@@ -66,6 +68,7 @@ from xrexpr.indexers import (
     Scalar,
 )
 from xrexpr.ir import (
+    ALL_DIMS,
     AllDims,
     DimSet,
     GroupedReduce,
@@ -196,8 +199,8 @@ class DimEffect:
 
 #: Nothing crosses this node in either direction — the answer for every kind whose dim
 #: effect the optimiser does not model (``Scan``, whose order matters; ``Opaque``, which
-#: could do anything; ``Rechunk``, which has its own rule; ``WeightedReduce``, held back
-#: deliberately) and for ``Project`` and ``Select``, which the *other* rules handle.
+#: could do anything; ``Rechunk``, which has its own rule) and for ``Project``, which the
+#: *other* rules handle.
 _OPAQUE_EFFECT = DimEffect(blocks=None, requires=None)
 
 
@@ -233,7 +236,31 @@ def dim_effect(node: LoweredOp) -> DimEffect:
             # A window consumes nothing and mints nothing; it can only *resize*, and only
             # the dims it names. So the keys are both answers.
             return DimEffect(blocks=frozenset(window), requires=frozenset(window))
-        case Scan() | Project() | Rechunk() | Opaque() | WeightedReduce():
+        case WeightedReduce(consumes=consumes, weight_dims=weight_dims):
+            # ``blocks=None``: a select still never crosses one, because the hop would
+            # need the *weights* subset alongside -- a data-touching rewrite (§8.1).
+            #
+            # ``requires`` admits projections, and the ``weight_dims`` term is what makes
+            # that sound. A projection drops a dim *coordinate* no surviving variable uses,
+            # and the weights' behaviour toward a dim depends on whether that coord is
+            # there: aligned (inner-joined) if so, freshly broadcast if not. Verified
+            # against xarray 2026.7.0 -- with weights on an uncoordinated ``lat``,
+            # ``ds.weighted(w).mean("time")[["ts"]]`` keeps ``lat``'s coord where the
+            # hopped form has no ``lat`` coord at all, and with weights on a *disjoint*
+            # ``lat`` the two disagree outright. Requiring the projected variables to carry
+            # every weight dim keeps that coord alive, and closes both.
+            match consumes:
+                case AllDims():
+                    # A bare closer clears every dim, minted weight dims included, so
+                    # nothing survives for a coord to be missing from. ``ALL_DIMS`` alone
+                    # is enough -- and it must be, since a weight dim the dataset lacks
+                    # could never be a subset of the projected variables' dims.
+                    return DimEffect(blocks=None, requires=ALL_DIMS)
+                case frozenset() as named:
+                    return DimEffect(blocks=None, requires=named | weight_dims)
+                case _:
+                    assert_never(consumes)
+        case Scan() | Project() | Rechunk() | Opaque():
             return _OPAQUE_EFFECT
         case _:
             assert_never(node)
@@ -617,12 +644,23 @@ def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
     free to skip one raised by discarded work — is written up in
     ``docs/roadmap/07-small-wins.md`` §8.
 
-    :class:`~xrexpr.ir.WeightedReduce` is nonetheless still excluded, now on narrower
-    grounds than when the arm was written: it is simply not modelled here yet. The
-    original argument — that a weighted reduce *refuses* a variable lacking a named dim
-    where a plain one skips it, so the hop would mask an error — is the very thing §8
-    reclassifies as a win, and a projection (unlike a select) never has to subset the
-    weights. Admitting it is an open decision, recorded in §8 rather than taken here.
+    **Weighted reduces are admitted too**, on the strength of that same contract. The
+    argument that once excluded them — a weighted reduce *refuses* a variable lacking a
+    named dim where a plain one merely skips it, so the hop would mask an error — is
+    precisely what §8 reclassifies as a win, and it is the sharpest instance of it:
+    ``ds.plan.weighted(w).mean("time")[["temperature"]]`` raises eagerly over
+    ``elevation``, which the chain discards, and succeeds once the projection runs first.
+    A projection also never has to subset the weights, which is what keeps
+    :func:`pushdown_selects` away from this variant.
+
+    Their ``needed`` set carries an extra term — ``consumes | weight_dims`` — and it is
+    load-bearing rather than decorative. Projecting drops a dim *coordinate* no surviving
+    variable uses, and what the weights do with a dim turns on whether its coord is
+    present: inner-join against it if so, broadcast a fresh one if not. Verified against
+    xarray 2026.7.0, and without the extra term two chains diverge in *values*, not just
+    in errors — see the :func:`dim_effect` arm. With it, a sweep of 512 weighted chains
+    (278 of them hopped) changed no value, no coordinate and raised nothing new; the 36
+    that skipped an error each returned exactly the projection-first answer.
 
     One hop per call, returning the rewritten plan; ``None`` when nothing moves.
     :func:`optimize`'s fixpoint composes hops so a projection walks to the front of the
