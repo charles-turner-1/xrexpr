@@ -162,11 +162,13 @@ versioneer = ">=0.29,<0.30"
 xrexpr = {editable = true, path = "."}
 
 [tool.pixi.environments]
-default = { features = ["dev", "test"], solve-group = "default" }
-test-py310 = { features = ["py310", "test"] }
-test-py311 = { features = ["py311", "test"] }
-test-py312 = { features = ["py312", "test"] }
-test-py313 = { features = ["py313", "test"] }
+default = { features = ["dev", "test", "numbagg"], solve-group = "default" }
+test-py310 = { features = ["py310", "test", "numbagg"] }
+test-py311 = { features = ["py311", "test", "numbagg"] }
+test-py312 = { features = ["py312", "test", "numbagg"] }
+test-py313 = { features = ["py313", "test", "numbagg"] }
+test-numbagg = { features = ["test", "numbagg"] }
+test-nonumbagg = { features = ["test"] }
 
 [tool.pixi.feature.test.dependencies]
 pytest = ">=8.4.2,<9"
@@ -175,8 +177,8 @@ hypothesis = "*"
 # not a runtime dependency: xrexpr must keep working dask-free. The rechunk tests
 # skip themselves without it (``pytest.importorskip``).
 dask = "*"
-# xarray's ``rolling_exp`` refuses to run without it, so without this the one opener
-# lowering deliberately leaves unfused could not be exercised end to end at all.
+
+[tool.pixi.feature.numbagg.dependencies]
 numbagg = "*"
 
 [tool.pixi.feature.test.tasks]
