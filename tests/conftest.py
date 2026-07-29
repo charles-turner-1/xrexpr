@@ -1,7 +1,7 @@
 """Shared fixtures for the test suite.
 
-Both fixtures were previously duplicated across four test modules; they are lifted here
-so every module sees the same canonical dataset — a ``temperature`` variable over
+Both fixtures live here so every module sees the same canonical dataset rather than
+maintaining its own copy — a ``temperature`` variable over
 ``("time", "lat", "lon")`` sized ``(4, 3, 5)`` alongside an ``elevation`` variable over
 ``("lat", "lon")`` that is *missing* ``time``, with integer ``arange`` coords. The
 second, ``time``-less variable is what the projection-pushdown rule must refuse to

@@ -222,3 +222,55 @@ One item not in any workstream, found while writing #89: **the README never ment
 #89 adds a single grouped `explain()` example because the format change needed one; a real
 "grouped and windowed operations" section is still owed, and is a docs job rather than part
 of any workstream above.
+
+## Checkpoint — handover (2026-07-29)
+
+Written at the point where the previous checkpoint's whole "in review" chain (#84–#89)
+has merged, plus three items outside it: the README rewrite (#92, #93 — which pays the
+"grouped and windowed operations" debt recorded above, `README.md:240-264`), the numbagg
+CI split (#95), and the path-dependence comment cleanup (issue #94 — `src/` and `tests/`
+no longer narrate landed sprints; the standing rule is that **a comment may cite the
+roadmap iff the work it points at is still open**). Phases 0–2 are complete; everything
+below is phase 3/4 or a bug. This section is the entry point for whoever picks the work
+up — the specs are implementation-grade, and each had its anchors refreshed against
+`main` on this date.
+
+### One structural fact the open specs predate
+
+The `dim_effect` unification (`02` §11.1, #87) landed after W5/W6 were written, and it
+changes their optimiser side from "write a new rule" to "**answer one dispatch arm**":
+`optimize.dim_effect` (`optimize.py:204`) is a single `match` closed with `assert_never`,
+and both pushdown rules are generic over the node they cross. Each spec now carries a
+dated note (2026-07-29) saying exactly what its arm is. Nothing else in them changed.
+
+### The work, in recommended order
+
+| # | Item | Spec / issue | Why this position |
+|---|---|---|---|
+| 1 | **Fix #90** — `_grouper_dims` fuses non-dim coordinate groupers (`lower.py:331-353`; the `_fuse_grouped` docstring now carries the known-bug note). Fix: refuse unless the grouper's head names a dim, which needs the base schema (or its dim names) plumbed into `to_lower_ir`. Widen `test_properties.py`'s grouper generator (`~:390-395`) to draw non-dim coordinate groupers — the gap that hid it. | issue #90, `02-lowering.md` §5.5's boxed note | A live tracking bug feeding two rewrites; small, and first because everything later trusts the schema. |
+| 2 | **W4 — chunk taxonomy** (`chunks.py`, `Rechunk.chunks: frozendict[Hashable, ChunkSpec]`, `_pushable_rechunk` → exhaustive `match`) | [`04-chunk-taxonomy.md`](./04-chunk-taxonomy.md) | Removes the last `Any` and the last `isinstance` ladder; **the only thing holding the W8 Rust gate shut**; unblocks W7 §2. |
+| 3 | **W6 — `Scan` dims** | [`06-scan-dims.md`](./06-scan-dims.md) (see its 2026-07-29 note) | One PR; also unblocks W7 §3's `Scan` arm — take that in the same `dim_effect` answer if `requires=dims` is chosen. |
+| 4 | **W5 — `Elementwise`** | [`05-elementwise.md`](./05-elementwise.md) (see its 2026-07-29 note) | The biggest coverage win; 2–3 PRs. |
+| 5 | **W7 §1** merge adjacent `Project`s; **§2** merge adjacent `Rechunk`s (after W4); **§3** projections across `Scan`/`Rechunk` (the `Scan` half may already be paid by item 3; the `Rechunk` half needs §3's empirical check); **§5** `.plan` for `DataArray` | [`07-small-wins.md`](./07-small-wins.md) | Independent; slot between the numbered items. |
+| 6 | **Fix #60** — a `DataArray` indexer falls to `classify`'s `_scalar` catch-all (`indexers.py`, last line) and mis-evolves the schema. The issue body specifies scope and the conservative fallback (record such selects `Opaque`). | issue #60 | Older bug, less reachable than #90 (needs a bare reduce downstream), but the same "schema lies" family. |
+| 7 | **`.reduce` mis-tabulation** — `"reduce"` sits in `_REDUCTIONS` (`operations.py:30`) but takes a *function* first, which `_reduce_dims` misreads as a dim spec; the property generators exclude it by name. Either untabulate it (→ `Opaque`) or parse it properly. | issue #96, `07-small-wins.md` §7's closing note | Latent, excluded from generation, no known wrong replay. |
+| 8 | **NumPy-style docstrings** — rewrite the existing docstrings in NumPy style without losing the correctness arguments they carry (move those into `Notes`). | issue #97 | Docs-only; can run alongside anything above. |
+
+Deliberately *not* on the list: the weighted **select** rule (`02` §8.1 — needs the
+package's first data-touching rewrite, and its own design decision), `GroupedMap`
+(`02` §5.6 — modelled spec, waiting on its stated trigger; issue #91), and the W8 Rust
+spike (gated on item 2; spec in [`08-rust-gate.md`](./08-rust-gate.md)).
+
+### Ground rules for the implementer
+
+- Every PR ships green under `pixi run python -m pytest tests -q`, `pixi run mypy`
+  (strict), and `pixi run python -m ruff check src tests`.
+- Behaviour-preserving PRs prove it by the existing suite passing unmodified; each new
+  node kind must answer `dim_effect` and `apply_schema` explicitly (the `assert_never`s
+  make skipping this a type error, not a review comment).
+- Widen `test_properties.py` in (or immediately after) the PR that lands a feature —
+  the schedule is `07-small-wins.md` §7's table.
+- Don't reintroduce sprint narration into comments; cite a roadmap file only for work
+  that is still open.
+- Write **new or edited docstrings in NumPy style** (`Parameters`/`Returns`/`Raises`,
+  correctness arguments under `Notes`) — issue #97 tracks converting the existing ones.

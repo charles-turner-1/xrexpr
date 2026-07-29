@@ -1,9 +1,11 @@
 # W4 — The chunk-spec value sum type
 
+*(Anchors refreshed 2026-07-29 against `main`; the spec itself is unchanged.)*
+
 **Goal:** finish `structural-dispatch-2.md` §3. The indexer half of the value sum type
 shipped in #66–#71; the chunk half is still `Any`: `Rechunk.chunks:
-frozendict[Hashable, Any]` (`ir.py:174`) and the `isinstance` ladder in
-`_pushable_rechunk` (`optimize.py:486`) — the last one in the package. Model it exactly
+frozendict[Hashable, Any]` (`ir.py:241`) and the `isinstance` ladder in
+`_pushable_rechunk` (`optimize.py:753`) — the last one in the package. Model it exactly
 the way `indexers.py` modelled indexer values.
 
 **Size:** 1–2 PRs (taxonomy module + tests first; wiring second — the same split as
@@ -35,7 +37,7 @@ Notes for the implementer:
   mean the same as `-1` in this codepath, collapse `NoChange` into `FullDim` and say
   so in the module docstring. Do not guess — one variant per *behaviour*, not per
   spelling.
-- **Normalise stored values** (the `Mask` lesson, `indexers.py:135-157`): `BlockSeq`
+- **Normalise stored values** (the `Mask` lesson, `indexers.py:136`): `BlockSeq`
   stores `tuple[int, ...]` (from list/tuple/ndarray input, `int()`-coercing numpy
   ints), `SingleSize` stores plain `int`. Every variant must keep the enclosing
   `Rechunk` hashable and equality-sane — add the same equality/hash tests
@@ -54,33 +56,33 @@ Notes for the implementer:
   the module docstring.
 - **Pushability is policy, not a property.** Do *not* put an `is_barrier` flag on the
   variants. The `Rechunk` docstring already states the rule owns that judgement
-  (`ir.py:166-168`), matching `indexers.py`'s "composition is policy" stance
-  (`indexers.py:18-21`). The taxonomy provides the discriminant; `optimize.py` keeps
+  (`ir.py:224-240`), matching `indexers.py`'s "composition is policy" stance
+  (`indexers.py:19-22`). The taxonomy provides the discriminant; `optimize.py` keeps
   the decision.
 
 ## Wiring (second PR)
 
 - **`ir.py`** — `Rechunk.chunks: frozendict[Hashable, ChunkSpec]`; `__post_init__`
   classifies raw values exactly as `Select.__post_init__` classifies indexers
-  (`ir.py:87-99`): `v if isinstance(v, ChunkSpec) else classify_chunk(v)` — note
+  (`ir.py:154`): `v if isinstance(v, ChunkSpec) else classify_chunk(v)` — note
   `ChunkSpec` is a union, so the `isinstance` needs the variant tuple or
   `get_args(ChunkSpec)`; copy whatever `Select` does for `Indexer`.
-- **`schema.py`** — `_chunk_spec` (`schema.py:290`) keeps building the raw mapping;
+- **`schema.py`** — `_chunk_spec` (`schema.py:490`) keeps building the raw mapping;
   classification happens in `Rechunk.__post_init__` so hand-built nodes are normalised
-  too (the `Select` precedent, stated in its docstring `ir.py:72-76`).
+  too (the `Select` precedent, stated in its docstring `ir.py:136-153`).
 - **`optimize.py`** —
-  - `_pushable_rechunk` (`optimize.py:486`) rewrites its per-value check as a `match`
+  - `_pushable_rechunk` (`optimize.py:753`) rewrites its per-value check as a `match`
     over `ChunkSpec` closed with `assert_never`: `BlockSeq` → barrier (`False`),
     every other variant → pushable. This is the policy site, so it gets the
-    exhaustiveness treatment `_compose_indexer` got in #71 (`optimize.py:247-255`):
+    exhaustiveness treatment `_compose_indexer` got in #71 (`optimize.py:370`):
     a seventh variant must fail mypy here until someone decides which side of the
-    line it falls on. Keep the two *args-shape* checks (`optimize.py:499-502` — the
+    line it falls on. Keep the two *args-shape* checks (`optimize.py:768-772` — the
     option-kwargs test and the positional-sequence test) as they are: they are about
     the call header, not the value taxonomy. Say so in the docstring, the same
     deliberate-deviation note `indexer-follow-ups.md` §1 made for the inner helpers.
-  - The rebuild in `pushdown_selects_past_rechunks` (`optimize.py:471-479`) becomes
+  - The rebuild in `pushdown_selects_past_rechunks` (`optimize.py:735-748`) becomes
     `args=({dim: spec.to_raw() for dim, spec in kept.items()},)`, mirroring the merged
-    select rebuild (`optimize.py:169`).
+    select rebuild (`optimize.py:315`).
 
 ## Tests
 

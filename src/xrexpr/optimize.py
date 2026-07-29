@@ -10,29 +10,26 @@ Rules (in ``_RULES``):
 
 - :func:`merge_adjacent_selects` — fold a run of consecutive ``isel``/``isel`` (or
   ``sel``/``sel``) into a single indexer, *composing* rather than overwriting when both
-  select the same dim (PR 7, #33).
+  select the same dim.
 - :func:`pushdown_selects` — hop a select left past **any** node whose dims permit it, so
-  the work behind it runs on less data: past a plain reduce (PR 8, #11), and past a
-  grouped or windowed one, which is what lowering's fused nodes were built to make
-  expressible — ``groupby("time.month").mean().isel(lat=0)`` groups one latitude instead
-  of all of them (W2 PR 6).
+  the work behind it runs on less data: past a plain reduce, and past a grouped or
+  windowed one, which is what lowering's fused nodes exist to make expressible —
+  ``groupby("time.month").mean().isel(lat=0)`` groups one latitude instead of all of them.
 - :func:`pushdown_projections` — hop a variable projection left past a preceding reduce,
-  select or fused reduce, so only the needed variables flow through the plan (#32, W2 PR 7),
-  weighted reduces included (W2 PR 9), where it also disarms a footgun: the discarded
-  variables can no longer raise for lacking a dim they were never asked about.
+  select or fused reduce (weighted included), so only the needed variables flow through
+  the plan. This also disarms a footgun: the discarded variables can no longer raise for
+  lacking a dim they were never asked about.
 - :func:`pushdown_selects_past_rechunks` — hop a select left past a preceding ``chunk``
-  so the rechunk moves less data (#57).
+  so the rechunk moves less data.
 
 Each is a *local, single-step* rewrite; the fixpoint composes them (a select bubbles
 past a whole run of reductions, and newly-adjacent selects then merge).
-See ``docs/pr-plan.md``.
 
 **One dispatch site for dim algebra.** The two pushdown rules above ask different
 questions of the node they cross — what a *select* coming from the right must avoid, and
 what a *projection* going to its left must supply — and both read the answer from
-:func:`dim_effect`, a single ``match`` closed with ``assert_never``. That is
-``docs/roadmap/02-lowering.md`` §11.1's derived ``DimEffect`` view, taken up once its
-stated trigger (the third rule that would otherwise be written twice) arrived.
+:func:`dim_effect`, a single ``match`` closed with ``assert_never``, so a new node kind
+must state its dim effect before either rule will compile against it.
 :func:`pushdown_selects_past_rechunks` deliberately stays outside it: it has no
 disjointness test at all — a rechunk changes no dim, so a select *always* commutes with
 one — and instead rewrites the spec it crosses.
@@ -167,9 +164,9 @@ class DimEffect:
 
     A **derived** view, never stored: :func:`dim_effect` computes it from a node with one
     ``match``, which is the house's "derive, don't store" discipline (``Select.consumes``,
-    ``Project.single``) applied one level up — at the plan rather than the node. It is what
-    ``docs/roadmap/02-lowering.md`` §11.1 sketches and defers; its stated trigger, *the
-    third rule that would otherwise be written twice*, arrived with W2 PR 6.
+    ``Project.single``) applied one level up — at the plan rather than the node. One
+    dispatch site instead of a partial match per rule, so every node kind answers both
+    rules' questions in one place.
 
     Two fields rather than one dim set, because the pushdown rules approach a node from
     **opposite sides** and that turned out to be the load-bearing fact:
@@ -238,7 +235,8 @@ def dim_effect(node: LoweredOp) -> DimEffect:
             return DimEffect(blocks=frozenset(window), requires=frozenset(window))
         case WeightedReduce(consumes=consumes, weight_dims=weight_dims):
             # ``blocks=None``: a select still never crosses one, because the hop would
-            # need the *weights* subset alongside -- a data-touching rewrite (§8.1).
+            # need the *weights* subset alongside -- a data-touching rewrite, deferred
+            # (``docs/roadmap/02-lowering.md`` §8.1).
             #
             # ``requires`` admits projections, and the ``weight_dims`` term is what makes
             # that sound. A projection drops a dim *coordinate* no surviving variable uses,
@@ -295,9 +293,9 @@ def merge_adjacent_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
 
         j = i + 1
         indexer = dict(node.indexer)
-        # ``consumes`` is no longer accumulated here — it is a derived property of the
-        # merged ``indexer`` on :class:`~xrexpr.ir.Select`, so it cannot drift from it
-        # (the desync the flat record risked). ``args`` still mirrors ``indexer`` and is
+        # ``consumes`` is not accumulated here — it is a derived property of the
+        # merged ``indexer`` on :class:`~xrexpr.ir.Select`, so it cannot drift from it.
+        # ``args`` does mirror ``indexer`` and is
         # rebuilt from it below, which stays the merge rule's local responsibility.
         while j < n:
             nxt = nodes[j]
@@ -555,7 +553,8 @@ def pushdown_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
     - **``blocks is None``** — don't know, so don't move. Scans are the salient case:
       ``cumsum("time").isel(time=5)`` is left untouched because order matters there.
 
-    That last distinction is what makes this one rule rather than the two it replaced. A
+    That last distinction is what makes this one generic rule rather than one per node
+    kind. A
     pushed select also cannot disturb window *boundaries* (``02-lowering.md`` §11.2):
     windows run along their own dims independently at each position of the others,
     ``center``/``min_periods`` included, so a select on a **disjoint** dim cannot change
@@ -624,7 +623,7 @@ def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
     exact: this rule already confines itself to the trusted prefix, where the fold is not
     a guess.
 
-    **The fused reduces** (W2 PR 7) join on the same terms, and the guard is if anything
+    **The fused reduces** join on the same terms, and the guard is if anything
     more load-bearing for them: projecting drops a dim coordinate that no surviving
     variable uses, so ``ds[["elevation"]]`` (no ``time``) has no ``time`` *at all*, and
     every one of ``groupby("time.month")``/``resample``/``rolling``/``coarsen`` then raises
@@ -664,7 +663,7 @@ def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
 
     One hop per call, returning the rewritten plan; ``None`` when nothing moves.
     :func:`optimize`'s fixpoint composes hops so a projection walks to the front of the
-    plan (where #43 will eventually turn it into a backend read plan).
+    plan (where issue #43 wants to eventually turn it into a backend read plan).
     """
     if not any(isinstance(node, Project) for node in nodes):
         return None  # nothing to move: don't fold the schema for a projection-free plan

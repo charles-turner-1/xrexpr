@@ -5,11 +5,12 @@ Golden op-list assertions on :func:`~xrexpr.optimize.optimize`. Nodes are built 
 function of the call — so these pin the optimiser without going through the accessor.
 The ``schema`` fixture is passed to :func:`~xrexpr.optimize.optimize`, not to node
 construction: it is the *base* the optimiser folds forward.
-Covers merge-adjacent-selects (PR 7) and select-pushdown past reductions (PR 8): a
+Covers merge-adjacent-selects and select-pushdown past reductions: a
 select hops left past any reduce with disjoint dims, and the two rules compose via the
-fixpoint (bubble-then-merge). Classifying the non-disjoint conflict is PR 9's job.
+fixpoint (bubble-then-merge), with the non-disjoint conflict classified by the validity
+trichotomy (swap / leave / raise).
 
-Projection pushdown (#32) is the variable-level rule, and the one that needs the
+Projection pushdown is the variable-level rule, and the one that needs the
 ``schema`` argument for more than decoration: whether ``[["temperature"]]`` may cross an
 op depends on the dims that variable carries at that point, so the fixture dataset holds
 a second variable (``elevation``) that is *missing* ``time`` — the case that must not be
@@ -317,7 +318,7 @@ def test_projection_and_select_pushdown_compose(schema):
 
 
 def test_scalar_isel_past_rechunk_drops_the_spent_rechunk(schema):
-    # the headline (#57): chunk({time: 100}).isel(time=0) -> isel(time=0). The rechunk's
+    # the headline case: chunk({time: 100}).isel(time=0) -> isel(time=0). The rechunk's
     # only named dim is gone, and chunk({}) would buy nothing but a single-chunk array
     plan = [_node("chunk", {"time": 100}), _node("isel", time=0)]
     out = optimize(plan, schema)
@@ -445,10 +446,10 @@ def test_optimize_is_idempotent_with_a_projection(schema):
     assert optimize(once, schema) == once
 
 
-# --- same-dim composition (#33) ------------------------------------------------
+# --- same-dim composition -------------------------------------------------------
 #
-# The regression these guard: a run of selects used to merge by ``dict.update``, so a
-# second indexer on an already-indexed dim *replaced* the first instead of composing
+# The regression these guard: merging a run of selects by ``dict.update`` would let a
+# second indexer on an already-indexed dim *replace* the first instead of composing
 # with it. The later indexer addresses positions within the earlier one's result, so
 # ``isel(time=slice(100, 1000)).isel(time=slice(10, 20))`` is ``slice(110, 120)``, not
 # ``slice(10, 20)``. Cases with no provable composition must end the run (two nodes)
@@ -541,7 +542,7 @@ def test_composition_survives_pushdown_past_a_reduce(schema):
     assert out[0].indexer == _ix(time=2)
 
 
-# --- weighted reduces: the node that exists to be left alone (#02-lowering §8.1) ------
+# --- weighted reduces: the node no select may cross (02-lowering §8.1) ----------------
 
 
 def _weighted(
@@ -599,10 +600,10 @@ def test_a_bare_weighted_closer_is_left_alone_too(schema):
 
 
 def test_ops_after_a_weighted_reduce_are_still_optimised(schema):
-    # The payoff for modelling the pair as one node: lowering opaques only the *pair*, so
-    # the plan past it is inside the trusted prefix and rewrites normally (§8.1's closing
-    # claim). Under the accessor's barrier everything from ``weighted`` onward was opaque
-    # forever. Since W2 PR 9 the projection does not stop at the trailing reduce either --
+    # The payoff for modelling the pair as one node: a fused plan has no ``Opaque`` at the
+    # weighted step, so the plan past it is inside the trusted prefix and rewrites
+    # normally (a trailing barrier would have left everything from ``weighted`` onward
+    # opaque forever). The projection does not stop at the trailing reduce either --
     # ``temperature`` carries both the consumed and the weight dims, so it reaches the front
     # and the weighted mean itself runs over one variable instead of two.
     plan = [
@@ -614,7 +615,7 @@ def test_ops_after_a_weighted_reduce_are_still_optimised(schema):
     assert [type(n).__name__ for n in out] == ["Project", "WeightedReduce", "Reduce"]
 
 
-# --- select pushdown past the fused reduces (W2 PR 6) ---------------------------------
+# --- select pushdown past the fused reduces -------------------------------------------
 
 
 def _grouped(group_dim="time", new_dim="month", consumes=frozenset()):
@@ -714,7 +715,7 @@ def test_no_select_hops_past_a_weighted_reduce(schema):
     assert optimize(plan, schema) == plan
 
 
-# --- projection pushdown past the fused reduces (W2 PR 7) -----------------------------
+# --- projection pushdown past the fused reduces ---------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -822,14 +823,14 @@ def test_a_bare_weighted_closer_admits_a_projection_spanning_every_dim(
 
 
 def test_projection_and_select_both_cross_a_fused_reduce(schema):
-    # The two PR 6 / PR 7 rules composing through the fixpoint: both end up in front of
-    # the grouping, which is the plan the workstream was aiming at.
+    # The select and projection pushdowns composing through the fixpoint: both end up in
+    # front of the grouping, which is the plan this design was aiming at.
     plan = [_grouped(), _node("isel", lat=0), _node("__getitem__", ["temperature"])]
     out = optimize(plan, schema)
     assert [type(n).__name__ for n in out] == ["Project", "Select", "GroupedReduce"]
 
 
-# --- the derived dim effect (02-lowering §11.1) ---------------------------------------
+# --- the derived dim effect -----------------------------------------------------------
 
 
 @pytest.mark.parametrize(

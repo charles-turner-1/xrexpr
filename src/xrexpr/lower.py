@@ -167,8 +167,12 @@ def _fuse_grouped(opener: ContextOpen, closer: FluentOp) -> GroupedReduce | None
       their own nodes, fused by the two functions below, so they refuse here.
     - **The grouper must be a string** — a dim name (``groupby("lat")``) or a component
       of a dim coordinate (``groupby("time.month")``), from which ``group_dim`` reads
-      off directly. A ``DataArray`` grouper, a non-dim coordinate or a ``Grouper`` object
-      has no single ``group_dim``, so it refuses.
+      off directly. A ``DataArray`` grouper or a ``Grouper`` object has no single
+      ``group_dim``, so it refuses. **Known bug (issue #90):** a *non-dim coordinate*
+      name should refuse on the same grounds, but ``_grouper_dims`` never checks that
+      the grouper's head names a dim, so ``groupby("region")`` fuses with
+      ``group_dim="region"`` and the tracked schema comes out wrong (replay is
+      unaffected — ``emit`` reproduces the same calls).
     - **The closer must be an aggregating reduce.** This is the subtle one, and it is a
       correction to the obvious reading: a grouped reduce over dims that *exclude* the
       group dim is not an aggregation at all. ``ds.groupby("time.month").mean("lat")``

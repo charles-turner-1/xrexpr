@@ -1,11 +1,10 @@
 """The *value* sum type: a closed taxonomy over what a single ``isel``/``sel`` indexer is.
 
-``Select.indexer`` maps each dim to one indexer *value*, and that value was historically
-typed ``Any`` — a sum type in disguise. A value is exactly one of six shapes, and three
-separate call sites used to re-derive that taxonomy by hand (a negated ``isinstance`` in
-``ir.py``, an ``isinstance`` ladder in ``optimize.py``, and an independent walk in
-``schema.py``). This module makes the taxonomy a *type*, so the classification lives in one
-place (:func:`classify`) and the facts that follow from it become methods rather than
+``Select.indexer`` maps each dim to one indexer *value*. A raw indexer value is a sum type
+in disguise — exactly one of six shapes — and without a taxonomy every call site in
+``ir.py``/``optimize.py``/``schema.py`` would have to re-derive those shapes by hand. This
+module makes the taxonomy a *type*, so the classification lives in one place
+(:func:`classify`) and the facts that follow from it become methods rather than
 re-decisions:
 
 - :attr:`drops_dim` — does this indexer remove its dim (a scalar) or keep it? (``ir.py``'s
@@ -60,8 +59,8 @@ class Scalar:
 
         The one question the composer asks of a scalar — ``isel(time=3)`` composes
         arithmetically, ``sel(time="2020")`` cannot — so it lives here rather than being
-        re-decided by ``isinstance`` at each composition site, the same way
-        :attr:`drops_dim` replaced ``ir.py``'s hand-rolled scalar test.
+        re-decided by ``isinstance`` at each composition site, exactly as
+        :attr:`drops_dim` answers the scalar test for ``ir.py``.
         """
         return self.value if _is_int(self.value) else None
 
@@ -167,10 +166,9 @@ class Label:
     *sequence* still sizes exactly, by its own length.
 
     A label *slice* cannot be sized here at all — its extent is a fact about coordinate
-    values — and ``apply_schema`` no longer asks: it answers ``None`` (unknown) for any
+    values — and ``apply_schema`` does not ask: it answers ``None`` (unknown) for any
     slice under a ``sel``, this variant included. :meth:`size`'s keep-the-current-size
-    fallback is what that replaced, and survives only for a caller reaching past the
-    schema layer.
+    fallback exists only for a caller reaching past the schema layer.
     """
 
     value: Any

@@ -183,7 +183,7 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
         case Project(variables=variables):
             data_vars = {v: data_vars[v] for v in variables if v in data_vars}
             if all(v in schema.data_vars for v in variables):
-                # A projection **orphans** dims, which this arm used to miss: xarray keeps
+                # A projection **orphans** dims: xarray keeps
                 # only the dims the selected variables span, so ``ds[["elevation"]]``
                 # (``lat``, ``lon``) drops ``time`` outright rather than leaving it empty.
                 # Coordinates do not keep one alive either -- an aux coord over a dropped
@@ -215,8 +215,8 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
                         # broadcast and alignment -- see ``WeightedReduce``. A weight dim
                         # the dataset lacks is *minted*; one it shares may be *resized*
                         # (misaligned weights inner-join and shrink it). Either way the
-                        # name is known and the extent is not, which is the answer W3's
-                        # ``int | None`` exists for. Under ``ALL_DIMS`` above there is
+                        # name is known and the extent is not, which is the answer the
+                        # ``int | None`` sizes exist for. Under ``ALL_DIMS`` above there is
                         # nothing to do: a bare closer clears the weight dims too.
                         if dim not in dims:
                             minted.add(dim)
@@ -351,7 +351,7 @@ def to_opnode(
 
     A pure function of the call itself: every kind below is settled by the method name
     and the shape of its arguments, so nothing here reads a schema. That is deliberate
-    — the one case that used to need one, a bare ``mean()``, now records the symbolic
+    — the one case that would otherwise need one, a bare ``mean()``, records the symbolic
     :data:`~xrexpr.ir.ALL_DIMS` instead of an eagerly expanded dim set, leaving the
     expansion to a reader whose schema is exact.
 

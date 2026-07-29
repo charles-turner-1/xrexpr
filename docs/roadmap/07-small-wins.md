@@ -14,23 +14,23 @@ guard is load-bearing: `p2` may legally name a *coordinate* (`ds[["tas"]]["lat"]
 works eagerly because projection keeps coords), and dropping `p1` would then change
 which variables exist — when the subset test fails, *leave*, never raise (the chain
 may still be valid eagerly). Shrinks the plan → termination measure
-(`optimize.py:78-86`) fine. Goldens plus equality-vs-eager for the coord-name edge.
+(`optimize.py:112-119`) fine. Goldens plus equality-vs-eager for the coord-name edge.
 
 ## 2. Merge adjacent `Rechunk`s
 
 `chunk({"time": 100}).chunk({"lat": 50})` → one `chunk({"time": 100, "lat": 50})`:
 dask applies later specs per dim on top of earlier ones, so the merged mapping is
 later-wins (`{**r1.chunks, **r2.chunks}`). Fire only when **both** nodes pass
-`_pushable_rechunk` (`optimize.py:486`) *and* both are pure mapping-form (empty
+`_pushable_rechunk` (`optimize.py:753`) *and* both are pure mapping-form (empty
 positional `args`) — a uniform positional spec (`chunk(100)`) rechunks every dim and
 does not compose by dict union. Rebuild `args` from the merged mapping the way
-`pushdown_selects_past_rechunks` does (`optimize.py:471-479`). Do after W4 so the
+`pushdown_selects_past_rechunks` does (`optimize.py:735-748`). Do after W4 so the
 values are `ChunkSpec`s.
 
 ## 3. `pushdown_projections` across `Scan` and `Rechunk`
 
-Two new arms in the `match crossed` (`optimize.py:413-419`), after W6 gives `Scan`
-its dims:
+Two new `requires` answers in `dim_effect` (`optimize.py:204`) — the `match crossed`
+this section predates is unified there — after W6 gives `Scan` its dims:
 
 - `case Scan(dims=dims): needed = dims` — a scan is per-variable, so projecting first
   is safe *provided* the projected variables still carry the scanned dims (else the
@@ -80,13 +80,13 @@ so both kinds convert together.
 
 ## 5. Register `.plan` for `DataArray`
 
-Only `Dataset` has the accessor (`accessor.py:66`). Add
+Only `Dataset` has the accessor (`accessor.py:70`). Add
 `@xr.register_dataarray_accessor("plan")` — the proxy is already almost generic
-(`SchemaState.from_dataset` accepts a `DataArray`, `schema.py:59-70`; replay and
+(`SchemaState.from_dataset` accepts a `DataArray`, `schema.py:89`; replay and
 record don't care). Differences to handle: no `data_vars` (projection rules simply
 never fire — `var_dims` returns `None` for everything, which the rules already treat
 as no-rewrite), and `__getitem__` on a `DataArray` is *indexing*, not projection —
-`_projected_names` (`schema.py:233`) must not classify it as `Project`, so the
+`_projected_names` (`schema.py:430`) must not classify it as `Project`, so the
 DataArray proxy should record `__getitem__` as `Opaque` (or the accessor gets a flag
 the record path consults). Accessor-equality tests over the README-style chains on a
 `DataArray`.
