@@ -272,11 +272,24 @@ NON_FLOAT_EMPTY_UNSAFE_REDUCES = frozenset({"median"})
 #: Reductions that break when a *variable* ends up reducing over **no** dims. A Dataset
 #: reduce passes ``dim=[]`` down to any variable that lacks every dim it named, and
 #: ``std``/``var`` then build a 0-d result while still claiming the variable's dims:
-#: ``ValueError: dimensions ('lat',) must have the same length as ... ndim=0``. Verified on
-#: xarray 2026.7.0 *and* 2025.6.1, so it is not a recent regression; ``mean`` and the rest
-#: are fine, as are ``rolling``/``coarsen`` (which only touch variables having the window
-#: dim). Reachable only with a variable that lacks a dim — i.e. only since the generator
-#: grew one.
+#: ``ValueError: dimensions ('lat',) must have the same length as ... ndim=0``. Reachable
+#: only with a variable that lacks a dim — i.e. only since the generator grew one; and
+#: ``rolling``/``coarsen`` are unaffected (they only touch variables having the window dim).
+#:
+#: **This is a numbagg bug, not an xarray one** (``07-small-wins.md`` §8): numbagg reads
+#: ``axis=()`` as ``axis=None`` and hands back a scalar, and xarray raises on being given
+#: one where an array was promised. ``mean`` and the rest are spared not because xarray
+#: skips such a variable — it does not, they all take the same empty-axis reduce — but
+#: because ``duck_array_ops`` short-circuits ``axis == ()`` for every reduce that *is* the
+#: identity there (``invariant_0d``), returning before dispatch. ``std``/``var`` are
+#: excluded from that shortcut **correctly**, their empty-axis answer being zeros rather
+#: than the input, which is exactly why they are the only two that reach the bug.
+#:
+#: So expect this filter to go **inert**: it is vacuous without numbagg and would be
+#: retired outright by a numbagg fix. Keep it regardless — CI has numbagg (``rolling_exp``
+#: refuses to run without it) and the suite must be green there. Nothing else is coupled to
+#: the bug: the hand-written test named below deliberately sources its eager failure from a
+#: *string* variable instead, so it does not track numbagg's release schedule.
 #:
 #: Filtered because such a chain has **no usable eager reference**, not to hide anything:
 #: the properties below assert ``optimised == eager``, and eager here *raises*. What the
