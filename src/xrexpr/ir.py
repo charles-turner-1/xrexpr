@@ -398,7 +398,7 @@ class WeightedReduce:
     rewrite in this package to transform an *array* rather than reorder metadata, and that
     needs its own workstream).
 
-    A *projection* does cross one (W2 PR 9), which is the asymmetry ``weight_dims`` pays
+    A *projection* does cross one, which is the asymmetry ``weight_dims`` pays
     for: a projection discards variables rather than subsetting them, so the weights need
     no rewriting, but it can orphan a dim **coordinate** — and whether a coord is present
     decides whether the weights align against that dim or broadcast a fresh one, so the
@@ -418,8 +418,9 @@ class WeightedReduce:
       size 2.
 
     So a surviving weight dim is a dim whose *name* is known and whose *extent* is not:
-    :class:`~xrexpr.schema.SchemaState` records it ``None``, the answer W3 added for exactly
-    this. A bare closer clears everything, weight dims included (also verified).
+    :class:`~xrexpr.schema.SchemaState` records its size as ``None``, which is exactly what
+    unknown sizes exist for. A bare closer clears everything, weight dims included (also
+    verified).
 
     Only the dim **names** are kept, not the weights' sizes: sizes would be a guess about
     the post-alignment extent, and the names are what every rule reasons about. The weights

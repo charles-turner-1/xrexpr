@@ -1,8 +1,8 @@
 """Render a lowered plan as text — what :meth:`~xrexpr.accessor.LazyDatasetProxy.explain` returns.
 
-Formats the **lowered nodes** rather than the emitted calls, which is
-``docs/roadmap/02-lowering.md`` §12's last item (PR 8) and what Polars' ``explain`` shows:
-the plan the optimiser actually reasoned about. Three things the call-level form could not
+Formats the **lowered nodes** rather than the emitted calls — the same choice Polars'
+``explain`` makes: show the plan the optimiser actually reasoned about. Three things the
+call-level form could not
 say, each a question users were left to guess at:
 
 - a fused node is **one** op, so ``groupby("time.month").mean()`` reads as the single

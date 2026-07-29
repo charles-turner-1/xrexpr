@@ -13,7 +13,7 @@ the pipeline in ``lower.py``: :func:`~xrexpr.lower.to_lower_ir` translates what 
 written into what it means, :func:`~xrexpr.optimize.optimize` rewrites that (a fixpoint
 of rules, folding the base schema forward itself), :func:`~xrexpr.lower.emit` turns the
 result back into calls, and :meth:`~LazyDatasetProxy._replay` performs them against the
-base dataset. See ``docs/pr-plan.md``.
+base dataset.
 """
 
 from functools import wraps

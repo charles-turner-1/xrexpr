@@ -1,7 +1,7 @@
 # W6 — `Scan` grows its dims; scan-aware select pushdown
 
 **Goal:** deliver the metadata `Scan`'s own docstring promises ("its scanned-dim
-metadata arrives with the first scan-aware rule", `ir.py:112-113`) and the rule that
+metadata arrives with the first scan-aware rule", `ir.py:179-180`) and the rule that
 is that trigger: a select on dims *disjoint* from the scanned dims hops past the scan.
 `cumsum("time").isel(lat=0)` currently doesn't reorder at all — the scan is a full
 barrier — even though `isel(lat=0)` is trivially safe to move in front.
@@ -17,26 +17,45 @@ barrier — even though `isel(lat=0)` is trivially safe to move in front.
 > than expanding it against the record-time schema — which is also the shared `_dim_spec`
 > helper this memo introduces, so it is one change in one place.
 
+> **Updated for the landed pipeline (2026-07-29; anchors refreshed against `main`).**
+> `02` PR 1 *did* land first: `to_opnode` is schema-free and a bare reduce records
+> `ALL_DIMS`, so `Scan.dims` is typed `DimSet` (`frozenset | AllDims`) exactly as
+> `Reduce.consumes` is, and a bare `cumsum()` records `ALL_DIMS` — the optimiser's
+> `_resolve_dims` already resolves the sentinel against the entering schema.
+>
+> The `dim_effect` unification (`02` §11.1) also landed, and it **replaces this memo's
+> `pushdown_selects_past_scans` rule with one dispatch arm**: `Scan` currently takes the
+> conservative `_OPAQUE_EFFECT` (`optimize.py:260-261`), and the whole select rule below
+> is `case Scan(dims=dims): return DimEffect(blocks=dims, requires=..., on_conflict="immovable")`
+> — `pushdown_selects` (`optimize.py:533`) then swaps disjoint selects and leaves
+> intersecting ones, which is exactly the trichotomy stance specified below; nothing is
+> registered in `_RULES`. One decision the arm forces that the old shape didn't:
+> `requires` must be answered in the same breath. `requires=dims` also enables the
+> projection hop across scans — [`07-small-wins.md`](./07-small-wins.md) §3's `Scan` arm,
+> spec'd there as safe on the same rationale as `Reduce`'s — while `requires=None`
+> keeps this PR select-only and leaves §3(a) for later. Either is defensible; decide and
+> say so in the arm's comment.
+
 ## Design
 
 ### `ir.py` — the field
 
-`Scan` (`ir.py:107-122`) gains a stored dim set, mirroring `Reduce.consumes`'s shape
+`Scan` (`ir.py:175-189`) gains a stored dim set, mirroring `Reduce.consumes`'s shape
 (stored, record-time-resolved — but named `dims`, because a scan *keeps* its dims,
 which is the whole point of the variant):
 
 ```python
-dims: frozenset[Hashable] = frozenset()
+dims: DimSet = frozenset()  # ``frozenset | AllDims``, exactly as ``Reduce.consumes``
 ```
 
 with the `frozenset` coercion added to `__post_init__` (copy `Reduce`,
-`ir.py:62-65`). Update the class docstring: the "arrives with the first scan-aware
+`ir.py:128-133`). Update the class docstring: the "arrives with the first scan-aware
 rule" sentence has now paid out.
 
 ### `schema.py` — resolution
 
-`to_opnode`'s scan branch (`schema.py:215-220`) resolves the dim spec with the *same*
-helper reduces use — `_reduce_dims` (`schema.py:255`) already implements exactly the
+`to_opnode`'s scan branch (`schema.py:412`) resolves the dim spec with the *same*
+helper reduces use — `_reduce_dims` (`schema.py:452`) already implements exactly the
 needed convention (kwarg `dim`, else first positional, else every current dim; all
 spellings → one frozenset). Since it now serves both kinds, rename it `_dim_spec` (or
 similar) and update the reduce call site — the docstring's "reductions take `dim`
@@ -49,7 +68,7 @@ is required positional, so the bare case can't arise for it.)
 
 **`apply_schema`'s `diff` size effect** — do this in the same PR since the dims are
 now carried: `diff(dim, n=1)` shrinks `dim` by `n` (`label` kwarg doesn't change the
-size, only which end). Today the `Scan` arm is a blanket `pass` (`schema.py:131`),
+size, only which end). Today the `Scan` arm is a blanket `pass` (`schema.py:230`),
 which is exact for `cumsum`/`cumprod` but wrong for `diff`. Give `Scan` its own arm:
 
 ```python
@@ -68,7 +87,7 @@ carry a known lie once the information exists to correct it.
 ### `optimize.py` — the rule
 
 `pushdown_selects_past_scans`, the same single-hop shape as
-`pushdown_selects_past_rechunks` (`optimize.py:431`):
+`pushdown_selects_past_rechunks` (`optimize.py:698`):
 
 - fires on a `(Scan, Select)` adjacency;
 - **disjoint** — `frozenset(select.indexer).isdisjoint(scan.dims)` — swap: selecting
@@ -76,12 +95,14 @@ carry a known lie once the information exists to correct it.
   independently at each position of the others);
 - **intersecting** — *leave, never raise*: `cumsum("time").isel(time=5)` is valid and
   order-significant, the exact case the trichotomy discipline
-  (`structural-dispatch.md` §4, `optimize.py:339-343`) exists to keep distinct from
+  (`structural-dispatch.md` §4, and `pushdown_selects`'s docstring, `optimize.py:533`) exists to keep distinct from
   the invalid `(reduce, select)` overlap.
 
-Register in `_RULES` (`optimize.py:506`). Termination: moves a `Select` strictly left,
-never lengthens the plan — the measure (`optimize.py:78-86`) still strictly
-decreases; say so in the docstring.
+Register in `_RULES` (`optimize.py:773`). Termination: moves a `Select` strictly left,
+never lengthens the plan — the measure (`optimize.py:112-119`) still strictly
+decreases; say so in the docstring. *(Superseded by the 2026-07-29 note above: no new
+rule — one `dim_effect` arm; the termination argument is inherited from
+`pushdown_selects` unchanged.)*
 
 **Out of scope, note as future work in the rule docstring:** a *prefix* forward-slice
 (`start ∈ {None, 0}`, `step ∈ {None, 1}`) on the scanned dim also commutes with
@@ -103,7 +124,7 @@ structural test, but it needs its own careful goldens, so keep it out of this PR
 - **Schema:** `apply_schema` through `diff("time")` shrinks `time` by 1 (and by `n`
   for `diff("time", n=2)`).
 - **Property widening:** add scans to the generated pool in `test_properties.py`
-  (currently reduce-only, `test_properties.py:44-46`), with the select-dim
+  (currently reduce-only, `test_properties.py:62-64`), with the select-dim
   disjointness left to the optimiser rather than the generator — the
   equality-vs-eager property is exactly what proves the leave-don't-raise leg.
 

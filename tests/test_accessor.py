@@ -239,7 +239,7 @@ def test_explain_formats_getitem(ds):
 
 
 def test_explain_lists_one_line_per_lowered_node(ds):
-    # W2 PR 8: the listing is the *lowered* plan, so its lines correspond to nodes.
+    # The listing is the *lowered* plan, so its lines correspond to nodes.
     chain = ds.plan.groupby("time").mean().isel(lat=0)
     lowered = chain._optimized()
     lines = chain.explain().splitlines()[1:]
@@ -286,7 +286,7 @@ def test_explain_repr_is_unescaped_text(ds):
     assert "\\n" not in repr(text)
 
 
-# --- #57: selections push in front of rechunks ----------------------------------
+# --- selections push in front of rechunks ---------------------------------------
 
 
 @pytest.fixture
@@ -419,9 +419,9 @@ def test_unregistered_terminal_is_not_routed(ds):
 
 # --- grouped / windowed contexts -----------------------------------------------------
 # ``groupby``/``resample``/``rolling``/... return a builder, not a Dataset, so calls after
-# them mean something different from the same-named Dataset ops. The accessor barriers
-# them: everything from the context op on records as ``Opaque``, which no rewrite rule can
-# fire on or across -- correct but unoptimised, until ``docs/roadmap/02-lowering.md``.
+# them mean something different from the same-named Dataset ops. Lowering fuses a
+# recognised opener/closer pair into one semantic node; a pair it can't fuse demotes to
+# ``Opaque``, which no rewrite rule can fire on or across -- correct but unoptimised.
 
 
 @pytest.fixture
@@ -470,7 +470,7 @@ def test_context_chain_records_an_opener_then_lowers_to_one_node(ds):
     assert [type(n) for n in lowered] == [GroupedReduce, Select]
     assert not any(isinstance(n, ContextOpen) for n in lowered)
 
-    # ... which is what ``explain()`` now shows (W2 PR 8): one op, still rendered as the
+    # ... which is what ``explain()`` shows: one op, still rendered as the
     # two calls it replays as, in the order they were written. ``time -> time`` is not a
     # typo and is the reason the annotation exists -- ``groupby("time")`` *re-mints* the
     # dim, so the ``time`` the trailing ``isel`` indexes is group labels, not the original.
@@ -495,9 +495,8 @@ def test_ops_after_an_unfusable_context_are_modelled_again(ds):
 def test_select_on_a_grouped_nodes_own_dim_stays_put(ds):
     # ``groupby("time")`` mints the dim it grouped over, so ``isel(time=0)`` indexes the
     # *minted* ``time`` -- valid eagerly, and immovable. Pinned end to end because it is
-    # the case W2 PR 6's rule must decline: hopping this in front would index the original
-    # ``time`` instead of the group labels. (Before that rule existed this test passed
-    # because no rule touched a fused node at all; now it passes for the right reason.)
+    # the case the select-pushdown rule must decline: hopping this in front would index
+    # the original ``time`` instead of the group labels.
     chain = ds.plan.groupby("time").mean().isel(time=0)
     assert [c.name for c in emit(chain._optimized())] == ["groupby", "mean", "isel"]
     assert_equal(chain.collect(), ds.groupby("time").mean().isel(time=0))
@@ -540,7 +539,7 @@ def test_select_across_a_fused_reduce_matches_eager(dated_ds, chain):
 
 
 def test_projection_is_pushed_in_front_of_the_grouping(dated_ds):
-    # W2 PR 7: aggregate one variable instead of two and then discarding one.
+    # Aggregate one variable instead of two and then discarding one.
     ds = dated_ds.assign(elevation=(("lat", "lon"), np.zeros((3, 4))))
     chain = ds.plan.groupby("time.month").mean()[["temperature"]]
 
@@ -609,13 +608,13 @@ def test_projection_pushdown_skips_an_error_from_a_discarded_variable(dated_ds):
     # on a discarded variable, errors included. To assert it we need eager to fail, and any
     # failure will do -- the failure is a *prop*, not the subject.
     #
-    # This test used to source that failure from a float variable lacking ``time``: a
-    # Dataset reduce hands such a variable an empty axis set, and ``std``/``var`` blow up on
-    # it. That looks like the natural choice and it is a trap, because **the blow-up is a
+    # The tempting alternative sources that failure from a float variable lacking ``time``:
+    # a Dataset reduce hands such a variable an empty axis set, and ``std``/``var`` blow up
+    # on it. That looks like the natural choice and it is a trap, because **the blow-up is a
     # numbagg bug, not xarray behaviour** -- numbagg reads ``axis=()`` as ``axis=None`` and
-    # returns a scalar (07-small-wins.md §8 has the full account). Pinning it meant this
-    # test asserted that a third-party bug was *present*: it failed under
-    # ``use_numbagg=False``, and it would fail again the day numbagg fixed it -- in both
+    # returns a scalar (07-small-wins.md §8 has the full account). Pinning it would make
+    # this test assert that a third-party bug is *present*: it would fail under
+    # ``use_numbagg=False``, and again the day numbagg fixed it -- in both
     # cases reporting DID NOT RAISE, as though xrexpr had regressed.
     #
     # numpy refusing to ``std`` a ``<U4`` array is xarray/numpy's own semantics and reaches
@@ -716,9 +715,8 @@ def test_resample_matches_eager(dated_ds):
 
 
 def test_rolling_then_select_matches_eager(ds):
-    # The select now hops in front: ``lat`` is disjoint from the window, so the rolling
-    # mean runs over one latitude instead of three. Expectation flipped deliberately in
-    # W2 PR 6 -- it read ``[WindowedReduce, Select]`` while the fused nodes had no rules.
+    # The select hops in front: ``lat`` is disjoint from the window, so the rolling
+    # mean runs over one latitude instead of three.
     chain = ds.plan.rolling(time=2).mean().isel(lat=0)
     assert [type(n) for n in chain._optimized()] == [Select, WindowedReduce]
     assert_equal(chain.collect(), ds.rolling(time=2).mean().isel(lat=0))
@@ -837,8 +835,8 @@ def test_plans_without_a_context_still_optimise(ds):
 
 
 def test_terminal_to_dataframe_triggers_collect_and_delegates(ds):
-    # regression: ``.to_dataframe()`` used to return a proxy (recorded, never run). It
-    # must now materialise -- proving the rewrite ran and delegation reached xarray.
+    # A terminal like ``.to_dataframe()`` must materialise rather than return a proxy
+    # (recorded, never run) -- proving the rewrite ran and delegation reached xarray.
     chain = ds.plan["temperature"].isel(time=0)
     result = chain.to_dataframe()
 

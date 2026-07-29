@@ -151,9 +151,9 @@ def test_variants_hashable_and_value_equal():
 
 
 def test_a_node_carrying_an_array_is_not_hashable():
-    # ``ir.py`` used to promise every node was hashable outright, which was never true:
-    # ``xr.DataArray.__hash__`` is None, so any node whose payload holds one raises. The
-    # claim is now conditional and this pins the condition. Making it unconditional would
+    # ``ir.py``'s hashability promise is deliberately *conditional* -- hashable when the
+    # payload is. ``xr.DataArray.__hash__`` is None, so any node whose payload holds one
+    # raises, and this pins that condition. Making the promise unconditional would
     # mean hashing the array's *values* -- computing a dask array at plan time, which is
     # the one thing the package promises never to do.
     weights = xr.DataArray([1.0, 2.0, 3.0], dims="lat")

@@ -1,4 +1,4 @@
-"""Property-based tests for rewrite correctness and schema tracking (issue #61).
+"""Property-based tests for rewrite correctness and schema tracking.
 
 The hand-written suites pin the optimiser against examples somebody thought of. These
 generate the awkward combinations nobody wrote down: small datasets, short chains of
@@ -8,31 +8,26 @@ The generators are deliberately narrow (see ``_calls``), because a chain that is
 *invalid* is not interesting here — ``InvalidExpressionError`` is a real failure signal
 in this module, never expected noise. Two narrowings are worth naming:
 
-- **No dim is indexed by two selects anywhere in the chain.** On ``main`` a folded run
-  uses ``dict.update``, which overrides rather than composes and silently returns wrong
-  data. Known bug, fix in flight (PR #56).
-
-  The restriction has to be chain-wide rather than run-local, which is worth stating
-  because it is not obvious: the two selects need never be adjacent in the chain the user
-  wrote. ``pushdown_selects`` hops a select left past a reduce, so
-  ``isel(time=[1]).all(dim=['lat']).isel(time=0)`` becomes a run and folds to
-  ``isel(time=0)`` — the wrong timestep, silently. Once #56 lands, drop the
-  ``selected_dims`` bookkeeping and these properties become the general check on the
-  composition arithmetic. Verified against that branch: widened, the suite fails on
-  ``main`` and passes with #56 applied.
-- **No ``chunk``/rechunk ops.** Selection/rechunk commutation is property 2 of #61; it
-  needs the ``Rechunk`` op and the dask test dependency that arrive with PR #58.
+- **No dim is indexed by two selects anywhere in the chain** (the ``selected_dims``
+  bookkeeping in ``_calls``). ``merge_adjacent_selects`` *composes* same-dim indexers
+  today — and safely splits the run where composition isn't statically provable — so
+  the original reason for this restriction is gone; it survives as a candidate widening
+  that nobody has done. The restriction is chain-wide rather than run-local, which is
+  worth stating because it is not obvious: the two selects need never be adjacent in
+  the chain the user wrote. ``pushdown_selects`` hops a select left past a reduce, so
+  ``isel(time=[1]).all(dim=['lat']).isel(time=0)`` becomes a run before it folds.
+- **No ``chunk``/rechunk ops.** ``Rechunk`` and its pushdown rule exist and are pinned
+  by the hand-written suites; generating rechunk chains is scheduled with the chunk
+  taxonomy (``docs/roadmap/07-small-wins.md`` §7, after W4).
 
 ``reduce`` is also excluded: it takes a *function* first, which ``_reduce_dims`` misreads
 as a dim spec, so a generated ``.reduce(...)`` would fail for reasons unrelated to the
 rewrites under test.
 
 **Builder chains** (``groupby``/``resample``/``rolling``/``coarsen``/``weighted``) are
-generated too, by :func:`builder_plans` — the widening
-``docs/roadmap/07-small-wins.md`` §7 scheduled for W2 PRs 3–5 and deferred to here, once
-all three fused nodes existed. They feed the *contract* properties below (optimised equals
-eager, lowering idempotent, the emit round-trip, tracked names) but not the
-size-exactness one, which builder nodes are entitled to answer "unknown" to by design.
+generated too, by :func:`builder_plans`. They feed the *contract* properties below
+(optimised equals eager, lowering idempotent, the emit round-trip, tracked names) but not
+the size-exactness one, which builder nodes are entitled to answer "unknown" to by design.
 A builder chain is a **pair** of calls, so :func:`_builder_pair` draws both at once, and
 each kind constrains its closer differently — see that function for the per-kind facts,
 every one of which was verified against xarray 2026.7.0 rather than assumed.
@@ -445,7 +440,7 @@ def _closer_dims(draw, obj, kind, dim):
         # candidate set the dims *every* variable carries, plus ``dim`` itself.
         #
         # Note what this excludes, and why that is not a gap: the raising case is exactly
-        # where ``pushdown_projections`` *skips* an error (W2 PR 9), so eager and optimised
+        # where ``pushdown_projections`` *skips* an error, so eager and optimised
         # legitimately differ and ``optimised == eager`` could not express it. Same reason
         # as :data:`EMPTY_AXIS_UNSAFE_REDUCES` -- the chains excluded are the ones whose
         # eager *reference* is broken. ``07-small-wins.md`` §8 states the sharpened
@@ -776,7 +771,7 @@ def test_sizes_are_tracked_exactly_without_label_slices(case):
     Deliberately kept on the **plain** generator. The fused nodes are entitled to answer
     "unknown": a grouped reduce's minted extent is the group count, and a surviving weight
     dim's is a post-alignment length — both facts about coordinate *values*, which this
-    layer does not read. Widening this one would assert the opposite of what W3 decided.
+    layer does not read. Widening this one would assert the opposite of that contract.
     """
     ds, calls = case
     assume(not any(_has_label_slice(call) for call in calls))
@@ -793,8 +788,8 @@ def _has_label_slice(call):
 @pytest.mark.xfail(
     strict=True,
     reason="a sel label slice is sized 'unknown', not exactly -- deliberate, see the "
-    "docstring: W3 traded an unsafe under-report for an honest None, and computing the "
-    "exact answer needs coordinate values, which is a different decision.",
+    "docstring: the schema trades an unsafe under-report for an honest None, and "
+    "computing the exact answer needs coordinate values, which is a different decision.",
 )
 def test_sel_label_slice_size_is_tracked_correctly():
     """A ``sel`` label slice is sized ``None``, so it is not tracked *exactly*.
@@ -806,13 +801,13 @@ def test_sel_label_slice_size_is_tracked_correctly():
     yields 2 elements while the positional reading gave **0** — under-reporting, the
     *unsafe* direction, since it is the error a size-driven rule would act on.
 
-    **Kept xfail deliberately** (W3, ``docs/roadmap/03-schema-sizes.md`` §5.5). The size
-    is now ``None`` rather than ``0``: the unsafe answer is gone, and this test's stricter
-    claim — that the size is tracked *exactly* — remains unmet, so the marker stays and
-    the reason changes. Reaching the exact 2 means reading ``ds.indexes["lat"]`` at
-    ``apply_schema`` time, which is a separate call about how far the schema layer may
-    consult coordinate values; W3 §2 opens that door for lowering's own use but does not
-    walk through it here. Still latent either way: no rewrite consults tracked sizes.
+    **Kept xfail deliberately** (``docs/roadmap/03-schema-sizes.md`` §5.5). The size
+    is ``None`` rather than ``0``: the unsafe answer is gone, and this test's stricter
+    claim — that the size is tracked *exactly* — remains unmet, so the marker stays.
+    Reaching the exact 2 means reading ``ds.indexes["lat"]`` at ``apply_schema`` time,
+    which is a separate call about how far the schema layer may consult coordinate
+    values; ``03-schema-sizes.md`` §2 opens that door for lowering's own use but does
+    not walk through it here. Still latent either way: no rewrite consults tracked sizes.
     """
     ds = xr.Dataset({"t": ("lat", np.arange(4.0))}, coords={"lat": [10, 20, 30, 40]})
     call = Call("sel", lat=slice(20, 30))
@@ -839,11 +834,11 @@ def test_sel_label_slice_size_is_unknown_rather_than_wrong():
 def test_rewrites_survive_unknown_dim_sizes(case):
     """Optimising against a schema whose sizes are all unknown still matches eager.
 
-    The property W3 exists to license: a ``GroupedReduce`` mints dims whose extent comes
-    from coordinate *values* and a ``WeightedReduce`` marks its surviving weight dims
-    unknown, so the plans the rules see carry ``None`` sizes routinely — no longer a
-    hypothetical, now that builder chains are generated here. Every rule reasons about dim
-    *names*, so blanking every size must change nothing.
+    The property the ``int | None`` sizes exist to license: a ``GroupedReduce`` mints dims
+    whose extent comes from coordinate *values* and a ``WeightedReduce`` marks its
+    surviving weight dims unknown, so the plans the rules see carry ``None`` sizes
+    routinely — builder chains are generated here, so this is not a hypothetical. Every
+    rule reasons about dim *names*, so blanking every size must change nothing.
     """
     ds, calls = case
     plan, _ = _build_plan(ds, calls)

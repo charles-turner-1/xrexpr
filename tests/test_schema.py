@@ -129,8 +129,8 @@ def test_boolean_list_isel_resizes_by_true_count(ds):
 
 
 def test_unsizable_sel_slice_is_unknown(ds):
-    # A label slice needs coord values to size. This used to keep the *current* size --
-    # a guess in the safe direction, but still a guess; "don't know" is now sayable.
+    # A label slice needs coord values to size, which this layer does not read -- so the
+    # honest answer is "don't know", not a guess that keeps the current size.
     schema = SchemaState.from_dataset(ds)
     node = Select(name="sel", indexer={"time": slice("a", "z")})
     after = apply_schema(schema, node)
@@ -427,7 +427,7 @@ def test_weighted_reduce_arm_agrees_with_xarray(ds, weights, consumes):
 
 def test_a_surviving_weight_dim_is_sized_unknown_not_guessed(ds):
     # The weights align with the dataset, so a shared dim can *shrink* -- verified below.
-    # An extent this layer cannot compute is ``None``, W3's answer, rather than the current
+    # An extent this layer cannot compute is ``None`` rather than the current
     # size, which would be an over-report of a dim a rewrite might act on.
     w = ds["lat"] * ds["lon"]
     node = _weighted(frozenset({"lat"}), frozenset({"lat", "lon"}), w)
@@ -532,10 +532,10 @@ def test_scalar_select_strips_the_dim_from_every_variable(ds):
 
 
 def test_project_drops_the_dims_the_survivors_no_longer_span(ds):
-    # This test used to assert ``after.dims == schema.dims`` -- that a projection narrows
-    # only the variables. It doesn't: ``elevation`` has no ``time``, and xarray drops an
-    # orphaned dim outright rather than keeping it empty. Corrected against evaluation,
-    # and found by the property suite once its generated datasets grew a second variable.
+    # The tempting expectation is ``after.dims == schema.dims`` -- that a projection
+    # narrows only the variables. It doesn't: ``elevation`` has no ``time``, and xarray
+    # drops an orphaned dim outright rather than keeping it empty. Checked against
+    # evaluation, which is what caught the wrong version of this assertion.
     schema = SchemaState.from_dataset(ds)
     after = apply_schema(schema, Project(name="__getitem__", variables=("elevation",)))
     eager = ds[["elevation"]]
