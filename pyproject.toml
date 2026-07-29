@@ -162,11 +162,21 @@ versioneer = ">=0.29,<0.30"
 xrexpr = {editable = true, path = "."}
 
 [tool.pixi.environments]
-default = { features = ["dev", "test"], solve-group = "default" }
-test-py310 = { features = ["py310", "test"] }
-test-py311 = { features = ["py311", "test"] }
-test-py312 = { features = ["py312", "test"] }
-test-py313 = { features = ["py313", "test"] }
+# ``numbagg`` is a *separate* feature from ``test`` so that one environment can leave it
+# out -- pixi features only ever add, so there is no way to subtract it from ``test``.
+# Everything below therefore opts in explicitly, and ``test-nonumbagg`` is the single
+# environment defined by what it omits.
+default = { features = ["dev", "test", "numbagg"], solve-group = "default" }
+test-py310 = { features = ["py310", "test", "numbagg"] }
+test-py311 = { features = ["py311", "test", "numbagg"] }
+test-py312 = { features = ["py312", "test", "numbagg"] }
+test-py313 = { features = ["py313", "test", "numbagg"] }
+# The optional-dependency axis, held at one python so it varies only in numbagg.
+# ``test-numbagg`` duplicates whichever ``test-pyXXX`` matches the solved python; that is
+# deliberate, so the pair reads as a pair in the CI matrix rather than as one arm plus an
+# implicit reference to a version env.
+test-numbagg = { features = ["test", "numbagg"] }
+test-nonumbagg = { features = ["test"] }
 
 [tool.pixi.feature.test.dependencies]
 pytest = ">=8.4.2,<9"
@@ -175,8 +185,13 @@ hypothesis = "*"
 # not a runtime dependency: xrexpr must keep working dask-free. The rechunk tests
 # skip themselves without it (``pytest.importorskip``).
 dask = "*"
-# xarray's ``rolling_exp`` refuses to run without it, so without this the one opener
-# lowering deliberately leaves unfused could not be exercised end to end at all.
+
+[tool.pixi.feature.numbagg.dependencies]
+# Not a runtime dependency, and deliberately its own feature -- see [tool.pixi.environments].
+# xarray dispatches some reductions to numbagg when it is importable, which makes it an
+# axis of *behaviour*, not just of coverage: ``std``/``var`` over an empty dim set return a
+# scalar under numbagg and zeros without it. The suite has to pass either way, so CI runs
+# both arms. It also gates ``rolling_exp``, which xarray refuses to run without it.
 numbagg = "*"
 
 [tool.pixi.feature.test.tasks]

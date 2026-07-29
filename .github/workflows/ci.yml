@@ -1,6 +1,10 @@
 name: CI
 
-on: [pull_request, push, workflow_dispatch]
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
   pre-commit:
@@ -15,7 +19,16 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        environment: [test-py310, test-py311, test-py312, test-py313]
+        # test-py3XX vary python and all carry numbagg; the last two vary numbagg alone.
+        # xarray dispatches reductions to numbagg when it is importable, so its presence
+        # changes results, not just coverage -- both arms have to stay green.
+        environment:
+          - test-py310
+          - test-py311
+          - test-py312
+          - test-py313
+          - test-numbagg
+          - test-nonumbagg
 
     steps:
       - name: Checkout source
