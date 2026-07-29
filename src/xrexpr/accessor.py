@@ -21,6 +21,7 @@ from typing import Any
 
 import xarray as xr
 
+from xrexpr.explain import format_plan
 from xrexpr.ir import ContextOpen, FluentOp, LoweredOp, Opaque, frozendict
 from xrexpr.lower import Call, emit, to_lower_ir
 from xrexpr.optimize import optimize
@@ -209,34 +210,17 @@ class LazyDatasetProxy:
     def explain(self) -> Explanation:
         """Return the optimised plan as text, without running it (à la Polars ``explain``).
 
-        Shows the calls :meth:`collect` would actually replay — i.e. *after* lowering and
+        Shows the **lowered plan** :meth:`collect` would replay — i.e. *after* lowering and
         optimisation — so the rewrite (merged / pushed-down selects) is visible. Raises
         the same :class:`~xrexpr.exceptions.InvalidExpressionError` as :meth:`collect`
         when the plan is invalid.
 
-        Formatted from the **emitted calls** rather than the lowered nodes, which keeps
-        this the answer to "what will run": a fused node such as
-        :class:`~xrexpr.ir.GroupedReduce` shows as the two calls it replays as. Showing
-        the lowered *nodes* — the more informative artefact, and what Polars does — is a
-        deliberate later change (``docs/roadmap/02-lowering.md`` PR 8), not something to
-        drift into as a side effect of the first fused node.
+        One line per lowered node, each still rendered as the calls that node emits, so
+        the listing gains the optimiser's own view of the plan — fused nodes, opaque
+        barriers, minted dims — without ceasing to answer "what will run". See
+        :mod:`xrexpr.explain` for the format and why each annotation is there.
         """
-        calls = emit(self._optimized())
-        if not calls:
-            return Explanation("plan (0 ops)")
-        body = "\n".join(
-            f"  {i}. {self._format_call(c)}" for i, c in enumerate(calls, 1)
-        )
-        return Explanation(f"plan ({len(calls)} ops):\n{body}")
-
-    @staticmethod
-    def _format_call(call: Call) -> str:
-        """One-line human-readable form of an emitted call for :meth:`explain`."""
-        if call.name == "__getitem__":
-            return f"[{call.args[0]!r}]"
-        parts = [repr(a) for a in call.args]
-        parts += [f"{k}={v!r}" for k, v in call.kwargs.items()]
-        return f"{call.name}({', '.join(parts)})"
+        return Explanation(format_plan(self._optimized()))
 
     def _replay(self, calls: list[Call]) -> xr.Dataset | xr.DataArray:
         """Perform each emitted :class:`~xrexpr.lower.Call` against the real dataset.

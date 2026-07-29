@@ -784,6 +784,31 @@ by hand.
    matches what Polars shows. Updates the `explain()` string assertions in
    `test_accessor.py`.
 
+> **Done (2026-07)**, in `xrexpr/explain.py` — a module rather than a method, because the
+> formatter is a fourth `assert_never` dispatch over `LoweredOp` and belongs beside the
+> other three rather than inside the accessor. Three findings worth recording, since §13
+> called this "a UX call made on thin evidence":
+>
+> - **The switch costs nothing.** The dichotomy §13 worried about — informative *or* honest
+>   about what runs — is false. Each node is rendered as the calls it emits, by calling
+>   `emit` itself, so a line is a node *and* its calls. Nothing is given up, and the
+>   rendering cannot drift from the replay because it *is* the replay.
+> - **The best of it is `Opaque` becoming visible.** The evidence §13 wanted turned out not
+>   to be about fused nodes at all: the call-level listing had no way to answer "why did
+>   nothing move?", because an unfusable context looked like two ordinary calls. This is the
+>   one thing in the output a user can act on.
+> - **Annotate only what the calls do not already state.** `rolling(time=3).mean()` names
+>   its window, so restating `window` is noise; a bare `mean()` says nothing about consuming
+>   every dim, `groupby("time.month")` says nothing about `month` being minted, and a
+>   `DataArray` of weights reprs as a five-line block whose *dims* are the part that matters.
+>   That rule is what keeps the listing short enough to read, and it is why most kinds
+>   annotate nothing.
+>
+> One pre-existing wart fixed in passing, because a per-node line format is what exposed
+> it: an array-valued argument used to splice its whole multi-line `repr` into the listing.
+> Multi-line reprs now elide to `<DataArray>`; taking the `repr` to find out computes
+> nothing, since xarray reprs a dask-backed variable as its graph summary.
+
 Deliberately outside this sequence: the weighted pushdown rule (§8.1) and the dim-effect
 unification (§11), each of which needs its own decision first.
 
@@ -792,7 +817,8 @@ unification (§11), each of which needs its own decision first.
 > then **PR 9 — projection pushdown past `WeightedReduce`** (§8.1's amendment above), which
 > the unification reduced to one `dim_effect` arm. The *select* half of the weighted
 > pushdown rule remains outside the sequence, undecided and still needing a data-touching
-> rewrite. PR 8 (`explain()` on the lowered plan) is the remaining item.
+> rewrite. PR 8 (`explain()` on the lowered plan) has since landed too, so **§12's sequence
+> is complete** and the weighted *select* rule is all that is left of this memo.
 
 Each PR ships green under:
 
@@ -865,7 +891,13 @@ essentially the whole plan, for exactly the project's core audience.
 
 Lower-confidence items, flagged rather than defended: `coarsen`'s size effect depends on a
 `boundary` kwarg and may want to be marked unknown rather than modelled (§5.2), and
-`explain()` switching to the lowered plan is a UX call made on thin evidence (PR 8). A
+`explain()` switching to the lowered plan is a UX call made on thin evidence (PR 8).
+*Resolved in implementation (2026-07, PR 8):* the flag was right to be raised and wrong
+about the trade-off — there is none, because a node can be rendered as the calls it emits,
+so the listing is the informative artefact **and** still the answer to "what will run". The
+evidence the flag asked for arrived from an unexpected direction: the switch's real payoff
+is that an `Opaque` node becomes visible, which is the only actionable thing in the output.
+See §12's note. A
 third item originally listed here — whether a pushed select changes `WindowedReduce`'s
 *boundary semantics* — was resolved in review (2026-07): it cannot, for the
 disjoint-dims-only rule PR 6 actually specifies (§11.2).

@@ -238,6 +238,34 @@ def test_explain_formats_getitem(ds):
     assert "['temperature']" in ds.plan["temperature"].explain()
 
 
+def test_explain_lists_one_line_per_lowered_node(ds):
+    # W2 PR 8: the listing is the *lowered* plan, so its lines correspond to nodes.
+    chain = ds.plan.groupby("time").mean().isel(lat=0)
+    lowered = chain._optimized()
+    lines = chain.explain().splitlines()[1:]
+    assert len(lines) == len(lowered) == 2
+    assert [type(n).__name__ for n in lowered] == [line.split()[1] for line in lines]
+
+
+def test_explain_still_answers_what_will_run(ds):
+    # The property the call-level listing had and the node-level one must not give up:
+    # every emitted call appears, in order. Derived from ``emit`` rather than restated, so
+    # it cannot pass by agreeing with a stale expectation.
+    chain = ds.plan.groupby("time.month").mean().isel(lat=0)
+    text = chain.explain()
+    positions = [text.index(c.name) for c in emit(chain._optimized())]
+    assert positions == sorted(positions)
+
+
+def test_explain_names_the_opaque_nodes_that_stopped_the_optimiser(ds):
+    # The question the call-level listing could not answer: *why* did nothing move? An
+    # unfusable context is two opaque nodes, and a reader should not have to know which
+    # methods are modelled to find that out.
+    text = ds.plan.groupby("lat").first().mean("time").explain()
+    assert text.count("Opaque") == 2
+    assert "not modelled" in text
+
+
 def test_explain_empty_plan(ds):
     assert ds.plan.explain() == "plan (0 ops)"
 
@@ -442,9 +470,14 @@ def test_context_chain_records_an_opener_then_lowers_to_one_node(ds):
     assert [type(n) for n in lowered] == [GroupedReduce, Select]
     assert not any(isinstance(n, ContextOpen) for n in lowered)
 
-    # ... and it still replays as the two calls that were written, in order
+    # ... which is what ``explain()`` now shows (W2 PR 8): one op, still rendered as the
+    # two calls it replays as, in the order they were written. ``time -> time`` is not a
+    # typo and is the reason the annotation exists -- ``groupby("time")`` *re-mints* the
+    # dim, so the ``time`` the trailing ``isel`` indexes is group labels, not the original.
     assert chain.explain() == Explanation(
-        "plan (3 ops):\n  1. groupby('time')\n  2. mean()\n  3. isel(time=0)"
+        "plan (2 ops):\n"
+        "  1. GroupedReduce  groupby('time').mean()  [time -> time]\n"
+        "  2. Select  isel(time=0)"
     )
 
 
