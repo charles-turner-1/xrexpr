@@ -22,7 +22,7 @@ from frozendict import frozendict
 
 from xrexpr.exceptions import InvalidExpressionError
 from xrexpr.indexers import classify
-from xrexpr.ir import ALL_DIMS, WeightedReduce
+from xrexpr.ir import ALL_DIMS, GroupedReduce, WeightedReduce, WindowedReduce
 from xrexpr.optimize import optimize
 from xrexpr.schema import SchemaState, to_opnode
 
@@ -610,3 +610,103 @@ def test_ops_after_a_weighted_reduce_are_still_optimised(schema):
     ]
     out = optimize(plan, schema)
     assert [type(n).__name__ for n in out] == ["WeightedReduce", "Project", "Reduce"]
+
+
+# --- select pushdown past the fused reduces (W2 PR 6) ---------------------------------
+
+
+def _grouped(group_dim="time", new_dim="month", consumes=frozenset()):
+    """A ``GroupedReduce`` as ``to_lower_ir`` would build it from ``groupby(...).mean()``."""
+    return GroupedReduce(
+        name="groupby",
+        group_dim=group_dim,
+        new_dim=new_dim,
+        reduce="mean",
+        args=(f"{group_dim}.{new_dim}" if group_dim != new_dim else group_dim,),
+        consumes=consumes,
+    )
+
+
+def _windowed(name="rolling", window=frozendict({"time": 3})):
+    return WindowedReduce(name=name, reduce="mean", window=window, kwargs=dict(window))
+
+
+@pytest.mark.parametrize(
+    ("fused", "select"),
+    [
+        # the headline: a climatology over one latitude instead of all of them
+        (_grouped(), lambda: _node("isel", lat=0)),
+        (_grouped(), lambda: _node("isel", lat=[0, 2])),
+        (_grouped(), lambda: _node("sel", lon=slice(1, 3))),
+        (_grouped(group_dim="lat", new_dim="lat"), lambda: _node("isel", lon=0)),
+        (_windowed(), lambda: _node("isel", lat=0)),
+        (
+            _windowed(name="coarsen", window=frozendict({"time": 2})),
+            lambda: _node("isel", lat=0),
+        ),
+    ],
+)
+def test_select_hops_past_a_fused_reduce_on_disjoint_dims(schema, fused, select):
+    out = optimize([fused, select()], schema)
+    assert [type(n).__name__ for n in out] == [
+        "Select",
+        type(fused).__name__,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("fused", "select", "why"),
+    [
+        (_grouped(), lambda: _node("isel", month=0), "the minted dim"),
+        (_grouped(), lambda: _node("isel", time=0), "the consumed group dim"),
+        (
+            _grouped(consumes=frozenset({"lat"})),
+            lambda: _node("isel", lat=0),
+            "a dim the closer also reduced",
+        ),
+        (
+            _grouped(group_dim="lat", new_dim="lat"),
+            lambda: _node("isel", lat=0),
+            "group dim and minted dim coincide",
+        ),
+        (_windowed(), lambda: _node("isel", time=0), "a windowed dim"),
+        (
+            _windowed(name="coarsen", window=frozendict({"time": 2})),
+            lambda: _node("isel", time=0),
+            "a coarsened dim, whose size the node changes",
+        ),
+        (_grouped(), lambda: _node("isel", lat=0, month=1), "one dim of several"),
+    ],
+)
+def test_intersecting_select_is_left_alone_never_raised(schema, fused, select, why):
+    # The scan discipline, not ``pushdown_selects``'. Three of these are *valid* eagerly --
+    # selecting the minted dim, or a dim a window kept -- so raising would reject a working
+    # chain; the group-dim one is invalid, and leaving it lets xarray report that at replay
+    # rather than the optimiser guessing. Either way: leave, never raise.
+    plan = [fused, select()]
+    assert optimize(plan, schema) == plan, why
+
+
+def test_select_reaches_the_front_past_a_fused_reduce_and_a_reduce(schema):
+    # The fixpoint composing two different pushdown rules: the select hops the grouped
+    # node, then the plain reduce, and ends up first.
+    plan = [_grouped(), _node("mean", "lat"), _node("isel", lon=0)]
+    out = optimize(plan, schema)
+    assert [type(n).__name__ for n in out] == ["Select", "GroupedReduce", "Reduce"]
+
+
+def test_a_hopped_select_then_merges_with_the_one_in_front_of_it(schema):
+    # ...and then composes with ``merge_adjacent_selects``, which is the whole point of
+    # running local rules to a fixpoint.
+    plan = [_node("isel", lat=0), _grouped(), _node("isel", lon=1)]
+    out = optimize(plan, schema)
+    assert [type(n).__name__ for n in out] == ["Select", "GroupedReduce"]
+    assert out[0].indexer == _ix(lat=0, lon=1)
+
+
+def test_no_select_hops_past_a_weighted_reduce(schema):
+    # The variant exists to block exactly this rule: the dim algebra would permit the hop,
+    # but the weights would be left un-subset. ``WeightedReduce`` is absent from the rule's
+    # match, so it cannot fire.
+    plan = [_weighted(consumes=frozenset({"lat"})), _node("isel", time=0)]
+    assert optimize(plan, schema) == plan

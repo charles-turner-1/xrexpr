@@ -13,6 +13,10 @@ Rules (in ``_RULES``):
   select the same dim (PR 7, #33).
 - :func:`pushdown_selects` — hop a select left past a preceding reduce when their dims
   are disjoint, so the reduction scans a smaller array (PR 8, #11).
+- :func:`pushdown_selects_past_fused_reduces` — the same hop past a *grouped* or
+  *windowed* reduce, which is what lowering's fused nodes were built to make expressible:
+  ``groupby("time.month").mean().isel(lat=0)`` groups one latitude instead of all of them
+  (W2 PR 6).
 - :func:`pushdown_projections` — hop a variable projection left past a preceding reduce
   or select, so only the needed variables flow through the plan (#32).
 - :func:`pushdown_selects_past_rechunks` — hop a select left past a preceding ``chunk``
@@ -56,12 +60,14 @@ from xrexpr.indexers import (
 from xrexpr.ir import (
     AllDims,
     DimSet,
+    GroupedReduce,
     LoweredOp,
     Opaque,
     Project,
     Rechunk,
     Reduce,
     Select,
+    WindowedReduce,
 )
 from xrexpr.schema import SchemaState, apply_schema
 
@@ -92,12 +98,12 @@ def optimize(nodes: Plan, schema: SchemaState) -> Plan:
 
     **Termination.** Every rule strictly decreases the lexicographic measure
     ``(len(plan), sum of the indices of the Select and Project nodes)``. Merging and
-    dropping a spent rechunk shrink the plan; the three pushdown rules leave the length
+    dropping a spent rechunk shrink the plan; the four pushdown rules leave the length
     alone but move a select or projection strictly left. Neither component can grow, so
     no rule may ever push a node *right* or lengthen a plan — the invariant a new rule
     has to preserve. (The pushdown rules fire on disjoint adjacencies — ``(reduce,
-    select)``, ``(reduce | select, project)`` and ``(rechunk, select)`` — so they can't
-    undo one another.)
+    select)``, ``(grouped | windowed reduce, select)``, ``(reduce | select, project)`` and
+    ``(rechunk, select)`` — so they can't undo one another.)
     """
     plan = list(nodes)
     while True:
@@ -463,6 +469,84 @@ def pushdown_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
     return None
 
 
+def pushdown_selects_past_fused_reduces(
+    nodes: Plan, schema: SchemaState
+) -> Plan | None:
+    """Hop a select left past a preceding grouped or windowed reduce.
+
+    The payoff the whole lowering workstream was built for, and the pattern this project
+    exists for: ``ds.plan.groupby("time.month").mean().isel(lat=0)`` becomes
+    ``ds.plan.isel(lat=0).groupby("time.month").mean()``, running the climatology over one
+    latitude instead of over all of them and then discarding the rest. It can only be
+    written now because the pair is *one node* — before lowering, ``groupby`` and ``mean``
+    were two, and no rule could see what the adjacency meant.
+
+    The select hops when its dims are **disjoint** from everything the fused node's dim
+    algebra involves (:func:`_fused_dims`): for a grouped reduce the ``group_dim`` it
+    consumes, the ``new_dim`` it mints and any extra ``consumes``; for a windowed one the
+    ``window`` keys, which are the only dims it can resize. Grouping and windowing both act
+    independently at each position of every *other* dim, so subsetting one of those before
+    the aggregation reaches the same answer over less data.
+
+    **Intersecting dims are left, never raised** — the scan discipline, not
+    :func:`pushdown_selects`'. That is a correctness requirement rather than caution:
+    ``.mean().isel(month=0)`` selects the minted dim, ``rolling(time=3).mean().isel(time=0)``
+    and ``coarsen(time=3).mean().isel(time=0)`` select a dim the window kept, and all three
+    are **perfectly valid** (verified against xarray 2026.7.0) — merely immovable. Only
+    selecting the consumed ``group_dim`` is invalid, and leaving it lets xarray say so in
+    its own words at replay, which is what this rule would otherwise have to guess at.
+
+    A pushed select cannot disturb window *boundaries*, the one thing that would make this
+    unsound (``docs/roadmap/02-lowering.md`` §11.2): windows run along their own dims
+    independently at each position of the others, ``center``/``min_periods`` included, so a
+    select on a **disjoint** dim cannot change which elements a window sees. An
+    *intersecting* one could, and this rule never moves those.
+
+    :class:`~xrexpr.ir.WeightedReduce` is deliberately absent, which is the whole reason it
+    is a separate variant: the dim algebra would permit the hop, but the **weights** would
+    need subsetting alongside — a rewrite that transforms an array rather than reordering
+    metadata, and its own workstream (§8.1).
+
+    One hop per call, returning the rewritten plan; ``None`` when nothing moves. Moving a
+    select strictly left decreases :func:`optimize`'s termination measure, exactly as the
+    other pushdowns do.
+    """
+    for i in range(len(nodes) - 1):
+        match nodes[i], nodes[i + 1]:
+            case (
+                (GroupedReduce() | WindowedReduce()) as fused,
+                Select(indexer=indexer) as select,
+            ):
+                if frozenset(indexer) & _fused_dims(fused):
+                    continue  # immovable, and usually still valid — leave it alone
+                swapped = list(nodes)
+                swapped[i], swapped[i + 1] = select, fused
+                return swapped
+    return None
+
+
+def _fused_dims(node: GroupedReduce | WindowedReduce) -> frozenset[Hashable]:
+    """Every dim a fused reduce consumes, mints or resizes — what a select must avoid.
+
+    A shard of the ``dim_effect(op) -> DimEffect`` view ``docs/roadmap/02-lowering.md``
+    §11.1 sketches and defers, kept deliberately small: one ``match`` closed with
+    ``assert_never``, so a fourth fused variant has to say which dims it involves before
+    this rule can be trusted near it.
+
+    ``group_dim`` and ``new_dim`` are frequently the same dim (``groupby("lat")`` and
+    ``resample(time="2D")`` both mint what they grouped over); the set absorbs that.
+    """
+    match node:
+        case GroupedReduce(group_dim=group_dim, new_dim=new_dim, consumes=consumes):
+            return frozenset({group_dim, new_dim}) | consumes
+        case WindowedReduce(window=window):
+            # A window consumes nothing and mints nothing -- it can only *resize*, and only
+            # the dims it names (and only for ``coarsen``). So the keys are the whole story.
+            return frozenset(window)
+        case _:
+            assert_never(node)
+
+
 def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
     """Hop a variable projection left past a preceding reduce or select.
 
@@ -606,6 +690,7 @@ def _pushable_rechunk(node: Rechunk) -> bool:
 _RULES: tuple[Rule, ...] = (
     merge_adjacent_selects,
     pushdown_selects,
+    pushdown_selects_past_fused_reduces,
     pushdown_projections,
     pushdown_selects_past_rechunks,
 )
