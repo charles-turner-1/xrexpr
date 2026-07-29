@@ -334,36 +334,49 @@ which `group_dim` reads off directly. Any other grouper — a `DataArray`
 unhashable-payload wart ([`07-small-wins.md`](./07-small-wins.md) §6), which staying
 unfused sidesteps for `groupby` entirely.
 
-> **The implementation does not match this paragraph (found 2026-07, unfixed).** A
-> **non-dim coordinate name does fuse**, because `_grouper_dims` reads `args[0]` and
-> partitions on `"."` without ever checking the result is a dim. With
-> `region` a coordinate on `lat`, `ds.groupby("region").mean()` lowers to a single
-> `GroupedReduce(group_dim="region", new_dim="region")`, and the tracked schema comes out
-> **wrong**: `{time: 4, lat: 3, region: None}` against an actual `{region: 2, time: 4}` —
-> `lat` is the dim the grouping consumed, and the fold says it survived.
+> **The implementation now matches this paragraph (issue #90, fixed 2026-07-30).** For two
+> months it did not: `_grouper_dims` read `args[0]` and partitioned on `"."` without ever
+> checking the result was a dim, so with `region` a coordinate on `lat`,
+> `ds.groupby("region").mean()` fused to `GroupedReduce(group_dim="region",
+> new_dim="region")` and the tracked schema came out **wrong** — `{time: 4, lat: 3, region:
+> None}` against an actual `{region: 2, time: 4}`, `lat` being the dim the grouping consumed
+> while the fold said it survived. By the time it was fixed the mis-inferred `group_dim` had
+> acquired a second consumer beyond the schema fold: `dim_effect`'s `GroupedReduce` arm feeds
+> both `blocks` and `requires`, so `groupby("region").mean().isel(lat=0)` was reordered — not
+> a data bug, since a bare grouped `mean()` consumes `lat` and that select is invalid eagerly
+> either way, but the error degraded from xarray's `Dimensions {'lat'} do not exist` to
+> pandas' `Must pass non-zero number of levels/codes`, exactly what leaving intersecting dims
+> alone exists to avoid.
 >
-> Replay is unaffected (`emit` reproduces the same two calls, and equality-vs-eager
-> passes), so this is a *tracking* bug, not a data bug — but it is the schema every rule
-> downstream reads. The property suite cannot see it: the generators draw groupers from dim
-> names and `time.month`/`time.day` only. The fix is a coverage test in `_grouper_dims` —
-> return `None` unless the grouper's head names a dim — plus a generator widening to draw
-> non-dim coordinate groupers, which is what would have caught it. Needs its own PR.
+> **The fix, and what it needed.** `to_lower_ir` takes the base dataset's **dim names** as a
+> second argument — the one fact this stage cannot read off the calls — and `_grouper_dims`
+> refuses unless the grouper's head is among them. Dim names rather than a `SchemaState`
+> keeps `lower.py`'s dependencies at `ir.py` alone; *base* dims rather than dims-at-the-opener
+> avoids folding the schema through lowering, and the gap that shortcut leaves is one-sided
+> (a dim minted mid-plan and then grouped over refuses, which is the safe direction) or else
+> already past `_trusted_prefix`. Both arguments are written out in `to_lower_ir`'s docstring.
 >
-> **A second consumer, since PR 6 (2026-07).** The note above was written when nothing read
-> `group_dim` but the schema fold. Select pushdown now does too, so the mis-inferred
-> `group_dim` reaches a *rewrite*: with `region` a coordinate on `lat`, `dim_effect`'s
-> `GroupedReduce` arm returns `blocks={region}`, `lat` looks disjoint, and
-> `ds.plan.groupby("region").mean().isel(lat=0)` optimises to
-> `isel(lat=0)` → `groupby("region")` → `mean()`. Still not a data bug — a bare grouped
-> `mean()` consumes `lat`, so that select is invalid eagerly whichever order it runs in — but
-> the *error* degrades: xarray's `Dimensions {'lat'} do not exist` becomes pandas'
-> `Must pass non-zero number of levels/codes`, which is precisely what the rule leaves
-> intersecting dims alone in order to avoid.
+> **The guard reaches further than the issue's title.** Verified against xarray 2026.7.0
+> while fixing it: `resample` accepts a non-dim coordinate too — `resample(t2="2D")` with
+> `t2` on `lat` yields `{t2: 2, time: 4}` — so the same bug lived in the resample branch, and
+> the keyword is now checked rather than trusted. And `groupby_bins("time.month", 2)` yields
+> `{lat: 3, month_bins: 2}`, whereas the pre-guard reading was `("time.month",
+> "time.month_bins")`, wrong twice over; the dotted bins form is now refused rather than
+> corrected, since fusing it correctly wants its own goldens.
 >
-> The unification (§11.1) widens the reach rather than narrowing it: `blocks` and
-> `requires` both read `group_dim`, so projection pushdown consults the same wrong value.
-> Recorded, not fixed here: the fix is still `_grouper_dims`', and this is a second reason
-> for it rather than a new one.
+> **What caught it, and what it caught in turn.** The generator widening: `datasets()` draws a
+> non-dim coordinate and `_builder_pair` offers it as a grouper, which makes
+> `test_tracked_schema_agrees_with_evaluation` fail on the unfixed code (confirmed by
+> reverting the guard against a cleared Hypothesis database). The same widening exposed a
+> *third* member of this family, independent of `_grouper_dims`: `SchemaState.coords` is a
+> bare set of names with no dims, so a coordinate xarray orphans by consuming the dim it
+> lives on is tracked as surviving — issue #109, inert today because nothing in `optimize`
+> reads `coords` at all.
+>
+> Modelling non-dim groupers *properly* rather than refusing them remains open, and the
+> shape of it is now empirically pinned: a multi-dim coordinate grouper stacks (`cell` on
+> `(time, lat)` yields `{cell: 3}`, consuming both), so it needs a `group_dim` that is a
+> **set** rather than a single name.
 
 ### 5.6 `GroupedMap` — a fourth node, spec'd and deferred (2026-07)
 

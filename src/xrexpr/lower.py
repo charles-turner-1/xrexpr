@@ -95,13 +95,28 @@ class Call:
         object.__setattr__(self, "kwargs", frozendict(self.kwargs))
 
 
-def to_lower_ir(nodes: list[FluentOp]) -> list[LoweredOp]:
+def to_lower_ir(nodes: list[FluentOp], dims: frozenset[Hashable]) -> list[LoweredOp]:
     """Translate a recorded plan into what it means, fusing builder chains.
 
     Where the fluent API is one-to-one with semantics the recorded node is already right,
     so it passes through untouched — this is the *same* vocabulary plus the nodes a single
     call cannot express, not a translation into a poorer language. Only the multi-call
     spellings are rewritten.
+
+    ``dims`` is the **base dataset's dim names**, and it is the one thing this pass cannot
+    read off the calls: whether ``groupby("region")`` groups along a dim or along a
+    coordinate defined on one is a fact about the data, not the call (see
+    :func:`_grouper_dims`). Dim *names* rather than a ``SchemaState`` because that is the
+    whole of what lowering needs to know — a set keeps this module's dependencies at
+    :mod:`xrexpr.ir` alone, and makes the requirement legible in the signature.
+
+    Base dims rather than the dims *at* each opener, which would mean folding the schema
+    forward through lowering. The gap is one-sided and pessimising: a dim minted mid-plan
+    and then grouped over (``groupby("time.month").mean().groupby("month")``) refuses and
+    falls to the fallback below. The converse — a name that is a base dim but no longer one
+    by the time of the groupby — needs an intervening ``stack``/``rename``, which is
+    ``Opaque``, so the plan is already past ``optimize._trusted_prefix`` and the tracked
+    schema is a guess by contract rather than by this shortcut.
 
     Contexts are **pairs, not runs** (verified against xarray 2026.7.0): there is no
     builder→builder middle call to skip, because ``DatasetGroupBy.__getitem__`` selects a
@@ -131,7 +146,7 @@ def to_lower_ir(nodes: list[FluentOp]) -> list[LoweredOp]:
 
         closer = nodes[i + 1] if i + 1 < n else None
         fused = (
-            _fuse_grouped(node, closer)
+            _fuse_grouped(node, closer, dims)
             or _fuse_windowed(node, closer)
             or _fuse_weighted(node, closer)
             if closer is not None
@@ -157,7 +172,9 @@ def to_lower_ir(nodes: list[FluentOp]) -> list[LoweredOp]:
     return out
 
 
-def _fuse_grouped(opener: ContextOpen, closer: FluentOp) -> GroupedReduce | None:
+def _fuse_grouped(
+    opener: ContextOpen, closer: FluentOp, dims: frozenset[Hashable]
+) -> GroupedReduce | None:
     """Fuse a groupby-family pair into a :class:`~xrexpr.ir.GroupedReduce`, or refuse.
 
     Refusing is always safe (the caller demotes to ``Opaque``), so every condition below
@@ -165,14 +182,11 @@ def _fuse_grouped(opener: ContextOpen, closer: FluentOp) -> GroupedReduce | None
 
     - **The opener must be groupby-family.** ``rolling``/``coarsen`` and ``weighted`` have
       their own nodes, fused by the two functions below, so they refuse here.
-    - **The grouper must be a string** — a dim name (``groupby("lat")``) or a component
-      of a dim coordinate (``groupby("time.month")``), from which ``group_dim`` reads
-      off directly. A ``DataArray`` grouper or a ``Grouper`` object has no single
-      ``group_dim``, so it refuses. **Known bug (issue #90):** a *non-dim coordinate*
-      name should refuse on the same grounds, but ``_grouper_dims`` never checks that
-      the grouper's head names a dim, so ``groupby("region")`` fuses with
-      ``group_dim="region"`` and the tracked schema comes out wrong (replay is
-      unaffected — ``emit`` reproduces the same calls).
+    - **The grouper must be a string naming a dim** — a dim name (``groupby("lat")``) or a
+      component of a dim coordinate (``groupby("time.month")``), from which ``group_dim``
+      reads off directly. A ``DataArray`` grouper or a ``Grouper`` object has no single
+      ``group_dim``, so it refuses; so does a *non-dim coordinate* name, which is what
+      ``dims`` is threaded here to establish (:func:`_grouper_dims`).
     - **The closer must be an aggregating reduce.** This is the subtle one, and it is a
       correction to the obvious reading: a grouped reduce over dims that *exclude* the
       group dim is not an aggregation at all. ``ds.groupby("time.month").mean("lat")``
@@ -191,10 +205,10 @@ def _fuse_grouped(opener: ContextOpen, closer: FluentOp) -> GroupedReduce | None
     if not isinstance(closer, Reduce):
         return None
 
-    dims = _grouper_dims(opener)
-    if dims is None:
+    grouped = _grouper_dims(opener, dims)
+    if grouped is None:
         return None
-    group_dim, new_dim = dims
+    group_dim, new_dim = grouped
 
     # A bare closer consumes nothing extra: unlike a Dataset-level ``mean()``, a grouped
     # one reduces only along the group dim, so ``lat``/``lon`` survive.
@@ -332,7 +346,9 @@ def _weight_dims(opener: ContextOpen) -> frozenset[Hashable] | None:
     return frozenset(dims) if isinstance(dims, tuple) else None
 
 
-def _grouper_dims(opener: ContextOpen) -> tuple[Hashable, Hashable] | None:
+def _grouper_dims(
+    opener: ContextOpen, dims: frozenset[Hashable]
+) -> tuple[Hashable, Hashable] | None:
     """``(group_dim, new_dim)`` for a groupby-family opener, or ``None`` if not statically known.
 
     Read off the call, since v1 fuses only string groupers:
@@ -341,18 +357,48 @@ def _grouper_dims(opener: ContextOpen) -> tuple[Hashable, Hashable] | None:
     - ``groupby("lat")`` mints the dim it grouped over, now holding the distinct values;
     - ``groupby_bins("lat", 2)`` mints ``lat_bins`` — xarray's own naming convention;
     - ``resample(time="2D")`` takes its dim from the (single) keyword, and mints it back.
+
+    **Every one of those reads assumes the name is a dim, so every one is checked against**
+    ``dims``. The name alone cannot tell them apart: ``groupby("region")`` where ``region``
+    is a coordinate *on* ``lat`` groups along ``lat`` and mints ``region``, so reading
+    ``group_dim`` off the call gives ``region`` — a dim the grouping never consumed, while
+    the one it did consume is reported as surviving. That was issue #90, and it reached
+    ``dim_effect``'s ``blocks``/``requires`` as well as the schema fold. Refusing puts these
+    pairs on the opaque fallback, which is what ``02-lowering.md`` §5.5 specified all along.
+
+    Verified against xarray 2026.7.0, since the guard's reach is wider than the issue's
+    title suggests — all three kinds share the assumption:
+
+    - ``resample`` accepts a non-dim coordinate too (``resample(t2="2D")`` with ``t2`` on
+      ``lat`` yields ``{t2: 2, time: 4}``), so the keyword is checked, not trusted;
+    - ``groupby_bins("time.month", 2)`` yields ``{lat: 3, month_bins: 2}`` — group dim
+      ``time``, minting ``month_bins``, whereas this function's pre-guard reading was
+      ``("time.month", "time.month_bins")``, wrong twice. The dotted bins form is therefore
+      refused rather than corrected: fusing it needs its own node-level goldens, and
+      refusing is the safe half of the fix. Future work.
+    - a multi-dim coordinate grouper stacks (``cell`` on ``(time, lat)`` yields
+      ``{cell: 3}``, consuming both), which is why modelling non-dim groupers properly
+      needs a ``group_dim`` that is a *set* — the larger question #90 leaves open.
+
+    A ``Grouper`` object or a keyword grouper (``groupby(x=UniqueGrouper())``) already
+    refuses by leaving ``args`` empty or non-``str``; the guard does not change that.
     """
     if opener.name == "resample":
         keys = [k for k in opener.kwargs if k not in _RESAMPLE_OPTION_KWARGS]
-        if len(keys) != 1:
+        if len(keys) != 1 or keys[0] not in dims:
             return None
         return keys[0], keys[0]
 
     if not opener.args or not isinstance(grouper := opener.args[0], str):
         return None
     if opener.name == "groupby_bins":
-        return grouper, f"{grouper}_bins"
+        # Guarded on the whole grouper, not its head: the dotted form's real group dim
+        # *is* the head, but its minted name is not ``f"{grouper}_bins"``, so a head-only
+        # check would let the wrong ``new_dim`` through under a correct ``group_dim``.
+        return (grouper, f"{grouper}_bins") if grouper in dims else None
     group_dim, _, component = grouper.partition(".")
+    if group_dim not in dims:
+        return None
     return group_dim, (component or group_dim)
 
 

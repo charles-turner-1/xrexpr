@@ -481,6 +481,45 @@ def test_context_chain_records_an_opener_then_lowers_to_one_node(ds):
     )
 
 
+@pytest.fixture
+def regioned_ds() -> xr.Dataset:
+    # A **non-dim coordinate** grouper's dataset: ``region`` is defined on ``lat``, so
+    # ``groupby("region")`` groups along ``lat`` and mints ``region``. Everyday xarray, and
+    # the shape issue #90 was about. One dim coord's worth of ``lat`` gives two groups.
+    rng = np.random.default_rng(0)
+    return xr.Dataset(
+        {"temperature": (("time", "lat"), rng.random((4, 3)))},
+        coords={
+            "time": np.arange(4),
+            "lat": np.arange(3),
+            "region": ("lat", ["a", "b", "b"]),
+        },
+    )
+
+
+def test_a_non_dim_coordinate_grouper_does_not_fuse(regioned_ds):
+    # Issue #90. The grouper's *name* is not the dim it consumes: ``groupby("region")``
+    # consumes ``lat`` and mints ``region``, but nothing in the call says so, and fusing on
+    # the call's own reading gave ``group_dim="region"`` — a schema claiming ``lat`` survived
+    # a grouping that removed it, read by the fold *and* by ``dim_effect``'s ``blocks`` and
+    # ``requires``. Refusing puts the pair on the opaque fallback: correct, unoptimised, and
+    # what ``02-lowering.md`` §5.5 specified from the start.
+    chain = regioned_ds.plan.groupby("region").mean()
+
+    assert [type(n) for n in chain._optimized()] == [Opaque, Opaque]
+    assert_equal(chain.collect(), regioned_ds.groupby("region").mean())
+
+
+def test_explain_prints_no_group_arrow_for_a_coordinate_grouper(regioned_ds):
+    # The user-visible half: ``explain()`` renders a fused node's inference as
+    # ``[group_dim -> new_dim]``, so pre-fix it stated ``[region -> region]`` — the tool
+    # asserting a wrong fact about the data. There is no arrow to get wrong now.
+    text = str(regioned_ds.plan.groupby("region").mean().explain())
+
+    assert "->" not in text
+    assert "GroupedReduce" not in text
+
+
 def test_ops_after_an_unfusable_context_are_modelled_again(ds):
     # The trailing barrier is retired. ``first`` closes the context and returns a Dataset,
     # so the ``mean`` after it is an ordinary Dataset reduce -- a chain the barrier
