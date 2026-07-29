@@ -348,6 +348,19 @@ unfused sidesteps for `groupby` entirely.
 > names and `time.month`/`time.day` only. The fix is a coverage test in `_grouper_dims` —
 > return `None` unless the grouper's head names a dim — plus a generator widening to draw
 > non-dim coordinate groupers, which is what would have caught it. Needs its own PR.
+>
+> **A second consumer, since PR 6 (2026-07).** The note above was written when nothing read
+> `group_dim` but the schema fold. `pushdown_selects_past_fused_reduces` now does, via
+> `_fused_dims`, so the mis-inferred `group_dim` reaches a *rewrite*: with `region` a
+> coordinate on `lat`, `_fused_dims` returns `{region}`, `lat` looks disjoint, and
+> `ds.plan.groupby("region").mean().isel(lat=0)` optimises to
+> `isel(lat=0)` → `groupby("region")` → `mean()`. Still not a data bug — a bare grouped
+> `mean()` consumes `lat`, so that select is invalid eagerly whichever order it runs in — but
+> the *error* degrades: xarray's `Dimensions {'lat'} do not exist` becomes pandas'
+> `Must pass non-zero number of levels/codes`, which is precisely what
+> `pushdown_selects_past_fused_reduces` leaves intersecting dims alone in order to avoid.
+> Recorded, not fixed here: the fix is still `_grouper_dims`', and this is a second reason
+> for it rather than a new one.
 
 ### 5.6 `GroupedMap` — a fourth node, spec'd and deferred (2026-07)
 
@@ -425,7 +438,9 @@ decidable from the call, which keeps it inside the "read it off the opener" disc
 the value is the schema arm and the retired `_trusted_prefix` truncation, both of which
 arrive without any rule firing. What it *makes* reachable, for a later PR: a select on a
 dim disjoint from `{group_dim} | consumes` may hop left, the same shape as every existing
-pushdown.
+pushdown — and `optimize._fused_dims` is where that decision has to be taken, since its
+`assert_never` will not compile against a fourth fused variant until the variant says which
+dims it involves. Ruleless is a choice made *there*, not an omission.
 
 **Test obligation, before it lands rather than after.** The property suite would not catch
 a wrong `group_dim` size. `test_tracked_schema_agrees_with_evaluation` compares dim
