@@ -1,10 +1,12 @@
 # xrexpr
 
 > [!WARNING]
-> This is a **work in progress**, and I've had Claude (Opus 4.8) scaffold it for me. Because of that, it might look good (IDK),
+> This is a **work in progress**, and I've had Claude (mostly Opus, some Fable) write the code for me. Because of that, it might look good (IDK),
 > but it is certainly not complete or and has not been drive-tested in any meaningful sense of the word. Claims about functionality
 > in this README should be considered probable at best, and aspirational at worst.
 > Use at your own caution (whilst this warning is still up. I'll get rid of it once I'm confident in the codebase).
+> P.S - This is not completely unread AI nonsense. I'm driving the AI pretty closely - but be warned that when you go this fast, things
+> get missed and/or overlooked.
 
 > [!NOTE]
 > **This is not an xarray project.** It isn't affiliated with, endorsed by, or supported by xarray or its
