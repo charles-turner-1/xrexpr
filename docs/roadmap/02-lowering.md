@@ -94,11 +94,12 @@ So lowering is a **stage**, sequenced before `optimize`, with its own contract:
 Both halves are property-testable, and the second is the direct analogue of the existing
 `test_optimize_is_idempotent`.
 
-## 5. The three fusion nodes
+## 5. The fusion nodes
 
-One node per builder kind, each flat: semantic fields the rules match on, plus the
-verbatim payload `emit` replays. No node carries another node — the sub-plan shape W9
-proposed is rejected in §5.4.
+Three of them, one per builder kind, each flat: semantic fields the rules match on, plus
+the verbatim payload `emit` replays. No node carries another node — the sub-plan shape W9
+proposed is rejected in §5.4. (§5.6 specs a fourth, `GroupedMap`, which is **deferred** and
+not part of this workstream's PR plan.)
 
 ### 5.1 `GroupedReduce`
 
@@ -127,6 +128,41 @@ aggregation case**; the map case falls to the opaque fallback in v1. (A later
 canonicalisation could lower the map case to a plain `Reduce` — grouping partitions the
 group dim, so reducing other dims per group and reassembling is the plain reduction —
 but that equivalence deserves its own legality note, not a v1 assumption.)
+
+> **The legality note, written (2026-07, verified against xarray 2026.7.0) — and the
+> canonicalisation does not survive it.** Two independent failures, one of which discharges
+> the premise itself:
+>
+> - **Order is not the hazard**, which was the suspicion worth discharging first. With
+>   `time.month` over interleaved (`Jan, Feb, Jan, Feb`) and over descending time, the map
+>   reassembles in the **original** order.
+> - **Coverage is.** "Grouping partitions the group dim" holds only if every point lands in
+>   some group. A grouper that drops points returns the group dim *shorter*, and a plain
+>   reduction cannot:
+>
+>   ```
+>   ds.groupby_bins("lat", bins=[0.5, 2]).mean("time")  ->  lat: 2   (lat=0 is in no bin)
+>   ds.mean("time")                                     ->  lat: 3
+>   ```
+>
+>   A NaN group label does the same (`region = [nan, 1.0, 1.0]` → `lat: 2`). `groupby_bins`
+>   is in `GroupedReduce`'s `Literal` and in `ContextOpenName`, so this is in scope rather
+>   than hypothetical.
+> - **And broadcasting kills it even for a covering grouper.** A map puts `group_dim` on
+>   **every** variable, including ones that never carried it — the exact mirror of the
+>   aggregation case's minting, and the fact that makes the two shapes siblings rather than
+>   one being a degenerate case of a plain reduce:
+>
+>   ```
+>   ds.groupby("time.month").mean("lat")   ->  tas(time, lon)  elevation(time, lon)  flat(time, lon)
+>   ds.mean("lat")                         ->  tas(time, lon)  elevation(lon)        flat(lon)
+>   ```
+>
+>   `elevation(lat, lon)` and `flat(lon)` gain `time`. So the equivalence fails on any
+>   dataset with a variable lacking the group dim, regardless of grouper.
+>
+> **So the map case earns its own node, and that node is a `Map`, not a `Reduce`.** Spec'd
+> in §5.6; deferred, not scheduled.
 
 ### 5.2 `WindowedReduce`
 
@@ -297,6 +333,133 @@ which `group_dim` reads off directly. Any other grouper — a `DataArray`
 `group_dim` and falls to the fallback in v1; the `DataArray` case also trips the
 unhashable-payload wart ([`07-small-wins.md`](./07-small-wins.md) §6), which staying
 unfused sidesteps for `groupby` entirely.
+
+> **The implementation does not match this paragraph (found 2026-07, unfixed).** A
+> **non-dim coordinate name does fuse**, because `_grouper_dims` reads `args[0]` and
+> partitions on `"."` without ever checking the result is a dim. With
+> `region` a coordinate on `lat`, `ds.groupby("region").mean()` lowers to a single
+> `GroupedReduce(group_dim="region", new_dim="region")`, and the tracked schema comes out
+> **wrong**: `{time: 4, lat: 3, region: None}` against an actual `{region: 2, time: 4}` —
+> `lat` is the dim the grouping consumed, and the fold says it survived.
+>
+> Replay is unaffected (`emit` reproduces the same two calls, and equality-vs-eager
+> passes), so this is a *tracking* bug, not a data bug — but it is the schema every rule
+> downstream reads. The property suite cannot see it: the generators draw groupers from dim
+> names and `time.month`/`time.day` only. The fix is a coverage test in `_grouper_dims` —
+> return `None` unless the grouper's head names a dim — plus a generator widening to draw
+> non-dim coordinate groupers, which is what would have caught it. Needs its own PR.
+>
+> **A second consumer, since PR 6 (2026-07).** The note above was written when nothing read
+> `group_dim` but the schema fold. Select pushdown now does too, so the mis-inferred
+> `group_dim` reaches a *rewrite*: with `region` a coordinate on `lat`, `dim_effect`'s
+> `GroupedReduce` arm returns `blocks={region}`, `lat` looks disjoint, and
+> `ds.plan.groupby("region").mean().isel(lat=0)` optimises to
+> `isel(lat=0)` → `groupby("region")` → `mean()`. Still not a data bug — a bare grouped
+> `mean()` consumes `lat`, so that select is invalid eagerly whichever order it runs in — but
+> the *error* degrades: xarray's `Dimensions {'lat'} do not exist` becomes pandas'
+> `Must pass non-zero number of levels/codes`, which is precisely what the rule leaves
+> intersecting dims alone in order to avoid.
+>
+> The unification (§11.1) widens the reach rather than narrowing it: `blocks` and
+> `requires` both read `group_dim`, so projection pushdown consults the same wrong value.
+> Recorded, not fixed here: the fix is still `_grouper_dims`', and this is a second reason
+> for it rather than a new one.
+
+### 5.6 `GroupedMap` — a fourth node, spec'd and deferred (2026-07)
+
+The map case of §5.1 — a grouped closer naming dims that *exclude* the group dim — falls
+to the opaque fallback today. That is correct and will stay correct; this section specifies
+what modelling it would look like, so the option is a decision rather than drift. **Not
+scheduled**, and the trigger is at the end.
+
+**What the fallback costs.** An unfused pair demotes to *two* `Opaque` nodes, and the third
+cost is the one that is easy to miss:
+
+1. no rule matches it, so nothing moves across it — the intended barrier behaviour;
+2. `apply_schema` models `Opaque` as dim- and variable-preserving, which a map is not
+   (it removes the closer's dims), so the tracked schema is a guess from there on;
+3. `optimize._trusted_prefix` returns the index of the **first** `Opaque`, so a map pair
+   early in a chain disables `pushdown_projections` for *everything downstream of it*, not
+   just for itself.
+
+**Why not a plain `Reduce`** — §5.1's legality note. Two independent failures (coverage,
+and broadcasting the group dim onto every variable), so the canonicalisation is dead, not
+merely conditional.
+
+**Why `GroupedMap` and not `Map`.** `DatasetGroupBy.map(func)` is a real xarray method,
+and one that records `Opaque` (§5.5). A node called `Map` would read as that call's node;
+it is not, and the two must not be confused. `GroupedMap` also keeps the
+`<context><operation>` scheme the other three fusion nodes already use.
+
+**Where it lives: `LoweredOp`, not `Op`.** `Op` is the *recorder's* vocabulary — one node
+per fluent call — and a builder pair is two calls, so no recorder can produce this. It
+belongs beside `GroupedReduce`/`WindowedReduce`/`WeightedReduce`, which is exactly the
+asymmetry `ir.py`'s `LoweredOp` comment already describes.
+
+```python
+@dataclass(frozen=True)
+class GroupedMap:
+    name: Literal["groupby", "groupby_bins", "resample"]
+    group_dim: Hashable                  # KEPT, not consumed -- the defining difference
+    reduce: str                          # the closing method: mean/sum/std/...
+    consumes: frozenset[Hashable]        # dims the closer names; never holds group_dim
+    # + the verbatim call headers for emit()
+```
+
+No `new_dim` field at all. That is the reason this is a sibling variant rather than
+`GroupedReduce` with `new_dim: Hashable | None`: an optional field would make every
+consumer branch on it, which is the same dispatch a second variant gives with the
+exhaustiveness check included. `consumes` is a plain `frozenset`, never `AllDims` — a bare
+closer *is* the aggregation case by definition, so a map's closer always names dims.
+
+**The dim algebra (verified against xarray 2026.7.0), and its two traps:**
+
+- `group_dim` survives **at its original length** — `resample(time="2D").mean("lat")` on a
+  4-step `time` returns `time: 4`, not the resampled `2`. Cribbing `GroupedReduce`'s size
+  intuition here is the plausible bug, and see the test obligation below for why nothing
+  would currently catch it.
+- the closer's `consumes` dims are removed, exactly like a plain reduce;
+- nothing is minted;
+- **every variable comes back carrying `group_dim`**, including ones that never had it:
+  `elevation(lat, lon)` and `flat(lon)` both return as `(time, lon)` under
+  `groupby("time.month").mean("lat")`. This is the mirror of the aggregation case's
+  minting, and in `apply_schema` it needs the existing `minted` set — which drives the
+  "add to every variable" pass at the end of the fold — *without* also writing
+  `dims[group_dim] = None`, since the size here is known. Those two effects are welded
+  together in the `GroupedReduce` and `WeightedReduce` arms; a map needs one and not the
+  other.
+- unlike a weighted reduce (§5.3), a map does **not** raise when a variable lacks a named
+  dim: `flat(lon)` under `.mean("lat")` comes back fine.
+
+**Size, honestly.** `group_dim`'s length is exact for a **covering** grouper — a dim name,
+a dim-coordinate component (`time.month`), or `resample`, all of which give every point a
+group — and unknown (`None`) for `groupby_bins`, whose bins may exclude points. That is
+decidable from the call, which keeps it inside the "read it off the opener" discipline
+`_grouper_dims` already follows.
+
+**Rules: none.** It ships as a modelled barrier, on the `WeightedReduce` precedent (§8.1):
+the value is the schema arm and the retired `_trusted_prefix` truncation, both of which
+arrive without any rule firing. What it *makes* reachable, for a later PR: a select on a
+dim disjoint from `{group_dim} | consumes` may hop left, the same shape as every existing
+pushdown — and `optimize.dim_effect` is where that decision has to be taken, since its
+`assert_never` will not compile against a fourth fused variant until the variant says which
+dims it `blocks` and which it `requires`. Ruleless is a choice made *there*, not an
+omission — and since the unification (§11.1), it is one choice rather than three, so a
+`GroupedMap` cannot pick up a conservative answer from one rule and a wrong one from
+another.
+
+**Test obligation, before it lands rather than after.** The property suite would not catch
+a wrong `group_dim` size. `test_tracked_schema_agrees_with_evaluation` compares dim
+**names** only; `test_sizes_are_tracked_exactly_without_label_slices` never sees builder
+chains; and a ruleless node changes nothing observable in the replay, so the equality
+property is silent too. Reformulate the size property first — assert exactness wherever
+the schema claims to know, per [`07-small-wins.md`](./07-small-wins.md) §7. The generator
+side is already done: `_closer_dims` draws the map shape for both grouped kinds.
+
+**Trigger.** Not "when someone has time". Either a real chain where a map pair sits early
+enough to cost the whole plan its projection pushdown (cost 3 above, the only one that
+compounds), or the first rule that would want to move across one. Until then the fallback
+is correct, and correct-but-pessimised is the position this memo takes everywhere else.
 
 ## 6. The one field that must change — and W7 already specified it
 
