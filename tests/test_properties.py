@@ -350,7 +350,8 @@ def _builder_pair(draw, obj, kind=None):
       fallback.
     - **a grouped closer may name dims or not**, and the two mean different things: bare or
       naming the group dim is an aggregation (which fuses), naming *other* dims is a
-      per-group map (which does not). Both are legal, so both are drawn.
+      per-group map (which does not). Both are legal — for ``resample`` as much as for
+      ``groupby`` — so both are drawn, for both kinds.
     - **``weighted`` needs a real ``DataArray``**, aligned so nothing is reindexed away.
 
     ``max``/``min`` are dropped whenever any dim is empty, for the reason
@@ -416,7 +417,11 @@ def _builder_pair(draw, obj, kind=None):
 
 @st.composite
 def _closer_dims(draw, obj, kind, dim):
-    """The closer's kwargs: a ``dim=`` spec where the builder takes one, else nothing."""
+    """The closer's kwargs: a ``dim=`` spec where the builder takes one, else nothing.
+
+    ``dim`` is the builder's own dim, needed only by the ``weighted`` arm below — the
+    grouped kinds offer every dim regardless of which one they group over.
+    """
     if kind in {"rolling", "coarsen"}:
         return {}  # takes no dim argument at all -- see ``_builder_pair``
     if kind == "weighted":
@@ -429,8 +434,15 @@ def _closer_dims(draw, obj, kind, dim):
         for var in obj.data_vars.values():
             shared &= set(var.dims)
         candidates = sorted(shared | {dim})
-    else:  # grouped: the group dim aggregates, any other dim is a per-group map
-        candidates = sorted(obj.sizes) if kind == "groupby" else [dim]
+    else:
+        # Both grouped kinds offer every dim, and the choice is semantic: bare or naming
+        # the group dim is an aggregation (which fuses), naming only other dims is a
+        # per-group map (which does not). That holds for ``resample`` exactly as for
+        # ``groupby`` -- verified against xarray 2026.7.0, where
+        # ``resample(time="2D").mean(dim=["lat"])`` comes back on the *original* ``time``,
+        # not the resampled one. Drawing only the group dim here, as this once did for
+        # ``resample``, left the map case reachable through ``groupby`` alone.
+        candidates = sorted(obj.sizes)
     spec = draw(
         st.one_of(
             st.none(),  # bare
