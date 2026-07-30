@@ -289,3 +289,10 @@ while it and the tracker agree.
   extended-summary family) are in `[tool.numpydoc_validation]` in `pyproject.toml`.
   Module docstrings keep their design-narrative prose; the sectioned format is for
   callables.
+- **Tests carry a docstring too.** Every test function gets a one-line NumPy-style
+  summary stating the scenario it pins — declaratively ("A select hops in front of a
+  disjoint rolling window..."), not as an instruction, since the sentence describes what
+  the test *is*, not an action to perform. Promote any load-bearing reasoning that would
+  otherwise sit in a leading `#` comment into a `Notes` section instead; leave trailing,
+  line-level comments where they are. `ruff`'s `D` rules run on `tests/**` too (only
+  `D401` is exempted there, for the declarative-summary point above).

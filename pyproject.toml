@@ -143,12 +143,11 @@ select = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# The docstring rules are for the API, not the suite. ``tests`` is already in the
-# top-level ``exclude``, but that only governs *traversal*: a path named explicitly on
-# the command line (``ruff check src tests``, the handover's own gate) is linted anyway.
-# So the exemption is spelled here too, where it holds however ruff is invoked. A test's
-# name is its documentation, and D103 on 300-odd of them would be noise, not enforcement.
-"tests/**" = ["D"]
+# Every test now carries a NumPy-style docstring stating the scenario it pins (see
+# ``docs/roadmap/00-assessment.md``), so the suite is linted like the rest of the code --
+# except D401: a test's summary states the scenario declaratively ("A select hops in front
+# of..."), not as an imperative instruction, which is what D401 expects of a function.
+"tests/**" = ["D401"]
 
 [tool.ruff.lint.pydocstyle]
 # NumPy docstring convention (numpydoc): ``Parameters``/``Returns``/``Raises``/``Notes``
