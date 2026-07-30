@@ -10,6 +10,21 @@ repos:
     hooks:
     - id: black
       language_version: python3
+  - repo: https://github.com/numpy/numpydoc
+    rev: 'v1.10.0'
+    hooks:
+    - id: numpydoc-validation
+      name: numpydoc-validation
+      # Checks the docstring *content* against the signature (every parameter
+      # documented, in order, and a Returns section where a value comes back) — the half
+      # ruff's D rules leave open, since `convention = "numpy"` switches D417 off. The
+      # check list lives in [tool.numpydoc_validation] in pyproject.toml.
+      #
+      # src only, matching ruff's own exclude: `_version.py` is versioneer-generated and
+      # tests are not API.
+      files: ^src/xrexpr/
+      exclude: ^src/xrexpr/_version\.py$
+
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: 'v1.17.1'
     hooks:

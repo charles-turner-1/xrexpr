@@ -97,14 +97,31 @@ Rule = Callable[[Plan, SchemaState], Plan | None]
 def optimize(nodes: Plan, schema: SchemaState) -> Plan:
     """Rewrite ``nodes`` into an equivalent plan, applying every rule to a fixpoint.
 
-    ``schema`` is the schema of the dataset the plan starts from — the *base*, not the
-    one left at the end of recording — since rules need to know the shape each node
-    sees, and rewriting changes that.
+    Parameters
+    ----------
+    nodes : Plan
+        The lowered plan to rewrite.
+    schema : SchemaState
+        The schema of the dataset the plan starts from — the *base*, not the one left at
+        the end of recording — since rules need to know the shape each node sees, and
+        rewriting changes that.
 
-    Each rule preserves the plan's result, so the returned plan replays to the same
-    dataset as ``nodes`` — only cheaper. A rule returns ``None`` when it changes nothing,
-    so the loop detects the fixpoint from that signal rather than by comparing whole
-    plans each pass.
+    Returns
+    -------
+    Plan
+        An equivalent plan: it replays to the same dataset as ``nodes``, only cheaper.
+
+    Raises
+    ------
+    InvalidExpressionError
+        If a rule proves the plan can never replay — a select on a dim a preceding
+        reduce removed. See :func:`pushdown_selects`.
+
+    Notes
+    -----
+    Each rule preserves the plan's result, which is what makes the guarantee above hold
+    of the whole loop. A rule returns ``None`` when it changes nothing, so the loop
+    detects the fixpoint from that signal rather than by comparing whole plans each pass.
 
     **Termination.** Every rule strictly decreases the lexicographic measure
     ``(len(plan), sum of the indices of the Select and Project nodes)``. Merging and
@@ -126,7 +143,20 @@ def optimize(nodes: Plan, schema: SchemaState) -> Plan:
 
 
 def _schemas(nodes: Plan, base: SchemaState) -> list[SchemaState]:
-    """The schema each node *sees*: ``out[i]`` is the schema entering ``nodes[i]``."""
+    """Fold the base schema forward through a plan.
+
+    Parameters
+    ----------
+    nodes : Plan
+        The plan to fold over.
+    base : SchemaState
+        The schema of the dataset the plan starts from.
+
+    Returns
+    -------
+    list of SchemaState
+        The schema each node *sees*: ``out[i]`` is the schema entering ``nodes[i]``.
+    """
     if not nodes:
         return []
     out = [base]
@@ -136,8 +166,22 @@ def _schemas(nodes: Plan, base: SchemaState) -> list[SchemaState]:
 
 
 def _resolve_dims(consumes: DimSet, entering: SchemaState) -> frozenset[Hashable]:
-    """``consumes`` made concrete against the schema *entering* the node that carries it.
+    """Make a dim set concrete against the schema *entering* the node that carries it.
 
+    Parameters
+    ----------
+    consumes : DimSet
+        The node's dim set, concrete or symbolic.
+    entering : SchemaState
+        The schema entering that node.
+
+    Returns
+    -------
+    frozenset of Hashable
+        The named dims, with :data:`~xrexpr.ir.ALL_DIMS` expanded to ``entering``'s dims.
+
+    Notes
+    -----
     :data:`~xrexpr.ir.ALL_DIMS` — a bare ``mean()`` — means every dim the op finds when
     it runs, which is exactly what ``entering`` records. Callers must be inside the
     trusted prefix, where that fold is exact rather than a guess.
@@ -146,8 +190,21 @@ def _resolve_dims(consumes: DimSet, entering: SchemaState) -> frozenset[Hashable
 
 
 def _trusted_prefix(nodes: Plan) -> int:
-    """How far the folded schema is exact: the index of the first unmodelled op.
+    """Find how far the folded schema is exact.
 
+    Parameters
+    ----------
+    nodes : Plan
+        The plan to scan.
+
+    Returns
+    -------
+    int
+        The index of the first :class:`~xrexpr.ir.Opaque` node, or the plan's length if
+        there is none.
+
+    Notes
+    -----
     :class:`~xrexpr.ir.Opaque` covers anything the IR doesn't model, including ops that
     rename, add or drop variables — so past the first one, ``data_vars`` is a guess. A
     rule reasoning about variables must confine itself to ``nodes[:_trusted_prefix(nodes)]``.
@@ -162,6 +219,21 @@ def _trusted_prefix(nodes: Plan) -> int:
 class DimEffect:
     """What one node does to dims, as the *rules* need to know it.
 
+    Attributes
+    ----------
+    blocks : DimSet or None
+        Dims a select may not hop over, or ``None`` to refuse every hop.
+    requires : DimSet or None
+        Dims the node needs of its input, or ``None`` to refuse every projection hop.
+    on_conflict : {"immovable", "invalid"}
+        What a select hopping over :attr:`blocks` means. ``"invalid"`` — the node
+        *removed* those dims, so the chain can never replay and the optimiser should say
+        so. ``"immovable"`` — the dims survive in some form, so the chain is very likely
+        valid and merely un-reorderable; leave it. Only meaningful when ``blocks`` is not
+        ``None``.
+
+    Notes
+    -----
     A **derived** view, never stored: :func:`dim_effect` computes it from a node with one
     ``match``, which is the house's "derive, don't store" discipline (``Select.consumes``,
     ``Project.single``) applied one level up — at the plan rather than the node. One
@@ -183,14 +255,8 @@ class DimEffect:
     a node that answers ``None``.
     """
 
-    #: Dims a select may not hop over, or ``None`` to refuse every hop.
     blocks: DimSet | None
-    #: Dims the node needs of its input, or ``None`` to refuse every projection hop.
     requires: DimSet | None
-    #: What a select hopping over :attr:`blocks` means. ``"invalid"`` — the node *removed*
-    #: those dims, so the chain can never replay and the optimiser should say so.
-    #: ``"immovable"`` — the dims survive in some form, so the chain is very likely valid
-    #: and merely un-reorderable; leave it. Only meaningful when ``blocks`` is not ``None``.
     on_conflict: Literal["invalid", "immovable"] = "immovable"
 
 
@@ -202,8 +268,21 @@ _OPAQUE_EFFECT = DimEffect(blocks=None, requires=None)
 
 
 def dim_effect(node: LoweredOp) -> DimEffect:
-    """The dim effect of ``node``: one dispatch site, closed with ``assert_never``.
+    """Compute the dim effect of ``node``: one dispatch site, closed with ``assert_never``.
 
+    Parameters
+    ----------
+    node : LoweredOp
+        The node a rule wants to move something across.
+
+    Returns
+    -------
+    DimEffect
+        What a select coming from the right must avoid, and what a projection going to
+        the left must supply. Kinds the optimiser does not model answer ``None`` to both.
+
+    Notes
+    -----
     The point of gathering these here is that a **new variant must answer every question at
     once**. Before this existed the same facts were spread over three partial matches — one
     in ``pushdown_selects``, one in ``_fused_dims``, four arms in
@@ -267,6 +346,20 @@ def dim_effect(node: LoweredOp) -> DimEffect:
 def merge_adjacent_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
     """Fold each run of consecutive same-op selects into one node.
 
+    Parameters
+    ----------
+    nodes : Plan
+        The plan to rewrite.
+    schema : SchemaState
+        The schema entering the plan. Unused — this is a dim-level rule.
+
+    Returns
+    -------
+    Plan or None
+        The plan with every foldable run folded, or ``None`` when no run was folded.
+
+    Notes
+    -----
     Consecutive ``isel``s (or ``sel``s) compose, so ``ds.isel(time=0).isel(lat=1)``
     becomes a single ``isel({time: 0, lat: 1})``. Selects on *different* dims simply
     union; selects on the **same** dim are composed by :func:`_compose_into`, because
@@ -278,8 +371,6 @@ def merge_adjacent_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
     (different indexing semantics), a select carrying *option* kwargs
     (``drop``/``method``/...) that a bare merged indexer couldn't carry faithfully, and
     a same-dim collision with no statically provable composition.
-
-    Returns ``None`` when no run was folded (nothing to change).
     """
     out: Plan = []
     folded = False
@@ -323,12 +414,24 @@ def merge_adjacent_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
 
 
 def _mergeable_select(node: LoweredOp) -> TypeGuard[Select]:
-    """Whether ``node`` is a select fully described by its ``indexer`` (no option kwargs).
+    """Report whether ``node`` is a select fully described by its ``indexer``.
 
+    Parameters
+    ----------
+    node : LoweredOp
+        The candidate node.
+
+    Returns
+    -------
+    bool
+        ``True`` for a :class:`~xrexpr.ir.Select` carrying no option kwargs. A
+        ``TypeGuard``, so callers narrow ``node`` to ``Select``.
+
+    Notes
+    -----
     A select whose kwargs carry keys beyond the indexed dims (``drop``, ``method``,
     ``missing_dims``, ``tolerance``) can't be folded into a bare indexer dict, so it
-    acts as a merge barrier rather than being silently stripped of those options. A
-    ``TypeGuard`` so callers narrow ``node`` to :class:`~xrexpr.ir.Select`.
+    acts as a merge barrier rather than being silently stripped of those options.
     """
     return isinstance(node, Select) and all(k in node.indexer for k in node.kwargs)
 
@@ -340,6 +443,23 @@ def _compose_into(
 ) -> dict[Hashable, Indexer] | None:
     """Merge ``inner``'s indexers into ``outer``'s, composing where dims collide.
 
+    Parameters
+    ----------
+    name : str
+        The select kind, ``"isel"`` or ``"sel"``. Only ``isel`` composes — ``sel``
+        composition needs coordinate values.
+    outer : dict
+        The indexers applied first, accumulated so far.
+    inner : Mapping
+        The indexers applied second, addressing positions *within* ``outer``'s result.
+
+    Returns
+    -------
+    dict or None
+        The merged mapping, or ``None`` when the two must not be merged at all.
+
+    Notes
+    -----
     A dim in only one of the two carries over untouched. A dim in **both** is the case
     the plain ``dict.update`` got wrong: ``isel(time=slice(100,1000)).isel(time=slice(10,20))``
     is *not* ``isel(time=slice(10,20))`` — the second indexer addresses positions
@@ -370,8 +490,21 @@ def _compose_into(
 def _compose_indexer(outer: Indexer, inner: Indexer) -> Indexer | None:
     """Compose two positional indexers applied to the same dim, ``outer`` then ``inner``.
 
-    Returns the single equivalent :data:`~xrexpr.indexers.Indexer`, or ``None`` when no
-    composition is provable without the dim's length (which the optimiser doesn't carry).
+    Parameters
+    ----------
+    outer : Indexer
+        The indexer applied first, to the original dim.
+    inner : Indexer
+        The indexer applied second, to ``outer``'s result.
+
+    Returns
+    -------
+    Indexer or None
+        The single equivalent indexer, or ``None`` when no composition is provable
+        without the dim's length (which the optimiser doesn't carry).
+
+    Notes
+    -----
     The dividing line is whether ``outer``'s selected positions are knowable *without* that
     length, which three shapes satisfy:
 
@@ -415,6 +548,20 @@ def _compose_indexer(outer: Indexer, inner: Indexer) -> Indexer | None:
 def _index_sequence(positions: tuple[int, ...], inner: Indexer) -> Indexer | None:
     """Apply ``inner`` to a concrete tuple of positions, i.e. ``positions[inner]``.
 
+    Parameters
+    ----------
+    positions : tuple of int
+        The positions ``outer`` selected, fully enumerated.
+    inner : Indexer
+        The indexer applied to that enumeration.
+
+    Returns
+    -------
+    Indexer or None
+        The composed indexer, or ``None`` when the composition is refused.
+
+    Notes
+    -----
     Exact by construction — the outer selection is already fully enumerated, so there
     is nothing to reason about. An out-of-range ``inner`` would raise here; that is
     reported as uncomposable (``None``) so the error surfaces from xarray at replay, in
@@ -447,6 +594,20 @@ def _index_sequence(positions: tuple[int, ...], inner: Indexer) -> Indexer | Non
 def _compose_slice(outer: ForwardSlice, inner: Indexer) -> Indexer | None:
     """Compose a forward, non-negative ``outer`` slice with ``inner``.
 
+    Parameters
+    ----------
+    outer : ForwardSlice
+        The slice applied first — forward and non-negative by construction.
+    inner : Indexer
+        The indexer applied to its result.
+
+    Returns
+    -------
+    Indexer or None
+        The composed indexer, or ``None`` when the composition is refused.
+
+    Notes
+    -----
     Element ``k`` of the result is ``outer_start + (inner_start + k * inner_step) *
     outer_step``, which is itself an arithmetic progression — so a slice composed with a
     slice is a slice, and with a scalar is a scalar. The stop bound is the *tighter* of
@@ -511,8 +672,28 @@ def _mapped_positions(
 ) -> Positions | None:
     """Map ``inner``'s element indices onto ``outer``'s positions, or refuse.
 
-    ``addressed`` is every element of ``outer`` that ``inner`` reads; ``kept`` is the subset
-    it actually selects (they differ only for a mask). The check runs over *addressed*
+    Parameters
+    ----------
+    outer : ForwardSlice
+        The slice applied first; its ``stop`` is the bound that matters here.
+    start : int
+        ``outer``'s start, defaulted to 0.
+    step : int
+        ``outer``'s step, defaulted to 1.
+    addressed : iterable of int
+        Every element of ``outer`` that ``inner`` reads.
+    kept : iterable of int
+        The subset ``inner`` actually selects. Differs from ``addressed`` only for a mask.
+
+    Returns
+    -------
+    Positions or None
+        The mapped positions, or ``None`` when any addressed element is out of ``outer``'s
+        range.
+
+    Notes
+    -----
+    The check runs over *addressed*
     because it is the same trap the ``Scalar`` arm guards: reaching past ``outer``'s stop
     made the original two-step chain raise, but the composed position is often still valid
     in the full dim and would quietly return data instead. Reading is what raises, so
@@ -526,13 +707,49 @@ def _mapped_positions(
 
 
 def _scaled_stop(inner_stop: int | None, start: int, step: int) -> int | None:
-    """``inner``'s stop expressed as a position in the *original* dim, or ``None``."""
+    """Express ``inner``'s stop as a position in the *original* dim.
+
+    Parameters
+    ----------
+    inner_stop : int or None
+        ``inner``'s stop bound, in ``outer``'s coordinates.
+    start : int
+        ``outer``'s start, defaulted to 0.
+    step : int
+        ``outer``'s step, defaulted to 1.
+
+    Returns
+    -------
+    int or None
+        The equivalent position in the original dim, or ``None`` for an unbounded stop.
+    """
     return None if inner_stop is None else start + inner_stop * step
 
 
 def pushdown_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
     """Hop a select left past a preceding node whose dims permit it.
 
+    Parameters
+    ----------
+    nodes : Plan
+        The plan to rewrite.
+    schema : SchemaState
+        The schema entering the plan. Unused — this is a dim-level rule, and even
+        :data:`~xrexpr.ir.ALL_DIMS` needs no schema here (see the notes).
+
+    Returns
+    -------
+    Plan or None
+        The plan with one select moved one hop left, or ``None`` when no adjacency swaps.
+
+    Raises
+    ------
+    InvalidExpressionError
+        When the select indexes a dim the crossed node *removed*
+        (:attr:`DimEffect.on_conflict` is ``"invalid"``), so the chain can never replay.
+
+    Notes
+    -----
     The structural test is only *which* adjacency fires; what happens once it does is
     **set algebra** on the select's dims against the crossed node's
     :attr:`DimEffect.blocks`, plus that node's answer to what an overlap *means*:
@@ -563,9 +780,8 @@ def pushdown_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
     ``ALL_DIMS`` needs no schema: whatever the dims turn out to be, a reduce over every one
     of them leaves nothing for a select to index, so every select dim overlaps.
 
-    One hop per call, returning the rewritten plan; ``None`` when no adjacency swaps.
-    :func:`optimize`'s fixpoint composes hops so a select reaches the front of a run of
-    reductions (and adjacent selects then merge).
+    One hop per call. :func:`optimize`'s fixpoint composes hops so a select reaches the
+    front of a run of reductions (and adjacent selects then merge).
     """
     for i in range(len(nodes) - 1):
         crossed, select = nodes[i], nodes[i + 1]
@@ -595,6 +811,22 @@ def pushdown_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
 def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
     """Hop a variable projection left past a preceding reduce, select or fused reduce.
 
+    Parameters
+    ----------
+    nodes : Plan
+        The plan to rewrite.
+    schema : SchemaState
+        The schema of the dataset the plan starts from. Load-bearing here, unlike in the
+        dim-level rules: whether a projection may cross an op depends on which dims the
+        projected *variables* carry at that point, which only the fold knows.
+
+    Returns
+    -------
+    Plan or None
+        The plan with one projection moved one hop left, or ``None`` when nothing moves.
+
+    Notes
+    -----
     ``ds.mean("time")[["tas"]]`` reduces every variable in the dataset and then throws
     all but ``tas`` away; ``ds[["tas"]].mean("time")`` reduces one. The rule fires on a
     ``(reduce | select, project)`` adjacency and swaps it when the projection can safely
@@ -661,9 +893,9 @@ def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
     (278 of them hopped) changed no value, no coordinate and raised nothing new; the 36
     that skipped an error each returned exactly the projection-first answer.
 
-    One hop per call, returning the rewritten plan; ``None`` when nothing moves.
-    :func:`optimize`'s fixpoint composes hops so a projection walks to the front of the
-    plan (where issue #43 wants to eventually turn it into a backend read plan).
+    One hop per call. :func:`optimize`'s fixpoint composes hops so a projection walks to
+    the front of the plan (where issue #43 wants to eventually turn it into a backend
+    read plan).
     """
     if not any(isinstance(node, Project) for node in nodes):
         return None  # nothing to move: don't fold the schema for a projection-free plan
@@ -698,6 +930,21 @@ def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
 def pushdown_selects_past_rechunks(nodes: Plan, schema: SchemaState) -> Plan | None:
     """Hop a select left past a preceding ``chunk`` so the rechunk moves less data.
 
+    Parameters
+    ----------
+    nodes : Plan
+        The plan to rewrite.
+    schema : SchemaState
+        The schema entering the plan. Unused — this rule has no disjointness test at all.
+
+    Returns
+    -------
+    Plan or None
+        The plan with one select moved in front of a rechunk — the spec rebuilt or
+        dropped as needed — or ``None`` when nothing moved.
+
+    Notes
+    -----
     A rechunk changes no dim, no size and no value — only chunk topology — so a select
     and a rechunk *always* commute as far as results go. What the rule protects is the
     chunking itself: selecting first can only leave dask with less data to shuffle, and
@@ -721,7 +968,7 @@ def pushdown_selects_past_rechunks(nodes: Plan, schema: SchemaState) -> Plan | N
       the stated purpose rather than a leftover.
 
     Unlike :func:`pushdown_selects` this never raises: a rechunk cannot make a select
-    unreplayable, only slower. One hop per call; ``None`` when nothing moved.
+    unreplayable, only slower. One hop per call.
     """
     for i in range(len(nodes) - 1):
         match nodes[i], nodes[i + 1]:
@@ -751,8 +998,20 @@ def pushdown_selects_past_rechunks(nodes: Plan, schema: SchemaState) -> Plan | N
 
 
 def _pushable_rechunk(node: Rechunk) -> bool:
-    """Whether a select may cross ``node``, or it acts as a barrier.
+    """Report whether a select may cross ``node``, or it acts as a barrier.
 
+    Parameters
+    ----------
+    node : Rechunk
+        The rechunk the select would hop in front of.
+
+    Returns
+    -------
+    bool
+        ``True`` when the select may cross, ``False`` for the two barrier forms below.
+
+    Notes
+    -----
     Two forms are barriers:
 
     - an **explicit block sequence** (``chunk({"time": (100, 400, 500)})``, or a

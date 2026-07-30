@@ -116,11 +116,17 @@ exclude = [
     "_version.py",
     "tests"
 ]
+[tool.ruff.lint]
 # E402: module level import not at top of file
 # E501: line too long - let black worry about that
+# D105: magic methods (``__repr__``, ``__getitem__``) carry their meaning in the name
+# D205: a summary line followed by a blank line, but multi-sentence summaries here
+#       deliberately wrap -- black owns the wrapping, so this would fight it
 ignore = [
     "E402",
     "E501",
+    "D105",
+    "D205",
 ]
 select = [
     # Pyflakes
@@ -132,12 +138,28 @@ select = [
     "I",
     # Pyupgrade
     "UP",
+    # pydocstyle -- NumPy-style docstrings (see [tool.ruff.lint.pydocstyle])
+    "D",
 ]
 
-[tool.ruff.mccabe]
+[tool.ruff.lint.per-file-ignores]
+# The docstring rules are for the API, not the suite. ``tests`` is already in the
+# top-level ``exclude``, but that only governs *traversal*: a path named explicitly on
+# the command line (``ruff check src tests``, the handover's own gate) is linted anyway.
+# So the exemption is spelled here too, where it holds however ruff is invoked. A test's
+# name is its documentation, and D103 on 300-odd of them would be noise, not enforcement.
+"tests/**" = ["D"]
+
+[tool.ruff.lint.pydocstyle]
+# NumPy docstring convention (numpydoc): ``Parameters``/``Returns``/``Raises``/``Notes``
+# sections, underlined with dashes. Selecting it here also switches off the rules that
+# contradict it (D203, D212, D213, D402, D413, D415, D416, D417).
+convention = "numpy"
+
+[tool.ruff.lint.mccabe]
 max-complexity = 18
 
-[tool.ruff.isort]
+[tool.ruff.lint.isort]
 known-first-party = ["xrexpr"]
 
 [tool.pytest.ini_options]
@@ -209,3 +231,33 @@ python = "3.12.*"
 
 [tool.pixi.feature.py313.dependencies]
 python = "3.13.*"
+
+# numpydoc validation (pre-commit hook ``numpydoc-validation``)
+# ------------------------------------------------------------
+# The second half of the enforcement ruff can't do: ruff's ``D`` rules check that the
+# *sections* are well formed, but under ``convention = "numpy"`` D417 is off, so nothing
+# there checks that the sections say anything true about the signature. These do —
+# every parameter documented, in order, and a ``Returns`` section wherever a value comes
+# back.
+[tool.numpydoc_validation]
+checks = [
+    "PR01",  # parameters not documented
+    "PR02",  # documented parameters that don't exist
+    "PR03",  # parameters documented out of signature order
+    "PR04",  # parameter has no type
+    "PR05",  # parameter type ends with a period
+    "PR06",  # parameter type uses a non-canonical spelling (integer -> int, ...)
+    "PR07",  # parameter has no description
+    "RT01",  # no Returns section where a value is returned
+    "RT03",  # return value has no description
+    "RT04",  # return value type ends with a period
+    "GL02",  # closing quotes on their own line
+    "GL03",  # double line break in the middle of a docstring
+    "YD01",  # a Yields section where the callable yields
+]
+# Deliberately *not* enabled:
+# - GL01 (summary on the line after the opening quotes). numpydoc's own format asks for
+#   it; this codebase, black and ruff's D rules all put the summary on the opening line,
+#   and nothing about the sections depends on which one you pick.
+# - ES01/SA01/EX01 (an extended summary / See Also / Examples on every object). Most
+#   private helpers here need none of the three, and requiring them buys padding.
