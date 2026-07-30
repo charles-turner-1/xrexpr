@@ -246,10 +246,31 @@ PR that lands the feature, or immediately after:
 > observable. Only the wrong size would sit in the schema, feeding every consumer
 > downstream.
 
-One narrowing has no workstream and should get one: `.reduce` is excluded
-(`test_properties.py:28-30`) because its first positional argument is a *function*, which
-`_reduce_dims` misreads as a dim spec — `operations.py:31` tabulates it as a reduction
-like any other. That is a real latent bug, not just a generator limitation.
+> **The `.reduce` narrowing is paid (2026-07-30, #96).** It read: `.reduce` is excluded
+> because its first positional argument is a *function*, which `_reduce_dims` misreads as
+> a dim spec, while `operations.py` tabulates it as a reduction like any other — a real
+> latent bug, not just a generator limitation.
+>
+> **Decision: parse it properly**, not untabulate it. `.reduce` genuinely *is* a
+> reduction, and making it `Opaque` would have bought safety with a full barrier for an op
+> that has an honest dim spec sitting in `args[1]`. Which positional holds the spec is now
+> a table, `schema._DIM_ARG_POSITION`, so the next such signature is an entry rather than
+> a special case. (`quantile` — which takes `q` first, and which `lower.py`'s weighted
+> note already flags — stays untabulated; it is not a reduction we model.) The generator
+> draws `.reduce(np.mean, dims)` **positionally**, the shape the bug lived in: 3.1% of
+> chains.
+>
+> **A live bug found next door, fixed in the same PR.** `keepdims=True` *keeps* every
+> reduced dim at size 1, but `_reduce_dims` recorded `consumes` regardless, so
+> `dim_effect` classified a following select as indexing a reduced-away dim and the
+> optimiser **raised `InvalidExpressionError` on a chain that works eagerly**
+> (`ds.plan.mean("time", keepdims=True).isel(time=0)`). It affects every tabulated
+> reduction, not just `.reduce`. Now recorded `Opaque`.
+>
+> Modelling it rather than refusing it is spec'd in §9 below (#117) — the shape is
+> `WindowedReduce`'s, and `consumes=frozenset()` alone is **unsound**, which was checked
+> rather than reasoned: it empties `blocks`, the select hops to the front, and the replay
+> raises where eager returned data.
 
 The invariant asserted is always the same and is the project's crown jewel:
 `ds.plan.<chain>.collect()` equals the eager chain, for generated datasets and
@@ -390,3 +411,42 @@ that is fine". Its generator therefore filters the `std`/`var` trigger
 hiding anything about the optimiser. The behaviour itself is pinned by the hand-written
 test named above. Should the property ever be widened to cover it, the assertion has to
 become the sharpened contract, not the equality.
+
+## 9. Model `keepdims=True` instead of refusing it
+
+Found while closing §7's `.reduce` narrowing (2026-07-30, #96), where the *live* half of
+the bug was fixed by recording `keepdims=True` as `Opaque`. This section is the modelling
+that refusal defers; filed as **#117**.
+
+A `keepdims=True` reduce consumes nothing and mints nothing — it can only **resize**, and
+only the dims it names, each to 1. That is exactly `WindowedReduce`'s dim effect, and the
+table is short:
+
+| | `Reduce` today | `keepdims` modelled |
+|---|---|---|
+| `blocks` | `consumes` | the named dims — *already right* |
+| `requires` | `consumes` | the named dims — *already right* |
+| `on_conflict` | `"invalid"` | `"immovable"`: the dim survives, so the chain is valid and merely un-reorderable |
+| `apply_schema` | removes the dims | keeps them, sizes → 1 (exactly known, not `None`) |
+
+**`consumes=frozenset()` alone is unsound**, and this was checked rather than reasoned.
+It empties `blocks`, so `pushdown_selects` hoists a select on the named dim to the front;
+a scalar `isel` *drops* that dim, and the replayed reduce then raises
+`ValueError: Dimension(s) 'time' do not exist` where the eager chain returned data. The
+`DimEffect` docstring already states the rule this violates: `blocks` must cover
+everything the node consumed, minted **or resized**.
+
+So the work is two `match` arms rather than a new field — *provided* `consumes` is allowed
+to mean "the dims this reduce names" rather than "removes", which is the kind of untrue
+written claim §7's own bug was. Do it with a **derived** `keepdims` property on `Reduce`
+(the `Project.single` precedent) and a `consumes` docstring that states both modes.
+
+Two things not to miss:
+
+- **`lower.py` needs a fusion refusal.** The three `_fuse_*` arms read `closer.consumes`,
+  so a `groupby(...).mean(keepdims=True)` closer would fuse into a `GroupedReduce` whose
+  semantics are wrong. `Opaque` gets this right for free today — an opaque closer never
+  fuses — so the guard must land *with* the modelling, not after it.
+- **The property generator should draw it**, per §7's schedule: `keepdims` is a kwarg on
+  every tabulated reduction, and the size-exactness property is where a wrong arm would
+  show up (the dims survive at 1, which the tracked schema must say exactly).

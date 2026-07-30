@@ -20,9 +20,12 @@ in this module, never expected noise. Two narrowings are worth naming:
   by the hand-written suites; generating rechunk chains is scheduled with the chunk
   taxonomy (``docs/roadmap/07-small-wins.md`` §7, after W4).
 
-``reduce`` is also excluded: it takes a *function* first, which ``_reduce_dims`` misreads
-as a dim spec, so a generated ``.reduce(...)`` would fail for reasons unrelated to the
-rewrites under test.
+``.reduce`` **is** generated, as of #96. It used to be excluded because ``_reduce_dims``
+read its first positional — a *function* — as a dim spec; now that the dim spec is read
+from the second, the node is honest and the chains are worth generating. It is drawn
+separately from :data:`REDUCE_NAMES` rather than added to it, because its call shape
+differs (the function comes first) and the builder closers are generated as
+``name(**spec)``.
 
 **Builder chains** (``groupby``/``resample``/``rolling``/``coarsen``/``weighted``) are
 generated too, by :func:`builder_plans`. They feed the *contract* properties below
@@ -53,10 +56,19 @@ from xrexpr.operations import CONTEXT_METHODS, OP_TABLE
 from xrexpr.optimize import optimize
 from xrexpr.schema import SchemaState, apply_schema, to_opnode
 
-# Reductions worth generating: every tabulated reduce except ``reduce`` itself.
+# Reductions spelled ``name(dim=...)``: every tabulated reduce except ``reduce``, whose
+# first positional is a *function*. Kept out of this tuple because of that call shape, not
+# because its node is untrustworthy — the builder closers below are generated as
+# ``name(**spec)`` and have nowhere to put a function.
 REDUCE_NAMES = tuple(
     sorted(n for n, s in OP_TABLE.items() if s.kind == "reduce" and n != "reduce")
 )
+
+#: The function generated ``.reduce`` calls pass. ``np.mean`` deliberately: the
+#: drawability constraints of a ``.reduce`` call are those of the function it is given,
+#: and ``mean`` is in none of the exclusion sets :func:`_drawable_reduces` applies — so
+#: ``"reduce"`` needs no entry in any of them, and would need one if this changed.
+REDUCE_METHOD_FUNC = np.mean
 
 #: Reductions with no identity element, which numpy refuses to apply to an empty axis
 #: ("zero-size array to reduction operation fmax which has no identity"). An empty
@@ -614,9 +626,18 @@ def _calls(draw, ds, max_ops=4, builders=False):
                 ).map(sorted)
             )
             names = _drawable_reduces(
-                current, REDUCE_NAMES, dims=dims, reduced=set(dims)
+                current, (*REDUCE_NAMES, "reduce"), dims=dims, reduced=set(dims)
             )
-            call = Call(draw(st.sampled_from(names)), dim=dims)
+            name = draw(st.sampled_from(names))
+            # ``.reduce`` is spelled ``reduce(func, dim)``, and generated **positionally**
+            # on purpose: that is the shape #96 fixed, where the function used to be read
+            # as the dim spec. The kwarg spelling was never affected and is pinned by the
+            # hand-written suite instead.
+            call = (
+                Call(name, REDUCE_METHOD_FUNC, dims)
+                if name == "reduce"
+                else Call(name, dim=dims)
+            )
         else:
             # No dim is indexed twice anywhere in the chain — not merely twice in a row.
             # Adjacency is not a property of the chain the user wrote: ``pushdown_selects``

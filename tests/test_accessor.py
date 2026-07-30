@@ -196,6 +196,47 @@ def test_reduce_then_select_equal(ds):
     assert_equal(got, ds.sum("lat").isel(time=0))
 
 
+def test_reduce_method_then_select_matches_eager(ds):
+    """``.reduce(func, dim)`` records an honest ``Reduce``, so a disjoint select hops in front of it.
+
+    Notes
+    -----
+    The payoff of reading the dim spec from the *second* positional (#96): the node now
+    carries a true ``consumes``, so ``.reduce`` chains optimise like any other reduction
+    instead of being a barrier.
+    """
+    chain = ds.plan.reduce(np.mean, "lat").isel(time=0)
+    assert [type(n) for n in chain._optimized()] == [Select, Reduce]
+    assert_equal(chain.collect(), ds.reduce(np.mean, "lat").isel(time=0))
+
+
+def test_reduce_method_on_a_consumed_dim_still_raises(ds):
+    """A select on a dim ``.reduce`` consumed is rejected, exactly as for a named ``mean``."""
+    with pytest.raises(InvalidExpressionError):
+        ds.plan.reduce(np.mean, "lon").isel(lon=0).collect()
+
+
+def test_bare_reduce_method_then_select_raises(ds):
+    """A bare ``.reduce(func)`` consumes every dim, so a following select is invalid — as for ``mean()``."""
+    with pytest.raises(InvalidExpressionError):
+        ds.plan.reduce(np.mean).isel(time=0).collect()
+
+
+def test_keepdims_reduce_then_select_matches_eager(ds):
+    """A ``keepdims=True`` reduce keeps its dim, so a select on that dim must replay, not raise.
+
+    Notes
+    -----
+    The regression this pins was **live**: ``keepdims=True`` keeps ``time`` at size 1, but
+    the node claimed ``consumes={"time"}``, so ``pushdown_selects`` classified the select
+    as indexing a reduced-away dim and raised ``InvalidExpressionError`` on a chain that
+    works eagerly. Recording ``Opaque`` makes the reduce a barrier instead -- unoptimised,
+    which is the house's answer for a call it cannot model, and correct.
+    """
+    got = ds.plan.mean("time", keepdims=True).isel(time=0).collect()
+    assert_equal(got, ds.mean("time", keepdims=True).isel(time=0))
+
+
 def test_isel_merge_equal(ds):
     """Two folded ``isel`` calls replay to the same result as the two eager calls."""
     got = ds.plan.isel(time=0).isel(lat=1).collect()

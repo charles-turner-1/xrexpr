@@ -741,7 +741,11 @@ def to_opnode(
     - **reduce** (``mean``/``sum``/...): the dim spec — positional (``mean("lat")``),
       keyword (``mean(dim="lat")``) or tuple (``mean(("lat", "lon"))``) — collapses to
       one ``consumes`` frozenset; a **no-dim ``mean()`` consumes** :data:`~xrexpr.ir.ALL_DIMS`,
-      which is what fixes the empty-dim reorder bug (``ds.mean().isel(...)``).
+      which is what fixes the empty-dim reorder bug (``ds.mean().isel(...)``). *Which*
+      positional argument holds the spec is read from :data:`_DIM_ARG_POSITION`, because
+      ``.reduce(func, dim)`` puts a **function** first; and ``keepdims=True`` records
+      :class:`~xrexpr.ir.Opaque`, since the "reduced" dims survive at size 1 and no
+      ``consumes`` would be true (see the guard in the code).
     - **select** (``isel``/``sel``): the indexer (a positional dict and/or kwargs,
       minus option kwargs like ``drop``) becomes ``indexer``; a dim given a *scalar*
       index is dropped and so also lands in ``consumes`` (a slice/list/array keeps it).
@@ -779,11 +783,19 @@ def to_opnode(
             kwargs=kw,
         )
     if kind == "reduce":
+        if kwargs.get("keepdims", False):
+            # ``keepdims=True`` *keeps* every reduced dim at size 1, so no ``Reduce`` this
+            # function could build would be honest: neither a named ``consumes`` nor
+            # ``ALL_DIMS`` describes it, and an empty one is worse than either (it empties
+            # ``blocks``, so a select hops in front and the replay raises). Refusing is the
+            # house posture for a call we don't model; ``07-small-wins.md`` §9 (#117) specs
+            # the modelling, whose shape is ``WindowedReduce``'s.
+            return Opaque(name=name, args=args, kwargs=kw)
         return Reduce(
             name=name,
             args=args,
             kwargs=kw,
-            consumes=_reduce_dims(args, kwargs),
+            consumes=_reduce_dims(name, args, kwargs),
         )
     if kind == "select":
         return Select(
@@ -845,14 +857,25 @@ def _projected_names(args: tuple[Any, ...]) -> tuple[Hashable, ...] | None:
     return None
 
 
-def _reduce_dims(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> DimSet:
+#: Where each reduction's dim spec sits among its **positional** arguments. Reductions
+#: take ``dim`` first, so the default is 0; ``Dataset.reduce`` is
+#: ``reduce(func, dim, ...)``, whose first positional is the *function*. Reading that as a
+#: dim spec is what made ``ds.reduce(np.mean, "time")`` record a nonsense ``consumes``
+#: (#96). Keyed by method name rather than special-cased inline so a second such signature
+#: is a table entry.
+_DIM_ARG_POSITION: dict[str, int] = {"reduce": 1}
+
+
+def _reduce_dims(name: str, args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> DimSet:
     """Parse the dims a reduction removes out of its call.
 
     Parameters
     ----------
+    name : str
+        The method name, which settles *where* the dim spec sits among ``args`` — see
+        :data:`_DIM_ARG_POSITION`.
     args : tuple
-        The reduction's positional arguments. Reductions take ``dim`` first
-        (``.reduce(func, dim)`` aside).
+        The reduction's positional arguments.
     kwargs : Mapping
         The reduction's keyword arguments, where a ``dim=`` spec takes precedence.
 
@@ -866,12 +889,18 @@ def _reduce_dims(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> DimSet:
     -----
     An unspecified ``dim`` is left symbolic rather than expanded here: which dims exist
     depends on where in the plan the reduce ends up running, and this function is not
-    the place that knows.
+    the place that knows. That covers ``.reduce(func)`` as much as ``mean()``: a bare
+    reduce over every dim is a bare reduce whatever spells it.
+
+    ``keepdims=True`` is **not** handled here, because there is no answer this function
+    could give: the dims survive at size 1, so neither a named ``consumes`` nor
+    ``ALL_DIMS`` describes the call. :func:`to_opnode` refuses it outright instead.
     """
+    position = _DIM_ARG_POSITION.get(name, 0)
     if "dim" in kwargs:
         dim = kwargs["dim"]
-    elif args:
-        dim = args[0]  # reductions take ``dim`` first (``.reduce(func, dim)`` aside)
+    elif len(args) > position:
+        dim = args[position]
     else:
         dim = None
     if dim is None:  # bare ``mean()`` / ``mean(dim=None)`` → every dim, resolved later
