@@ -14,7 +14,7 @@ cases do build a ``DataArray``, but only as a payload whose ``.dims`` fusion rea
 metadata, materialising nothing.
 
 ``to_lower_ir``'s second argument is the base dataset's dim names, the one thing lowering
-cannot read off the calls. :data:`_DIMS` stands in for a dataset with those three dims, so a
+cannot read off the calls. :data:`_DIM_NAMES` stands in for a dataset with those three dims, so a
 grouper naming anything else is a *coordinate* grouper as far as fusion is concerned.
 """
 
@@ -39,8 +39,8 @@ from xrexpr.ir import (
 from xrexpr.lower import Call, emit, to_lower_ir
 from xrexpr.schema import to_opnode
 
-#: The dims of the notional dataset these plans are lowered against.
-_DIMS = frozenset({"time", "lat", "lon"})
+#: The dim names of the notional dataset these plans are lowered against.
+_DIM_NAMES = frozenset({"time", "lat", "lon"})
 
 
 @pytest.fixture
@@ -71,23 +71,23 @@ def test_the_fixture_plan_really_covers_every_variant(plan):
 def test_a_plan_with_no_builder_chain_passes_through_unchanged(plan):
     # every multi-call spelling is a ``ContextOpen`` pair, so a plan without one is
     # already what it means and lowering must leave it alone
-    assert to_lower_ir(plan, _DIMS) == plan
+    assert to_lower_ir(plan, _DIM_NAMES) == plan
 
 
 def test_lowering_is_idempotent(plan):
-    once = to_lower_ir(plan, _DIMS)
-    assert to_lower_ir(once, _DIMS) == once
+    once = to_lower_ir(plan, _DIM_NAMES)
+    assert to_lower_ir(once, _DIM_NAMES) == once
 
 
 def test_lowering_does_not_mutate_its_input(plan):
     before = list(plan)
-    to_lower_ir(plan, _DIMS).append(to_opnode("mean", (), {}))
+    to_lower_ir(plan, _DIM_NAMES).append(to_opnode("mean", (), {}))
     assert plan == before
 
 
 def test_emit_reproduces_every_call_verbatim(plan):
     # one node, one call, header untouched -- an unmodified plan replays what was written
-    assert emit(to_lower_ir(plan, _DIMS)) == [
+    assert emit(to_lower_ir(plan, _DIM_NAMES)) == [
         Call(name=node.name, args=node.args, kwargs=node.kwargs) for node in plan
     ]
 
@@ -95,12 +95,12 @@ def test_emit_reproduces_every_call_verbatim(plan):
 def test_emit_keeps_the_recorded_spelling(plan):
     # ``isel(time=0, drop=True)`` was recorded as kwargs and stays kwargs -- emit must not
     # canonicalise it to the positional-dict form the merge rule happens to build.
-    select = emit(to_lower_ir(plan, _DIMS))[2]
+    select = emit(to_lower_ir(plan, _DIM_NAMES))[2]
     assert select == Call(name="isel", kwargs=frozendict({"time": 0, "drop": True}))
 
 
 def test_emit_of_an_empty_plan_is_empty():
-    assert emit(to_lower_ir([], _DIMS)) == []
+    assert emit(to_lower_ir([], _DIM_NAMES)) == []
 
 
 def test_call_coerces_to_immutable_containers_and_hashes():
@@ -118,9 +118,9 @@ def test_calls_compare_by_value():
 # --- fusing the groupby family -------------------------------------------------------
 
 
-def _lower(*calls, dims=_DIMS):
+def _lower(*calls, dim_names=_DIM_NAMES):
     """Lower the plan the recorder would build from ``(name, args, kwargs)`` triples."""
-    return to_lower_ir([to_opnode(*call) for call in calls], dims)
+    return to_lower_ir([to_opnode(*call) for call in calls], dim_names)
 
 
 @pytest.mark.parametrize(
@@ -330,7 +330,7 @@ def test_lowering_stays_idempotent_with_a_weighted_pair():
     # elementwise ``==`` has no truth value), so this also pins that the *same* payload
     # object is carried through rather than rebuilt -- see ``test_ir.py``.
     once = _lower(("weighted", (_weights("lat"),), {}), ("mean", (), {}))
-    assert to_lower_ir(once, _DIMS) == once
+    assert to_lower_ir(once, _DIM_NAMES) == once
 
 
 def test_non_string_grouper_does_not_fuse():
@@ -366,7 +366,9 @@ def test_a_coordinate_grouper_fuses_once_its_name_is_a_dim():
     # ``region`` *is* a dim fuses exactly as before. Pins that the refusals above are the
     # dim check firing rather than some new syntactic narrowing.
     (node,) = _lower(
-        ("groupby", ("region",), {}), ("mean", (), {}), dims=_DIMS | {"region"}
+        ("groupby", ("region",), {}),
+        ("mean", (), {}),
+        dim_names=_DIM_NAMES | {"region"},
     )
     assert isinstance(node, GroupedReduce)
     assert (node.group_dim, node.new_dim) == ("region", "region")
@@ -418,4 +420,4 @@ def test_lowering_stays_idempotent_with_fusion():
     once = _lower(
         ("groupby", ("time.month",), {}), ("mean", (), {}), ("cumsum", ("lat",), {})
     )
-    assert to_lower_ir(once, _DIMS) == once
+    assert to_lower_ir(once, _DIM_NAMES) == once

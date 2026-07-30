@@ -95,7 +95,9 @@ class Call:
         object.__setattr__(self, "kwargs", frozendict(self.kwargs))
 
 
-def to_lower_ir(nodes: list[FluentOp], dims: frozenset[Hashable]) -> list[LoweredOp]:
+def to_lower_ir(
+    nodes: list[FluentOp], dim_names: frozenset[Hashable]
+) -> list[LoweredOp]:
     """Translate a recorded plan into what it means, fusing builder chains.
 
     Where the fluent API is one-to-one with semantics the recorded node is already right,
@@ -103,10 +105,10 @@ def to_lower_ir(nodes: list[FluentOp], dims: frozenset[Hashable]) -> list[Lowere
     call cannot express, not a translation into a poorer language. Only the multi-call
     spellings are rewritten.
 
-    ``dims`` is the **base dataset's dim names**, and it is the one thing this pass cannot
+    ``dim_names`` is the **base dataset's dim names**, and it is the one thing this pass cannot
     read off the calls: whether ``groupby("region")`` groups along a dim or along a
     coordinate defined on one is a fact about the data, not the call (see
-    :func:`_grouper_dims`). Dim *names* rather than a ``SchemaState`` because that is the
+    :func:`_grouper_dims`). Dim names rather than a ``SchemaState`` because that is the
     whole of what lowering needs to know — a set keeps this module's dependencies at
     :mod:`xrexpr.ir` alone, and makes the requirement legible in the signature.
 
@@ -146,7 +148,7 @@ def to_lower_ir(nodes: list[FluentOp], dims: frozenset[Hashable]) -> list[Lowere
 
         closer = nodes[i + 1] if i + 1 < n else None
         fused = (
-            _fuse_grouped(node, closer, dims)
+            _fuse_grouped(node, closer, dim_names)
             or _fuse_windowed(node, closer)
             or _fuse_weighted(node, closer)
             if closer is not None
@@ -173,7 +175,7 @@ def to_lower_ir(nodes: list[FluentOp], dims: frozenset[Hashable]) -> list[Lowere
 
 
 def _fuse_grouped(
-    opener: ContextOpen, closer: FluentOp, dims: frozenset[Hashable]
+    opener: ContextOpen, closer: FluentOp, dim_names: frozenset[Hashable]
 ) -> GroupedReduce | None:
     """Fuse a groupby-family pair into a :class:`~xrexpr.ir.GroupedReduce`, or refuse.
 
@@ -186,7 +188,7 @@ def _fuse_grouped(
       component of a dim coordinate (``groupby("time.month")``), from which ``group_dim``
       reads off directly. A ``DataArray`` grouper or a ``Grouper`` object has no single
       ``group_dim``, so it refuses; so does a *non-dim coordinate* name, which is what
-      ``dims`` is threaded here to establish (:func:`_grouper_dims`).
+      ``dim_names`` is threaded here to establish (:func:`_grouper_dims`).
     - **The closer must be an aggregating reduce.** This is the subtle one, and it is a
       correction to the obvious reading: a grouped reduce over dims that *exclude* the
       group dim is not an aggregation at all. ``ds.groupby("time.month").mean("lat")``
@@ -205,7 +207,7 @@ def _fuse_grouped(
     if not isinstance(closer, Reduce):
         return None
 
-    grouped = _grouper_dims(opener, dims)
+    grouped = _grouper_dims(opener, dim_names)
     if grouped is None:
         return None
     group_dim, new_dim = grouped
@@ -347,7 +349,7 @@ def _weight_dims(opener: ContextOpen) -> frozenset[Hashable] | None:
 
 
 def _grouper_dims(
-    opener: ContextOpen, dims: frozenset[Hashable]
+    opener: ContextOpen, dim_names: frozenset[Hashable]
 ) -> tuple[Hashable, Hashable] | None:
     """``(group_dim, new_dim)`` for a groupby-family opener, or ``None`` if not statically known.
 
@@ -359,7 +361,7 @@ def _grouper_dims(
     - ``resample(time="2D")`` takes its dim from the (single) keyword, and mints it back.
 
     **Every one of those reads assumes the name is a dim, so every one is checked against**
-    ``dims``. The name alone cannot tell them apart: ``groupby("region")`` where ``region``
+    ``dim_names``. The name alone cannot tell them apart: ``groupby("region")`` where ``region``
     is a coordinate *on* ``lat`` groups along ``lat`` and mints ``region``, so reading
     ``group_dim`` off the call gives ``region`` — a dim the grouping never consumed, while
     the one it did consume is reported as surviving. That was issue #90, and it reached
@@ -385,7 +387,7 @@ def _grouper_dims(
     """
     if opener.name == "resample":
         keys = [k for k in opener.kwargs if k not in _RESAMPLE_OPTION_KWARGS]
-        if len(keys) != 1 or keys[0] not in dims:
+        if len(keys) != 1 or keys[0] not in dim_names:
             return None
         return keys[0], keys[0]
 
@@ -395,9 +397,9 @@ def _grouper_dims(
         # Guarded on the whole grouper, not its head: the dotted form's real group dim
         # *is* the head, but its minted name is not ``f"{grouper}_bins"``, so a head-only
         # check would let the wrong ``new_dim`` through under a correct ``group_dim``.
-        return (grouper, f"{grouper}_bins") if grouper in dims else None
+        return (grouper, f"{grouper}_bins") if grouper in dim_names else None
     group_dim, _, component = grouper.partition(".")
-    if group_dim not in dims:
+    if group_dim not in dim_names:
         return None
     return group_dim, (component or group_dim)
 
