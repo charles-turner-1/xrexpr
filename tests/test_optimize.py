@@ -368,6 +368,109 @@ def test_projection_and_select_pushdown_compose(schema):
     assert [n.name for n in out] == ["__getitem__", "isel", "mean"]
 
 
+# --- merge adjacent projections -------------------------------------------------
+
+
+def test_merge_adjacent_projects(schema):
+    """A projection subsumed by the one before it collapses the pair to itself alone."""
+    plan = [
+        _node("__getitem__", ["temperature", "elevation"]),
+        _node("__getitem__", ["temperature"]),
+    ]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["__getitem__"]
+    assert out[0].variables == ("temperature",)
+
+
+def test_merge_adjacent_projects_keeps_the_single_form(schema):
+    """A list projection followed by a bare name collapses to the bare name, DataArray result and all."""
+    plan = [
+        _node("__getitem__", ["temperature", "elevation"]),
+        _node("__getitem__", "temperature"),
+    ]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["__getitem__"]
+    assert out[0].single
+
+
+def test_a_single_projection_is_a_merge_barrier(schema):
+    """A *leading* bare-name projection blocks the merge: what follows it indexes a ``DataArray``.
+
+    Notes
+    -----
+    ``ds["temperature"]["temperature"]`` raises ``KeyError`` -- ``DataArray.__getitem__``
+    is positional indexing, not projection -- so collapsing the pair would turn an error
+    into a value. Verified against xarray 2026.7.0.
+    """
+    plan = [
+        _node("__getitem__", "temperature"),
+        _node("__getitem__", "temperature"),
+    ]
+    assert optimize(plan, schema) == plan
+
+
+def test_projections_that_are_not_a_subset_are_left_alone(schema):
+    """A second projection naming something the first didn't leaves the pair alone, and does not raise.
+
+    Notes
+    -----
+    ``ds[["temperature"]]["lat"]`` is valid eagerly -- projection keeps the coords its
+    variables span -- so the pair is merely un-mergeable, not invalid.
+    """
+    plan = [
+        _node("__getitem__", ["temperature"]),
+        _node("__getitem__", "lat"),
+    ]
+    assert optimize(plan, schema) == plan
+
+
+def test_a_run_of_three_projections_collapses_to_the_last(schema):
+    """The fixpoint collapses a run of three nested projections down to the innermost."""
+    plan = [
+        _node("__getitem__", ["temperature", "elevation"]),
+        _node("__getitem__", ["temperature", "elevation"]),
+        _node("__getitem__", ["elevation"]),
+    ]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["__getitem__"]
+    assert out[0].variables == ("elevation",)
+
+
+def test_merge_and_projection_pushdown_compose(schema):
+    """A projection hops past a reduce onto the projection in front of it, and the pair then merges."""
+    plan = [
+        _node("__getitem__", ["temperature", "elevation"]),
+        _node("mean", "time"),
+        _node("__getitem__", ["temperature"]),
+    ]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["__getitem__", "mean"]
+    assert out[0].variables == ("temperature",)
+
+
+def test_merging_projections_is_idempotent(schema):
+    """Optimizing a plan whose projections merged is a fixpoint."""
+    plan = [
+        _node("__getitem__", ["temperature", "elevation"]),
+        _node("__getitem__", ["temperature"]),
+        _node("mean", "time"),
+    ]
+    once = optimize(plan, schema)
+    assert optimize(once, schema) == once
+
+
+def test_projections_merge_past_an_opaque(schema):
+    """The merge is syntactic, so it still fires behind an unmodelled op the schema can't see through."""
+    plan = [
+        _node("rename", {"temperature": "t2m"}),
+        _node("__getitem__", ["t2m", "elevation"]),
+        _node("__getitem__", ["t2m"]),
+    ]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["rename", "__getitem__"]
+    assert out[0].name == "rename"
+
+
 def test_scalar_isel_past_rechunk_drops_the_spent_rechunk(schema):
     """A scalar ``isel`` past a rechunk drops the rechunk once its only named dim is gone.
 

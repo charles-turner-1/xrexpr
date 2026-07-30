@@ -11,6 +11,9 @@ Rules (in ``_RULES``):
 - :func:`merge_adjacent_selects` — fold a run of consecutive ``isel``/``isel`` (or
   ``sel``/``sel``) into a single indexer, *composing* rather than overwriting when both
   select the same dim.
+- :func:`merge_adjacent_projects` — drop the first of an adjacent pair of projections when
+  the second asks for a subset of its variables, so ``ds[["tas", "pr"]][["tas"]]`` stops
+  building an intermediate Dataset holding a variable it discards one node later.
 - :func:`pushdown_selects` — hop a select left past **any** node whose dims permit it, so
   the work behind it runs on less data: past a plain reduce, and past a grouped or
   windowed one, which is what lowering's fused nodes exist to make expressible —
@@ -702,6 +705,81 @@ def _scaled_stop(inner_stop: int | None, start: int, step: int) -> int | None:
     return None if inner_stop is None else start + inner_stop * step
 
 
+def merge_adjacent_projects(nodes: Plan, schema: SchemaState) -> Plan | None:
+    """Drop the first of an adjacent pair of projections when the second subsumes it.
+
+    Parameters
+    ----------
+    nodes : Plan
+        The plan to rewrite.
+    schema : SchemaState
+        The schema entering the plan. Unused — this rule is *syntactic*, deciding on the
+        two nodes' own key sets (see the notes on why that is enough, and what it costs).
+
+    Returns
+    -------
+    Plan or None
+        The plan with one projection dropped, or ``None`` when no pair merges.
+
+    Notes
+    -----
+    ``ds[["tas", "pr"]][["tas"]]`` records two :class:`~xrexpr.ir.Project` nodes and
+    builds an intermediate Dataset holding ``pr`` purely to throw it away one node
+    later. The pair collapses to the second alone **iff ``set(p2.variables) <=
+    set(p1.variables)``**, and the second node is emitted verbatim — its key already
+    describes the result exactly, so unlike :func:`merge_adjacent_selects` there is
+    nothing to rebuild.
+
+    **Why the subset test is enough for the coordinates too.** A projection keeps the
+    coordinates its selected variables still span, so composing two of them prunes
+    twice — but the second prune is against ``needed_dims(p2)``, which is a subset of
+    ``needed_dims(p1)``, so every coordinate the lone ``p2`` would keep already survived
+    ``p1``. Verified against xarray 2026.7.0: ``ds[["temperature", "elevation"]]
+    [["temperature"]]`` is ``identical`` to ``ds[["temperature"]]``, auxiliary coords
+    included, and so is the list-then-bare-name form.
+
+    Two guards, each load-bearing:
+
+    - **The subset test itself.** ``p2`` may legally name a *coordinate* —
+      ``ds[["temperature"]]["lat"]`` works eagerly, because projection keeps coords — and
+      the collapsed ``ds["lat"]`` is then a *different expression*, not a cheaper
+      spelling of the same one: it reads the coord from the base, where the chain reads
+      it as it exists inside ``p1``'s result. The two agree only by accident; put a
+      select or a reduce between the projections, or let ``p1`` prune a coord ``p2``
+      names, and they diverge. The subset test is exactly the condition under which the
+      collapse is provable *without* the schema, so when it fails, **leave, never
+      raise**: the chain is very likely valid as written, and this rule has no standing
+      to rewrite it, let alone reject it.
+    - **``p1`` must not be** ``single``. After a bare-name projection the object is a
+      ``DataArray``, on which ``__getitem__`` is *indexing* rather than projection:
+      ``ds["temperature"]["temperature"]`` raises ``KeyError`` where the collapsed
+      ``ds["temperature"]`` returns data. Turning an error into a value is the one thing
+      the contract in ``docs/roadmap/07-small-wins.md`` §8 forbids outright, so a
+      ``single`` first node is a hard barrier — the subset test alone would not catch it.
+
+    **Deciding this without the schema does skip one error, deliberately.** A name in
+    ``p1`` that the dataset lacks makes the eager chain raise ``KeyError`` while the
+    merged plan succeeds — ``ds.plan[["temperature", "nope"]][["temperature"]]``. That is
+    §8's middle clause, the same licence :func:`pushdown_projections` runs on: the plan
+    says outright that the extra name is not wanted, and the error comes from work whose
+    result it discards. No value moves, because the surviving key is unchanged. Taking
+    the schema-free reading is also what lets the rule fire past an
+    :class:`~xrexpr.ir.Opaque`, and admit a ``p1`` that names a coordinate
+    (``ds[["lat", "temperature"]][["lat"]]``, which composes correctly), neither of which
+    a ``data_vars`` guard confined to :func:`_trusted_prefix` could do.
+
+    One merge per call; :func:`optimize`'s fixpoint collapses a run of three. The rule
+    shrinks the plan, so the termination measure is satisfied on its first component.
+    """
+    for i in range(len(nodes) - 1):
+        match nodes[i], nodes[i + 1]:
+            case (Project() as first, Project() as second) if not first.single and set(
+                second.variables
+            ) <= set(first.variables):
+                return list(nodes[:i]) + list(nodes[i + 1 :])
+    return None
+
+
 def pushdown_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
     """Hop a select left past a preceding node whose dims permit it.
 
@@ -1007,6 +1085,7 @@ def _pushable_rechunk(node: Rechunk) -> bool:
 
 _RULES: tuple[Rule, ...] = (
     merge_adjacent_selects,
+    merge_adjacent_projects,
     pushdown_selects,
     pushdown_projections,
     pushdown_selects_past_rechunks,
