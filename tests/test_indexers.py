@@ -47,50 +47,62 @@ from xrexpr.optimize import _compose_indexer
 
 
 def test_int_scalar_classifies_as_scalar():
+    """An integer position is a ``Scalar`` — the one variant that drops its dim."""
     assert classify(0) == Scalar(0)
 
 
 def test_label_scalar_classifies_as_scalar():
+    """A coordinate label is a ``Scalar`` too: it drops its dim just as a position does."""
     assert classify("2020") == Scalar("2020")
 
 
 def test_forward_slice_classifies_as_forward_slice():
+    """A slice with non-negative bounds is a ``ForwardSlice`` — the composable variant."""
     assert classify(slice(0, 5)) == ForwardSlice(0, 5, None)
 
 
 def test_stepped_forward_slice_is_forward():
+    """A positive step keeps a slice forward, so it stays composable."""
     assert classify(slice(0, 10, 2)) == ForwardSlice(0, 10, 2)
 
 
 def test_negative_bound_slice_classifies_as_general_slice():
+    """A negative bound counts from an end the composer cannot locate, so it is general."""
     assert classify(slice(-3, None)) == GeneralSlice(slice(-3, None))
 
 
 def test_reversed_step_slice_classifies_as_general_slice():
+    """A reversed step is sizable but uncomposable, so it is a ``GeneralSlice``."""
     assert classify(slice(None, None, -1)) == GeneralSlice(slice(None, None, -1))
 
 
 def test_label_slice_classifies_as_label():
+    """A slice with non-integer bounds names labels, not positions, so it is a ``Label``."""
     assert classify(slice("a", "z")) == Label(slice("a", "z"))
 
 
 def test_integer_list_classifies_as_positions():
+    """A list of integers is a ``Positions`` enumeration."""
     assert classify([0, 2, 4]) == Positions((0, 2, 4))
 
 
 def test_integer_array_classifies_as_positions():
+    """An integer ndarray classifies exactly as the list spelling does."""
     assert classify(np.array([0, 1])) == Positions((0, 1))
 
 
 def test_boolean_list_classifies_as_mask():
+    """A boolean list is a ``Mask``, not ``Positions`` — the all-bool test runs first."""
     assert isinstance(classify([True, False, True]), Mask)
 
 
 def test_boolean_array_classifies_as_mask():
+    """A boolean ndarray classifies as a ``Mask`` like the list spelling."""
     assert isinstance(classify(np.array([True, False])), Mask)
 
 
 def test_label_list_classifies_as_label():
+    """A list of labels is irreducibly open, so it lands in ``Label``."""
     assert classify(["2020", "2021"]) == Label(["2020", "2021"])
 
 
@@ -100,37 +112,60 @@ def test_label_list_classifies_as_label():
 
 
 def test_zero_dim_integer_array_classifies_as_scalar():
-    # indexes exactly like the bare int -- xarray drops the dim -- so it must not be read as a
-    # one-element enumeration
+    """A 0-d integer array is a ``Scalar``, not a one-element enumeration.
+
+    Notes
+    -----
+    It indexes exactly like the bare int — xarray drops the dim — so the rank check has to
+    run before the dtype dispatch.
+    """
     assert classify(np.array(0)) == Scalar(0)
 
 
 @pytest.mark.parametrize("raw", [np.int64(0), np.int32(0), np.array(0)])
 def test_integer_scalars_normalise_to_plain_int(raw):
-    # Same normalisation Positions and ForwardSlice apply. Two things depend on it: an
-    # np.int64 selection must compare equal to the int spelling (plan equality, golden
-    # assertions), and a Scalar holding an *array* is unhashable -- see the test below.
+    """Every integer spelling narrows to a plain ``int`` inside the ``Scalar``.
+
+    Notes
+    -----
+    The same normalisation ``Positions`` and ``ForwardSlice`` apply. Two things depend on
+    it: an ``np.int64`` selection must compare equal to the ``int`` spelling (plan
+    equality, golden assertions), and a ``Scalar`` holding an *array* is unhashable — see
+    the test below.
+    """
     assert classify(raw) == Scalar(0)
     assert type(classify(raw).value) is int
 
 
 def test_classified_scalars_are_hashable():
-    # Select stores indexers in a frozendict, so an unhashable value silently makes the whole
-    # node unhashable. A 0-d array would do exactly that if it were stored verbatim.
+    """All three integer spellings hash to one value, so the enclosing node stays hashable.
+
+    Notes
+    -----
+    ``Select`` stores indexers in a frozendict, so an unhashable value silently makes the
+    whole node unhashable. A 0-d array would do exactly that if it were stored verbatim.
+    """
     assert {classify(np.array(0)), classify(np.int64(0)), classify(0)} == {Scalar(0)}
 
 
 def test_numpy_int_slice_bounds_classify_as_forward_slice():
+    """Numpy-typed slice bounds still classify as forward, and narrow to plain ``int``."""
     assert classify(slice(np.int64(0), np.int64(3))) == ForwardSlice(0, 3, None)
 
 
 def test_numpy_int_list_classifies_as_positions():
+    """A list of numpy integers is a ``Positions``, narrowed to plain ``int``."""
     assert classify([np.int64(0), np.int64(2)]) == Positions((0, 2))
 
 
 def test_numpy_bool_list_still_classifies_as_mask():
-    # the counterweight to the three above: ``np.bool_`` is *not* ``numbers.Integral``, and
-    # Python ``bool`` is explicitly excluded, so widening to integers must not swallow masks
+    """Widening integer-ness to numpy types does not swallow boolean masks.
+
+    Notes
+    -----
+    The counterweight to the three above: ``np.bool_`` is *not* ``numbers.Integral``, and
+    Python ``bool`` is explicitly excluded.
+    """
     assert isinstance(classify([np.True_, np.False_]), Mask)
 
 
@@ -138,8 +173,13 @@ def test_numpy_bool_list_still_classifies_as_mask():
 
 
 def test_mask_normalises_every_spelling_to_one_value():
-    # array, list and numpy-bool list are the same selection, so they must be the same value --
-    # otherwise a plan's identity depends on how the user happened to write the mask
+    """Array, list and numpy-bool list spellings of one mask produce the same value.
+
+    Notes
+    -----
+    They are the same selection, so they must be the same value — otherwise a plan's
+    identity depends on how the user happened to write the mask.
+    """
     expected = Mask((True, False, True))
     assert classify(np.array([True, False, True])) == expected
     assert classify([True, False, True]) == expected
@@ -147,10 +187,15 @@ def test_mask_normalises_every_spelling_to_one_value():
 
 
 def test_mask_bearing_node_compares_and_hashes():
-    # The reason this variant is normalised at all. Held verbatim, ``Mask(arr) == Mask(arr)``
-    # returns an *array*, so the enclosing Select raised ``ValueError: truth value ...
-    # ambiguous`` rather than answering -- and plan equality is real: test_properties.py's
-    # idempotence property asserts ``optimize(once) == once``.
+    """Two selects built from the same mask compare equal and collapse in a set.
+
+    Notes
+    -----
+    The reason this variant is normalised at all. Held verbatim, ``Mask(arr) ==
+    Mask(arr)`` returns an *array*, so the enclosing ``Select`` raised ``ValueError: truth
+    value ... ambiguous`` rather than answering — and plan equality is real:
+    ``test_properties.py``'s idempotence property asserts ``optimize(once) == once``.
+    """
     mask = np.array([True, False, True])
     nodes = [
         Select(name="isel", indexer=frozendict({"x": classify(mask)})) for _ in range(2)
@@ -160,8 +205,14 @@ def test_mask_bearing_node_compares_and_hashes():
 
 
 def test_multidimensional_bool_array_is_not_a_mask():
-    # xarray rejects a higher-rank boolean array as a single-dim indexer, so no valid plan
-    # contains one -- it is Label (the can't-reason-about-it variant), not a flattened Mask
+    """A higher-rank boolean array falls to ``Label``, not to a flattened ``Mask``.
+
+    Notes
+    -----
+    xarray rejects it as a single-dim indexer outright, so no valid plan contains one —
+    ``Label`` is the can't-reason-about-it variant, and the error still surfaces from
+    xarray at replay in its own words.
+    """
     assert isinstance(classify(np.array([[True, False], [True, False]])), Label)
 
 
@@ -169,10 +220,15 @@ def test_multidimensional_bool_array_is_not_a_mask():
 
 
 def test_exactly_one_variant_drops_its_dim():
-    # Asserted by reflection over the union rather than variant by variant: enumerating the
-    # variants by hand only ever checks the ones that already exist, so a *new* variant added
-    # without a ``drops_dim`` would slip through. Walking ``Indexer`` makes the union itself
-    # the checklist -- the test fails the moment a variant is added and left undeclared.
+    """``Scalar`` is the only variant that drops its dim, and every variant declares one.
+
+    Notes
+    -----
+    Asserted by reflection over the union rather than variant by variant: enumerating the
+    variants by hand only ever checks the ones that already exist, so a *new* variant
+    added without a ``drops_dim`` would slip through. Walking ``Indexer`` makes the union
+    itself the checklist.
+    """
     dropping = [v for v in get_args(Indexer) if getattr(v, "drops_dim", None) is True]
     keeping = [v for v in get_args(Indexer) if getattr(v, "drops_dim", None) is False]
 
@@ -190,14 +246,23 @@ def test_exactly_one_variant_drops_its_dim():
 
 
 def test_label_slice_keeps_current_size():
+    """A label slice cannot be sized here, so ``size`` leaves the dim's length unchanged.
+
+    Notes
+    -----
+    Its extent is a fact about coordinate values. ``schema._selected_size`` answers
+    ``None`` rather than taking this fallback — see that function.
+    """
     assert classify(slice("a", "z")).size(4) == 4
 
 
 def test_label_list_sizes_by_length():
+    """A label *sequence* sizes exactly, by its own length."""
     assert classify(["2020", "2021"]).size(4) == 2
 
 
 def test_scalar_size_is_undefined():
+    """Asking a ``Scalar`` for a size raises: it drops its dim, so there is none."""
     with pytest.raises(AssertionError):
         Scalar(0).size(4)
 
@@ -210,6 +275,7 @@ def test_scalar_size_is_undefined():
 
 @pytest.mark.parametrize("raw", ["2020", slice("a", "z"), ["2020", "2021"]])
 def test_label_to_raw_round_trips_by_value(raw):
+    """Every label shape survives a ``classify``/``to_raw`` round trip unchanged."""
     assert classify(raw).to_raw() == raw
 
 
@@ -217,11 +283,13 @@ def test_label_to_raw_round_trips_by_value(raw):
 
 
 def test_forward_slice_rejects_negative_bound():
+    """Constructing a ``ForwardSlice`` with a negative bound raises, keeping the invariant."""
     with pytest.raises(ValueError):
         ForwardSlice(-1, 5)
 
 
 def test_forward_slice_rejects_reversed_step():
+    """Constructing a ``ForwardSlice`` with a reversed step raises, keeping the invariant."""
     with pytest.raises(ValueError):
         ForwardSlice(0, 5, -1)
 
@@ -254,7 +322,20 @@ def _positions(lo, hi):
 
 
 def _forward_slice(draw, n):
-    """A forward slice over ``[0, n]``, with plain-or-numpy bounds."""
+    """Draw a forward slice over ``[0, n]``, with plain-or-numpy bounds.
+
+    Parameters
+    ----------
+    draw : callable
+        Hypothesis' draw function.
+    n : int
+        The dim length the bounds stay within.
+
+    Returns
+    -------
+    slice
+        A slice whose bounds resolve without knowing the dim length.
+    """
     bound = st.one_of(st.none(), _positions(0, n))
     return slice(draw(bound), draw(bound), draw(st.one_of(st.none(), _positions(1, 3))))
 
@@ -304,6 +385,13 @@ def _composable_outer(draw, n):
 
 @st.composite
 def _sized_value(draw):
+    """Draw a dim size and one raw ``isel`` value valid against it.
+
+    Returns
+    -------
+    tuple of (int, object)
+        The dim length, and a value of any variant shape that indexes it legally.
+    """
     n = draw(st.integers(1, 8))
     return n, draw(_isel_value(n))
 
@@ -344,6 +432,7 @@ def test_size_predicts_the_real_isel_length(case):
 @_SETTINGS
 @given(_sized_value())
 def test_drops_dim_matches_whether_isel_removes_the_dim(case):
+    """``drops_dim`` predicts whether the dim actually survives a real ``isel``."""
     n, value = case
     result = _da(n).isel(x=value)
     assert classify(value).drops_dim == ("x" not in result.dims)
