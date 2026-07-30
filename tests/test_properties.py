@@ -809,7 +809,7 @@ def test_tracked_schema_agrees_with_evaluation(case):
     assume(not any(isinstance(node, Opaque) for node in to_lower_ir(plan, _dims(ds))))
     result = _apply(ds, calls)
 
-    assert set(schema.dims) == set(result.sizes)
+    assert set(schema.sizes) == set(result.sizes)
 
     # Every tracked coordinate, not just the dim coordinates — the restriction issue #109
     # asked for is gone, because coordinates are variables now and their lifetimes are
@@ -838,7 +838,7 @@ def test_sizes_are_tracked_exactly_without_label_slices(case):
     assume(not any(_has_label_slice(call) for call in calls))
 
     _, schema = _build_plan(ds, calls)
-    assert dict(schema.dims) == dict(_apply(ds, calls).sizes)
+    assert dict(schema.sizes) == dict(_apply(ds, calls).sizes)
 
 
 def _has_label_slice(call):
@@ -874,7 +874,7 @@ def test_sel_label_slice_size_is_tracked_correctly():
     call = Call("sel", lat=slice(20, 30))
 
     _, schema = _build_plan(ds, [call])
-    assert dict(schema.dims) == dict(_apply(ds, [call]).sizes)
+    assert dict(schema.sizes) == dict(_apply(ds, [call]).sizes)
 
 
 def test_sel_label_slice_size_is_unknown_rather_than_wrong():
@@ -886,8 +886,8 @@ def test_sel_label_slice_size_is_unknown_rather_than_wrong():
     ds = xr.Dataset({"t": ("lat", np.arange(4.0))}, coords={"lat": [10, 20, 30, 40]})
 
     _, schema = _build_plan(ds, [Call("sel", lat=slice(20, 30))])
-    assert schema.dims["lat"] is None
-    assert schema.dims["lat"] != 0  # the under-report this replaced
+    assert schema.sizes["lat"] is None
+    assert schema.sizes["lat"] != 0  # the under-report this replaced
 
 
 @SETTINGS
@@ -907,7 +907,7 @@ def test_rewrites_survive_unknown_dim_sizes(case):
     blanked = SchemaState(
         variables=base.variables,  # the store is untouched; only the extents are blanked
         coord_names=base.coord_names,
-        dims=frozendict(dict.fromkeys(base.dims)),  # every size -> None
+        sizes=frozendict(dict.fromkeys(base.sizes)),  # every size -> None
     )
     lowered = to_lower_ir(plan, _dims(ds))
     assert optimize(lowered, blanked) == optimize(lowered, base)

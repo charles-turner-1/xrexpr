@@ -56,7 +56,7 @@ def test_reduce_dim_none_consumes_all_dims_symbolically():
 def test_all_dims_is_resolved_by_apply_schema(schema):
     # the deferred expansion, cashed in where the schema is exact: every dim goes
     after = apply_schema(schema, to_opnode("mean", (), {}))
-    assert after.dims == frozendict()
+    assert after.sizes == frozendict()
 
 
 def test_all_dims_survives_construction_uncoerced():
@@ -202,12 +202,12 @@ def test_unknown_method_is_opaque(schema):
 def test_to_opnode_then_apply_schema_threads(schema):
     node = to_opnode("mean", (), {})  # bare mean -> consumes all
     after = apply_schema(schema, node)
-    assert after.dims == frozendict()  # every dim reduced away
+    assert after.sizes == frozendict()  # every dim reduced away
 
     schema2 = apply_schema(schema, to_opnode("mean", ("lat",), {}))
     node2 = to_opnode("isel", (), {"time": 0})
     after2 = apply_schema(schema2, node2)
-    assert after2.dims == frozendict({"lon": 5})
+    assert after2.sizes == frozendict({"lon": 5})
 
 
 def test_returns_the_matching_variant(schema):
