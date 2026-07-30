@@ -7,7 +7,7 @@ relies on: a scalar select drops its dim (``Select.consumes``, derived from ``in
 a non-scalar select leaves the dim in ``indexer`` only.
 
 ``variables`` (every variable, coordinate or not, → the dims it spans) is the store, and
-``dims``/``data_vars``/``coords`` derive from it. So a schema **cannot** be built from dim
+``sizes``/``dim_names``/``data_vars``/``coords`` derive from it. So a schema **cannot** be built from dim
 sizes alone — a dim exists only because some variable spans it, and sizes for unspanned
 dims are pruned away. :func:`_dim_coords_only` builds the minimal schema with a given set
 of dims for the tests that care about sizes rather than variables.
@@ -49,21 +49,21 @@ def _dim_coords_only(sizes, extra_coords=()):
 
     Notes
     -----
-    Spelled out because ``variables`` is the store: ``SchemaState(dims=sizes)`` alone would
+    Spelled out because ``variables`` is the store: ``SchemaState(sizes=sizes)`` alone would
     derive *no* dims and prune every size away, which is the phantom-dim state the shape
     forbids.
     """
     return SchemaState(
         variables={d: (d,) for d in sizes} | {c: () for c in extra_coords},
         coord_names=frozenset(sizes) | frozenset(extra_coords),
-        dims=sizes,
+        sizes=sizes,
     )
 
 
 def test_from_dataset_snapshots_dims_and_coords(ds):
     """A snapshot of the canonical dataset reports its dims, sizes and coordinate names."""
     schema = SchemaState.from_dataset(ds)
-    assert schema.dims == {"time": 4, "lat": 3, "lon": 5}
+    assert schema.sizes == {"time": 4, "lat": 3, "lon": 5}
     assert schema.coords == {"time", "lat", "lon"}
     assert schema.dim_names == {"time", "lat", "lon"}
 
@@ -71,18 +71,18 @@ def test_from_dataset_snapshots_dims_and_coords(ds):
 def test_from_dataarray_snapshots_dims(ds):
     """A ``DataArray`` snapshots its dims and sizes just as a ``Dataset`` does."""
     schema = SchemaState.from_dataset(ds["temperature"])
-    assert schema.dims == {"time": 4, "lat": 3, "lon": 5}
+    assert schema.sizes == {"time": 4, "lat": 3, "lon": 5}
 
 
 def test_schema_is_immutable():
     """A snapshot rejects both item assignment inside ``dims`` and field assignment."""
     schema = _dim_coords_only({"time": 4})
     with pytest.raises(TypeError):
-        schema.dims["time"] = 1
+        schema.sizes["time"] = 1
     from dataclasses import FrozenInstanceError
 
     with pytest.raises(FrozenInstanceError):
-        schema.dims = {}
+        schema.sizes = {}
 
 
 def test_reduce_removes_dim_and_its_coord(ds):
@@ -90,7 +90,7 @@ def test_reduce_removes_dim_and_its_coord(ds):
     schema = SchemaState.from_dataset(ds)
     node = Reduce(name="mean", args=("lat",), consumes=["lat"])
     after = apply_schema(schema, node)
-    assert after.dims == {"time": 4, "lon": 5}
+    assert after.sizes == {"time": 4, "lon": 5}
     assert after.coords == {"time", "lon"}
 
 
@@ -104,7 +104,7 @@ def test_bare_reduce_removes_every_dim_and_coord(ds):
     """
     schema = SchemaState.from_dataset(ds)
     after = apply_schema(schema, Reduce(name="mean", consumes=ALL_DIMS))
-    assert after.dims == {}
+    assert after.sizes == {}
     assert after.coords == set()
     assert all(dims == () for dims in after.data_vars.values())
 
@@ -120,7 +120,7 @@ def test_bare_reduce_expands_against_the_schema_it_is_given(ds):
     schema = apply_schema(
         SchemaState.from_dataset(ds), Select(name="isel", indexer={"time": 0})
     )
-    assert apply_schema(schema, Reduce(name="mean", consumes=ALL_DIMS)).dims == {}
+    assert apply_schema(schema, Reduce(name="mean", consumes=ALL_DIMS)).sizes == {}
 
 
 def test_scalar_isel_removes_dim_but_keeps_the_coord(ds):
@@ -139,7 +139,7 @@ def test_scalar_isel_removes_dim_but_keeps_the_coord(ds):
     schema = SchemaState.from_dataset(ds)
     node = Select(name="isel", indexer={"time": 0})  # scalar -> consumes={"time"}
     after = apply_schema(schema, node)
-    assert after.dims == {"lat": 3, "lon": 5}
+    assert after.sizes == {"lat": 3, "lon": 5}
     assert "time" in after.coords
     assert after.variables["time"] == ()  # 0-d: it lost its dim, not its existence
 
@@ -157,7 +157,7 @@ def test_scalar_isel_with_drop_removes_the_coord_too(ds):
     schema = SchemaState.from_dataset(ds)
     node = Select(name="isel", kwargs={"drop": True}, indexer={"time": 0})
     after = apply_schema(schema, node)
-    assert after.dims == {"lat": 3, "lon": 5}
+    assert after.sizes == {"lat": 3, "lon": 5}
     assert "time" not in after.coords
     assert "time" not in after.variables
 
@@ -167,7 +167,7 @@ def test_scalar_sel_removes_dim(ds):
     schema = SchemaState.from_dataset(ds)
     node = Select(name="sel", indexer={"lat": 1})
     after = apply_schema(schema, node)
-    assert after.dims == {"time": 4, "lon": 5}
+    assert after.sizes == {"time": 4, "lon": 5}
 
 
 def test_slice_isel_resizes_kept_dim(ds):
@@ -175,7 +175,7 @@ def test_slice_isel_resizes_kept_dim(ds):
     schema = SchemaState.from_dataset(ds)
     node = Select(name="isel", indexer={"time": slice(0, 2)})
     after = apply_schema(schema, node)
-    assert after.dims == {"time": 2, "lat": 3, "lon": 5}
+    assert after.sizes == {"time": 2, "lat": 3, "lon": 5}
     assert after.coords == {"time", "lat", "lon"}  # dim kept -> coord kept
 
 
@@ -184,7 +184,7 @@ def test_list_isel_resizes_kept_dim(ds):
     schema = SchemaState.from_dataset(ds)
     node = Select(name="isel", indexer={"lon": [0, 2, 4]})
     after = apply_schema(schema, node)
-    assert after.dims["lon"] == 3
+    assert after.sizes["lon"] == 3
 
 
 def test_boolean_array_isel_resizes_by_true_count(ds):
@@ -193,7 +193,7 @@ def test_boolean_array_isel_resizes_by_true_count(ds):
     mask = np.array([True, False, True, True])
     node = Select(name="isel", indexer={"time": mask})
     after = apply_schema(schema, node)
-    assert after.dims["time"] == 3
+    assert after.sizes["time"] == 3
 
 
 def test_integer_array_isel_resizes_by_length(ds):
@@ -201,7 +201,7 @@ def test_integer_array_isel_resizes_by_length(ds):
     schema = SchemaState.from_dataset(ds)
     node = Select(name="isel", indexer={"lon": np.array([0, 1])})
     after = apply_schema(schema, node)
-    assert after.dims["lon"] == 2
+    assert after.sizes["lon"] == 2
 
 
 def test_boolean_list_isel_resizes_by_true_count(ds):
@@ -209,7 +209,7 @@ def test_boolean_list_isel_resizes_by_true_count(ds):
     schema = SchemaState.from_dataset(ds)
     node = Select(name="isel", indexer={"time": [True, False, True, True]})
     after = apply_schema(schema, node)
-    assert after.dims["time"] == 3
+    assert after.sizes["time"] == 3
 
 
 def test_unsizable_sel_slice_is_unknown(ds):
@@ -223,8 +223,8 @@ def test_unsizable_sel_slice_is_unknown(ds):
     schema = SchemaState.from_dataset(ds)
     node = Select(name="sel", indexer={"time": slice("a", "z")})
     after = apply_schema(schema, node)
-    assert after.dims["time"] is None
-    assert "time" in after.dims  # unknown extent, but the dim is still there
+    assert after.sizes["time"] is None
+    assert "time" in after.sizes  # unknown extent, but the dim is still there
 
 
 def test_integer_labelled_sel_slice_is_unknown_not_under_reported(ds):
@@ -240,14 +240,14 @@ def test_integer_labelled_sel_slice_is_unknown_not_under_reported(ds):
     schema = SchemaState.from_dataset(ds)
     node = Select(name="sel", indexer={"time": slice(20, 30)})
     after = apply_schema(schema, node)
-    assert after.dims["time"] is None
+    assert after.sizes["time"] is None
 
 
 def test_positional_isel_slice_is_still_sized_exactly(ds):
     """An ``isel`` slice keeps its exact size, so the unknown above is confined to ``sel``."""
     schema = SchemaState.from_dataset(ds)
     after = apply_schema(schema, Select(name="isel", indexer={"time": slice(1, 3)}))
-    assert after.dims["time"] == 2
+    assert after.sizes["time"] == 2
 
 
 def test_unknown_size_propagates_through_a_later_select(ds):
@@ -260,9 +260,9 @@ def test_unknown_size_propagates_through_a_later_select(ds):
     """
     unknown = _dim_coords_only({"time": None, "lat": 3})
     after = apply_schema(unknown, Select(name="isel", indexer={"time": slice(0, 2)}))
-    assert after.dims["time"] is None
-    assert after.dims["time"] != 0
-    assert after.dims["lat"] == 3  # a known size beside it is unaffected
+    assert after.sizes["time"] is None
+    assert after.sizes["time"] != 0
+    assert after.sizes["lat"] == 3  # a known size beside it is unaffected
 
 
 def test_scalar_select_still_drops_a_dim_of_unknown_size(ds):
@@ -276,7 +276,7 @@ def test_scalar_select_still_drops_a_dim_of_unknown_size(ds):
     """
     unknown = _dim_coords_only({"time": None, "lat": 3})
     after = apply_schema(unknown, Select(name="isel", indexer={"time": 0}))
-    assert "time" not in after.dims
+    assert "time" not in after.sizes
     # The *dim* goes without needing a size; the coordinate survives as 0-d, which is a
     # separate rule (see ``test_scalar_isel_removes_dim_but_keeps_the_coord``) and is
     # asserted here only so this test cannot pass by dropping too much.
@@ -383,8 +383,8 @@ def test_grouped_reduce_mints_a_dim_of_unknown_size(dated_ds):
         name="groupby", group_dim="time", new_dim="month", reduce="mean"
     )
     after = apply_schema(SchemaState.from_dataset(dated_ds), node)
-    assert after.dims["month"] is None
-    assert after.dims["lat"] == 3  # untouched dims keep their known sizes
+    assert after.sizes["month"] is None
+    assert after.sizes["lat"] == 3  # untouched dims keep their known sizes
 
 
 def test_grouped_reduce_adds_the_new_dim_to_a_variable_that_lacked_the_group_dim(
@@ -457,7 +457,7 @@ def test_windowed_reduce_arm_agrees_with_xarray(dated_ds, calls, node):
         eager = getattr(eager, name)(*args, **kwargs)
 
     after = apply_schema(SchemaState.from_dataset(dated_ds), node)
-    assert dict(after.dims) == dict(eager.sizes)
+    assert dict(after.sizes) == dict(eager.sizes)
 
 
 @pytest.mark.parametrize(
@@ -479,10 +479,10 @@ def test_coarsen_rounding_follows_the_boundary_kwarg(boundary, expected):
         kwargs={"time": 2, "boundary": boundary},
     )
     after = apply_schema(SchemaState.from_dataset(ds), node)
-    assert after.dims["time"] == expected
+    assert after.sizes["time"] == expected
     if boundary != "exact":  # exact raises on a length it cannot divide
         assert (
-            after.dims["time"]
+            after.sizes["time"]
             == ds.coarsen(time=2, boundary=boundary).mean().sizes["time"]
         )
 
@@ -497,7 +497,7 @@ def test_rolling_leaves_every_size_alone(dated_ds):
     """
     node = WindowedReduce(name="rolling", reduce="mean", window={"time": 5})
     after = apply_schema(SchemaState.from_dataset(dated_ds), node)
-    assert dict(after.dims) == dict(dated_ds.sizes)
+    assert dict(after.sizes) == dict(dated_ds.sizes)
     assert after.coords == frozenset(dated_ds.coords)
 
 
@@ -510,7 +510,7 @@ def test_unrecognised_boundary_marks_the_size_unknown():
         window={"time": 2},
         kwargs={"time": 2, "boundary": "something-new"},
     )
-    assert apply_schema(SchemaState.from_dataset(ds), node).dims["time"] is None
+    assert apply_schema(SchemaState.from_dataset(ds), node).sizes["time"] is None
 
 
 def test_windowing_an_unknown_size_stays_unknown():
@@ -519,7 +519,7 @@ def test_windowing_an_unknown_size_stays_unknown():
     node = WindowedReduce(
         name="coarsen", reduce="mean", window={"time": 2}, kwargs={"time": 2}
     )
-    assert apply_schema(unknown, node).dims["time"] is None
+    assert apply_schema(unknown, node).sizes["time"] is None
 
 
 # --- weighted reduces ----------------------------------------------------------------
@@ -616,9 +616,9 @@ def test_a_surviving_weight_dim_is_sized_unknown_not_guessed(ds):
 
     after = apply_schema(SchemaState.from_dataset(ds), node)
 
-    assert after.dims["lon"] is None  # a weight dim, kept but not sized
-    assert after.dims["time"] == 4  # untouched dims keep their known sizes
-    assert "lat" not in after.dims
+    assert after.sizes["lon"] is None  # a weight dim, kept but not sized
+    assert after.sizes["time"] == 4  # untouched dims keep their known sizes
+    assert "lat" not in after.sizes
 
 
 def test_misaligned_weights_really_do_shrink_a_shared_dim(ds):
@@ -639,7 +639,7 @@ def test_misaligned_weights_really_do_shrink_a_shared_dim(ds):
         _weighted(frozenset({"lon"}), frozenset({"lat"}), w),
     )
     assert after.dim_names == frozenset(eager.sizes)
-    assert after.dims["lat"] is None
+    assert after.sizes["lat"] is None
 
 
 def test_a_broadcast_weight_dim_reaches_a_variable_that_could_not_have_had_it(ds):
@@ -657,7 +657,7 @@ def test_a_broadcast_weight_dim_reaches_a_variable_that_could_not_have_had_it(ds
     after = apply_schema(SchemaState.from_dataset(ds), node)
 
     assert set(after.data_vars["elevation"]) == {"member", "lon"}
-    assert after.dims["member"] is None
+    assert after.sizes["member"] is None
 
 
 def test_several_minted_dims_land_in_a_deterministic_order(ds):
@@ -683,7 +683,7 @@ def test_weighting_an_unknown_size_stays_unknown():
     unknown = _dim_coords_only({"time": None, "lat": 3})
     w = xr.DataArray([1.0], dims="time")
     after = apply_schema(unknown, _weighted(frozenset({"lat"}), frozenset({"time"}), w))
-    assert after.dims["time"] is None
+    assert after.sizes["time"] is None
 
 
 def test_scan_leaves_schema_unchanged(ds):
@@ -691,7 +691,7 @@ def test_scan_leaves_schema_unchanged(ds):
     schema = SchemaState.from_dataset(ds)
     node = Scan(name="cumsum", args=("time",))
     after = apply_schema(schema, node)
-    assert after.dims == schema.dims
+    assert after.sizes == schema.sizes
     assert after.coords == schema.coords
 
 
@@ -711,7 +711,7 @@ def test_schema_threads_through_a_chain(ds):
     schema = SchemaState.from_dataset(ds)
     schema = apply_schema(schema, Reduce(name="mean", args=("lat",), consumes=["lat"]))
     schema = apply_schema(schema, Select(name="isel", indexer={"time": 0}))
-    assert schema.dims == {"lon": 5}
+    assert schema.sizes == {"lon": 5}
     assert schema.coords == {"lon", "time"}
     assert schema.variables["time"] == ()  # survived, scalar
     assert "lat" not in schema.variables  # aggregated away, coordinate and all
@@ -753,7 +753,7 @@ def test_project_drops_the_dims_the_survivors_no_longer_span(ds):
 
     Notes
     -----
-    The tempting expectation is ``after.dims == schema.dims`` — that a projection narrows
+    The tempting expectation is ``after.sizes == schema.sizes`` — that a projection narrows
     only the variables. It doesn't. Checked against evaluation, which is what caught the
     wrong version of this assertion.
     """
@@ -772,7 +772,7 @@ def test_project_keeping_every_dim_leaves_the_schema_alone(ds):
     after = apply_schema(
         schema, Project(name="__getitem__", variables=("temperature",))
     )
-    assert after.dims == schema.dims
+    assert after.sizes == schema.sizes
     assert after.coords == schema.coords
 
 
@@ -813,7 +813,7 @@ def test_project_of_an_unknown_name_leaves_dims_alone(ds):
     """
     schema = SchemaState.from_dataset(ds)
     after = apply_schema(schema, Project(name="__getitem__", variables=("nope",)))
-    assert after.dims == schema.dims
+    assert after.sizes == schema.sizes
 
 
 def test_var_dims_unions_known_names(ds):

@@ -65,10 +65,12 @@ class SchemaState:
         Which of those names are coordinates. A *role*, not a type: ``xr.Dataset`` keeps
         the same distinction as ``_variables`` plus ``_coord_names``, and
         ``reset_coords`` moves a name between the two without touching the variable.
-    dims : frozendict
-        Extents only, ``{dim: size}``, for the dims :attr:`dim_names` derives. This field
-        says how big, never *which*. A size of ``None`` means **don't know** — see the
-        notes.
+    sizes : frozendict
+        Extents only, ``{dim: size}``, for the dims :attr:`dim_names` derives. Named for
+        what it holds: it answers *how big*, never *which*. There is deliberately no
+        ``dims`` attribute, because that name meant both before the variables store
+        existed and is the ambiguity this class is now free of. A size of ``None`` means
+        **don't know** — see the notes.
 
     Notes
     -----
@@ -110,7 +112,7 @@ class SchemaState:
         default_factory=frozendict
     )
     coord_names: frozenset[Hashable] = frozenset()
-    dims: frozendict[Hashable, int | None] = field(default_factory=frozendict)
+    sizes: frozendict[Hashable, int | None] = field(default_factory=frozendict)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -127,8 +129,8 @@ class SchemaState:
         spanned = self.dim_names
         object.__setattr__(
             self,
-            "dims",
-            frozendict({d: s for d, s in self.dims.items() if d in spanned}),
+            "sizes",
+            frozendict({d: s for d, s in self.sizes.items() if d in spanned}),
         )
 
     @classmethod
@@ -159,7 +161,7 @@ class SchemaState:
         return cls(
             variables=frozendict(variables),
             coord_names=frozenset(ds.coords),
-            dims=frozendict(ds.sizes),
+            sizes=frozendict(ds.sizes),
         )
 
     def var_dims(self, names: Iterable[Hashable]) -> frozenset[Hashable] | None:
@@ -376,7 +378,7 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
     """
     variables = dict(schema.variables)
     coord_names = set(schema.coord_names)
-    sizes = dict(schema.dims)
+    sizes = dict(schema.sizes)
 
     match node:
         case Reduce(consumes=consumes):
@@ -470,7 +472,7 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
     return SchemaState(
         variables=frozendict(variables),
         coord_names=frozenset(coord_names),
-        dims=frozendict(sizes),
+        sizes=frozendict(sizes),
     )
 
 

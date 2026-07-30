@@ -133,7 +133,7 @@ def _apply(obj, calls):
     return obj
 
 
-def _dims(ds):
+def _dim_names(ds):
     """What ``to_lower_ir`` needs of the base dataset: its dim names, and nothing else.
 
     Spelled out rather than inlined because it is the same argument at every call site, and
@@ -156,7 +156,7 @@ def _build_plan(ds, calls):
     """
     plan = [to_opnode(call.name, call.args, dict(call)) for call in calls]
     schema = SchemaState.from_dataset(ds)
-    for node in to_lower_ir(plan, _dims(ds)):
+    for node in to_lower_ir(plan, _dim_names(ds)):
         schema = apply_schema(schema, node)
     return plan, schema
 
@@ -702,7 +702,7 @@ def test_optimised_plan_matches_eager_evaluation(case):
     show no fused nodes at all would mean the builder widening had stopped biting.
     """
     ds, calls = case
-    for node in to_lower_ir(_build_plan(ds, calls)[0], _dims(ds)):
+    for node in to_lower_ir(_build_plan(ds, calls)[0], _dim_names(ds)):
         if type(node).__name__.endswith("Reduce") and type(node).__name__ != "Reduce":
             event(f"fused: {type(node).__name__}")
     assert_equal(_apply(ds.plan, calls).collect(), _apply(ds, calls))
@@ -719,7 +719,7 @@ def test_optimize_is_idempotent(case):
     ds, calls = case
     plan, _ = _build_plan(ds, calls)
     schema = SchemaState.from_dataset(ds)
-    once = optimize(to_lower_ir(plan, _dims(ds)), schema)
+    once = optimize(to_lower_ir(plan, _dim_names(ds)), schema)
     assert optimize(once, schema) == once
 
 
@@ -734,8 +734,8 @@ def test_lowering_is_idempotent(case):
     """
     ds, calls = case
     plan, _ = _build_plan(ds, calls)
-    once = to_lower_ir(plan, _dims(ds))
-    assert to_lower_ir(once, _dims(ds)) == once
+    once = to_lower_ir(plan, _dim_names(ds))
+    assert to_lower_ir(once, _dim_names(ds)) == once
 
 
 @SETTINGS
@@ -750,7 +750,7 @@ def test_no_context_open_survives_lowering(case):
     ds, calls = case
     plan, _ = _build_plan(ds, calls)
     assert not any(
-        isinstance(node, ContextOpen) for node in to_lower_ir(plan, _dims(ds))
+        isinstance(node, ContextOpen) for node in to_lower_ir(plan, _dim_names(ds))
     )
 
 
@@ -771,7 +771,7 @@ def test_emit_after_lowering_reproduces_the_recorded_calls(case):
     """
     ds, calls = case
     plan, _ = _build_plan(ds, calls)
-    assert emit(to_lower_ir(plan, _dims(ds))) == [
+    assert emit(to_lower_ir(plan, _dim_names(ds))) == [
         Lowered(name=node.name, args=node.args, kwargs=node.kwargs) for node in plan
     ]
 
@@ -786,7 +786,9 @@ def test_adjacent_selects_collapse_without_changing_meaning(case):
     """
     ds, calls = case
     plan, _ = _build_plan(ds, calls)
-    optimised = optimize(to_lower_ir(plan, _dims(ds)), SchemaState.from_dataset(ds))
+    optimised = optimize(
+        to_lower_ir(plan, _dim_names(ds)), SchemaState.from_dataset(ds)
+    )
 
     assert len(optimised) == 1, "a run of selects on distinct dims should fold to one"
     assert_equal(_apply(ds.plan, calls).collect(), _apply(ds, calls))
@@ -825,10 +827,12 @@ def test_tracked_schema_agrees_with_evaluation(case):
     """
     ds, calls = case
     plan, schema = _build_plan(ds, calls)
-    assume(not any(isinstance(node, Opaque) for node in to_lower_ir(plan, _dims(ds))))
+    assume(
+        not any(isinstance(node, Opaque) for node in to_lower_ir(plan, _dim_names(ds)))
+    )
     result = _apply(ds, calls)
 
-    assert set(schema.dims) == set(result.sizes)
+    assert set(schema.sizes) == set(result.sizes)
 
     # Every tracked coordinate, not just the dim coordinates — the restriction issue #109
     # asked for is gone, because coordinates are variables now and their lifetimes are
@@ -857,7 +861,7 @@ def test_sizes_are_tracked_exactly_without_label_slices(case):
     assume(not any(_has_label_slice(call) for call in calls))
 
     _, schema = _build_plan(ds, calls)
-    assert dict(schema.dims) == dict(_apply(ds, calls).sizes)
+    assert dict(schema.sizes) == dict(_apply(ds, calls).sizes)
 
 
 def _has_label_slice(call):
@@ -893,7 +897,7 @@ def test_sel_label_slice_size_is_tracked_correctly():
     call = Call("sel", lat=slice(20, 30))
 
     _, schema = _build_plan(ds, [call])
-    assert dict(schema.dims) == dict(_apply(ds, [call]).sizes)
+    assert dict(schema.sizes) == dict(_apply(ds, [call]).sizes)
 
 
 def test_sel_label_slice_size_is_unknown_rather_than_wrong():
@@ -905,8 +909,8 @@ def test_sel_label_slice_size_is_unknown_rather_than_wrong():
     ds = xr.Dataset({"t": ("lat", np.arange(4.0))}, coords={"lat": [10, 20, 30, 40]})
 
     _, schema = _build_plan(ds, [Call("sel", lat=slice(20, 30))])
-    assert schema.dims["lat"] is None
-    assert schema.dims["lat"] != 0  # the under-report this replaced
+    assert schema.sizes["lat"] is None
+    assert schema.sizes["lat"] != 0  # the under-report this replaced
 
 
 @SETTINGS
@@ -926,9 +930,9 @@ def test_rewrites_survive_unknown_dim_sizes(case):
     blanked = SchemaState(
         variables=base.variables,  # the store is untouched; only the extents are blanked
         coord_names=base.coord_names,
-        dims=frozendict(dict.fromkeys(base.dims)),  # every size -> None
+        sizes=frozendict(dict.fromkeys(base.sizes)),  # every size -> None
     )
-    lowered = to_lower_ir(plan, _dims(ds))
+    lowered = to_lower_ir(plan, _dim_names(ds))
     assert optimize(lowered, blanked) == optimize(lowered, base)
 
 
@@ -953,7 +957,7 @@ def test_every_builder_kind_is_generated_and_replays_equal_to_eager(data, kind):
     pair = data.draw(_builder_pair(ds, kind=kind))
 
     assert pair is not None and pair[0].name == kind
-    lowered = to_lower_ir(_build_plan(ds, pair)[0], _dims(ds))
+    lowered = to_lower_ir(_build_plan(ds, pair)[0], _dim_names(ds))
     event(f"{kind}: {'fused' if len(lowered) == 1 else 'opaque pair'}")
     assert len(lowered) == 1 or kind in {"groupby", "resample"}
 
