@@ -98,15 +98,27 @@ EXACT = [
     ("ds.isel(time=0)", [("isel", (), {"time": 0})]),
     ("ds.isel(time=slice(0, 2))", [("isel", (), {"time": slice(0, 2)})]),
     ("ds.isel(lat=[0, 2])", [("isel", (), {"lat": [0, 2]})]),
-    ("ds.isel(time=[True, False, True, True])", [("isel", (), {"time": [True, False, True, True]})]),
+    (
+        "ds.isel(time=[True, False, True, True])",
+        [("isel", (), {"time": [True, False, True, True]})],
+    ),
     ("ds[['tas']]", [("__getitem__", (["tas"],), {})]),
     ("ds[['elev']]", [("__getitem__", (["elev"],), {})]),
     ("ds.chunk({'time': 2})", [("chunk", ({"time": 2},), {})]),
     ("ds.cumsum('time')", [("cumsum", ("time",), {})]),
-    ("ds.coarsen(time=2, boundary='trim').mean()", [("coarsen", (), {"time": 2, "boundary": "trim"}), ("mean", (), {})]),
+    (
+        "ds.coarsen(time=2, boundary='trim').mean()",
+        [("coarsen", (), {"time": 2, "boundary": "trim"}), ("mean", (), {})],
+    ),
     ("ds.rolling(time=2).mean()", [("rolling", (), {"time": 2}), ("mean", (), {})]),
-    ("ds.mean('lat').isel(time=0)", [("mean", ("lat",), {}), ("isel", (), {"time": 0})]),
-    ("ds.isel(time=slice(0, 2)).mean('lat')", [("isel", (), {"time": slice(0, 2)}), ("mean", ("lat",), {})]),
+    (
+        "ds.mean('lat').isel(time=0)",
+        [("mean", ("lat",), {}), ("isel", (), {"time": 0})],
+    ),
+    (
+        "ds.isel(time=slice(0, 2)).mean('lat')",
+        [("isel", (), {"time": slice(0, 2)}), ("mean", ("lat",), {})],
+    ),
 ]
 
 
@@ -157,7 +169,9 @@ UNKNOWN = [
 @pytest.mark.parametrize(
     ("label", "calls", "dim", "why"), UNKNOWN, ids=[c[0] for c in UNKNOWN]
 )
-def test_sizes_decline_to_guess_when_the_extent_needs_values(ds, label, calls, dim, why):
+def test_sizes_decline_to_guess_when_the_extent_needs_values(
+    ds, label, calls, dim, why
+):
     """``None`` where the extent is a fact about data, and the dim *name* still exact.
 
     Each case has a real, knowable answer — the reason it is ``None`` is that finding it
@@ -261,7 +275,9 @@ def test_equal_schemas_compare_equal_despite_stale_extents():
     while having nothing to do with rewrites.
     """
     without = SchemaState(
-        variables={"time": ("time",)}, coord_names=frozenset({"time"}), sizes={"time": 4}
+        variables={"time": ("time",)},
+        coord_names=frozenset({"time"}),
+        sizes={"time": 4},
     )
     with_stale = SchemaState(
         variables={"time": ("time",)},
