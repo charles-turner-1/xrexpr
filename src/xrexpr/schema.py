@@ -1,10 +1,14 @@
 """Logical schema tracking (no data materialisation).
 
 The ``.plan`` proxy starts from the *real* base dataset, so a cheap **logical** schema
-— the current dims, their sizes, and the coordinate names — can be folded forward
-through a plan **without ever touching array data**. That is what lets a rule know the
-shape each node sees, and what a dim set like ``ds.mean()``'s
+— every variable and the dims it spans, which of those are coordinates, and the dims'
+sizes — can be folded forward through a plan **without ever touching array data**. That
+is what lets a rule know the shape each node sees, and what a dim set like ``ds.mean()``'s
 :data:`~xrexpr.ir.ALL_DIMS` is finally resolved against.
+
+The variables are the store and the dims are **derived** from them, mirroring
+``xr.Dataset``'s own ``_variables``/``_coord_names`` split and its derived ``.dims``. See
+:class:`SchemaState` for why that direction is load-bearing rather than cosmetic.
 
 The fold is owned by the *optimiser* (``optimize._schemas``), not by recording:
 :func:`to_opnode` is a pure function of one call, so nothing is resolved against a
@@ -52,51 +56,86 @@ __all__ = ["SchemaState", "apply_schema", "to_opnode"]
 class SchemaState:
     """An immutable snapshot of a dataset's logical shape at one point in a plan.
 
-    Holds only metadata — ``dims`` (name → size), ``coords`` (coordinate names) and
-    ``data_vars`` (variable name → its dims) — never array data. All three are coerced
-    to immutable containers on construction, so a snapshot is hashable and safe to
-    thread through the plan.
+    Holds only metadata — never array data — and mirrors how ``xr.Dataset`` itself is
+    built, because that is what makes the model's invariants hold by construction rather
+    than by maintenance:
+
+    - :attr:`variables` — **every** variable, coordinate or not, mapped to the dims it
+      spans. This is the store.
+    - :attr:`coord_names` — which of those names are coordinates. A *role*, not a type:
+      ``xr.Dataset`` keeps the same distinction as ``_variables`` plus ``_coord_names``,
+      and ``reset_coords`` moves a name between the two without touching the variable.
+    - :attr:`dims` — extents only, ``{dim: size}``, for the dims :attr:`dim_names`
+      derives. See below; this field says how big, never *which*.
+
+    **Dim existence is derived, not stored** (:attr:`dim_names`). A dim exists exactly
+    when some variable spans it — true of the domain, and ``Dataset.dims`` is a derived
+    property upstream for the same reason. Storing it separately would mean storing one
+    fact twice, and a schema could then say ``dims={"time": 4}`` while a variable spanned
+    ``("time", "lat")``: a phantom ``lat``, reported by ``var_dims`` to any rule that
+    asked. Deriving makes that state unconstructible rather than merely unlikely — the
+    same trade as the ``assert_never`` discipline elsewhere.
+
+    :attr:`data_vars` is likewise derived (:attr:`variables` minus :attr:`coord_names`).
+    It is what makes *variable*-level reasoning possible: whether a projection may hop
+    left past an op depends on whether the projected subset still carries the dims that
+    op names.
+
+    Modelling coordinates as variables-with-dims — rather than as bare names — is what
+    lets :func:`apply_schema` state their lifetimes at all. An aggregating op drops a
+    coordinate over the dim it aggregates while an indexing op keeps it (demoted to 0-d),
+    and that distinction is inexpressible if a coordinate has no dims to lose.
 
     A size of ``None`` means **don't know** — the dim exists, but its extent is not
     statically evident. The same contract ``var_dims`` states, and the same warning
     applies with one substitution: callers must treat it as "no rewrite", never as
     *size zero*. Under-reporting a size is the unsafe direction, because it is the one
-    a rewrite could act on. Nothing computes a size but :func:`apply_schema`'s select
-    arm, and no optimiser rule reads one at all — every rule reasons about dim *names*
-    — which is what keeps the unknown from having to propagate anywhere else.
-
-    ``data_vars`` is what makes *variable*-level reasoning possible: whether a
-    projection may hop left past an op depends on whether the projected subset still
-    carries the dims that op names.
+    a rewrite could act on. No optimiser rule reads a size at all — every rule reasons
+    about dim *names*, and ``test_rewrites_survive_unknown_dim_sizes`` pins that by
+    blanking every size and demanding the same output.
     """
 
-    dims: frozendict[Hashable, int | None] = field(default_factory=frozendict)
-    coords: frozenset[Hashable] = frozenset()
-    data_vars: frozendict[Hashable, tuple[Hashable, ...]] = field(
+    variables: frozendict[Hashable, tuple[Hashable, ...]] = field(
         default_factory=frozendict
     )
+    coord_names: frozenset[Hashable] = frozenset()
+    dims: frozendict[Hashable, int | None] = field(default_factory=frozendict)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "dims", frozendict(self.dims))
-        object.__setattr__(self, "coords", frozenset(self.coords))
         object.__setattr__(
             self,
-            "data_vars",
-            frozendict({k: tuple(v) for k, v in self.data_vars.items()}),
+            "variables",
+            frozendict({k: tuple(v) for k, v in self.variables.items()}),
+        )
+        object.__setattr__(self, "coord_names", frozenset(self.coord_names))
+        # Pruned to the derived dims, which is the one place the two fields have to meet:
+        # an extent for a dim nothing spans is unreachable through ``dim_names``, but it
+        # would still make two semantically equal snapshots compare unequal, and equality
+        # is load-bearing (``test_rewrites_survive_unknown_dim_sizes`` compares two folded
+        # schemas directly). Canonicalising here is what keeps ``SchemaState`` a *value*.
+        spanned = self.dim_names
+        object.__setattr__(
+            self,
+            "dims",
+            frozendict({d: s for d, s in self.dims.items() if d in spanned}),
         )
 
     @classmethod
     def from_dataset(cls, ds: xr.Dataset | xr.DataArray) -> "SchemaState":
-        """Snapshot ``ds``'s logical schema, reading only ``.sizes``/``.coords``/dims."""
-        data_vars = (
-            {k: tuple(v.dims) for k, v in ds.data_vars.items()}
-            if isinstance(ds, xr.Dataset)
-            else {}  # a DataArray has no data_vars to project over
-        )
+        """Snapshot ``ds``'s logical schema, reading only ``.sizes``/``.coords``/dims.
+
+        Coordinates and data variables are read into one mapping, exactly as
+        ``Dataset._variables`` holds them. A ``DataArray`` contributes only its coords:
+        it has no ``data_vars``, so there is nothing to project over — see
+        ``07-small-wins.md`` §5.
+        """
+        variables = {k: tuple(v.dims) for k, v in ds.coords.items()}
+        if isinstance(ds, xr.Dataset):
+            variables |= {k: tuple(v.dims) for k, v in ds.data_vars.items()}
         return cls(
+            variables=frozendict(variables),
+            coord_names=frozenset(ds.coords),
             dims=frozendict(ds.sizes),
-            coords=frozenset(ds.coords),
-            data_vars=frozendict(data_vars),
         )
 
     def var_dims(self, names: Iterable[Hashable]) -> frozenset[Hashable] | None:
@@ -105,58 +144,94 @@ class SchemaState:
         ``None`` is the *don't know* answer — a name that isn't a tracked data
         variable (a coordinate, or something an unmodelled op introduced) — and
         callers must treat it as "no rewrite", never as "no dims".
+
+        Restricted to :attr:`data_vars` deliberately, unchanged by the variables store:
+        the callers are the projection rules, and a projection names data variables. A
+        coordinate answers ``None`` here even though its dims are now known, because
+        naming one in a projection is not something those rules model.
         """
         dims: set[Hashable] = set()
+        data_vars = self.data_vars
         for name in names:
-            if name not in self.data_vars:
+            if name not in data_vars:
                 return None
-            dims.update(self.data_vars[name])
+            dims.update(data_vars[name])
         return frozenset(dims)
 
     @property
     def dim_names(self) -> frozenset[Hashable]:
-        """The set of current dimension names."""
-        return frozenset(self.dims)
+        """The dims that exist: every dim some variable spans. Derived, never stored."""
+        return frozenset(d for var_dims in self.variables.values() for d in var_dims)
+
+    @property
+    def data_vars(self) -> frozendict[Hashable, tuple[Hashable, ...]]:
+        """The non-coordinate variables and their dims. Derived from the store."""
+        return frozendict(
+            {k: v for k, v in self.variables.items() if k not in self.coord_names}
+        )
+
+    @property
+    def coords(self) -> frozenset[Hashable]:
+        """The coordinate names. Alias for :attr:`coord_names`, kept for readers."""
+        return self.coord_names
 
 
 def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
     """Return the schema resulting from applying ``node`` to ``schema``.
 
-    Each variant affects the schema differently, so this dispatches with ``match``:
+    Every arm says what happened to the **variables**; the dims follow, because
+    :attr:`SchemaState.dim_names` is derived. That direction is the whole point — nothing
+    here removes a dim as a primary action, so no arm can leave the dims and the variables
+    disagreeing, and the reconciliation tails an independently-stored ``dims`` needed are
+    gone with it.
 
-    - :class:`~xrexpr.ir.Reduce` removes its ``consumes`` dims — *every* dim when that
+    Two variable rules do the work, and which one an op takes is *the* distinction between
+    the op families (both verified against xarray 2026.7.0 — see each helper's docstring):
+
+    - :func:`_aggregated` — data variables lose the dims, coordinates spanning them are
+      **dropped**. Taken by :class:`~xrexpr.ir.Reduce`,
+      :class:`~xrexpr.ir.GroupedReduce`, :class:`~xrexpr.ir.WeightedReduce`, and by a
+      ``Select`` carrying ``drop=True``.
+    - :func:`_indexed` — every variable loses the dims and **nothing is dropped**, so a
+      coordinate left dimensionless is a 0-d coordinate. Taken by an ordinary
+      :class:`~xrexpr.ir.Select`.
+
+    On top of that, per variant:
+
+    - :class:`~xrexpr.ir.Reduce` aggregates over its ``consumes`` — *every* dim when that
       is :data:`~xrexpr.ir.ALL_DIMS`, which is where the deferred bare-reduce expansion
       is finally cashed in against a schema that is exact;
-    - :class:`~xrexpr.ir.Select` removes the dims it drops (scalar indices) and
-      *resizes* the dims it keeps (slice/sequence indices);
-    - :class:`~xrexpr.ir.Project` restricts the variables, and drops any dim the survivors
-      no longer span — xarray orphans it rather than keeping it empty;
-    - :class:`~xrexpr.ir.GroupedReduce` removes its ``group_dim`` and any extra
-      ``consumes``, and mints ``new_dim`` — of *unknown* size, since the group count is a
-      fact about coordinate values — onto every variable;
+    - :class:`~xrexpr.ir.Select` also *resizes* the dims it keeps (slice/sequence indices);
+    - :class:`~xrexpr.ir.Project` restricts the variables and prunes coordinates to those
+      the survivors still span; dims it orphans simply stop being derived. An unknown name
+      declines the whole projection — see the guard's comment;
+    - :class:`~xrexpr.ir.GroupedReduce` aggregates over ``group_dim`` plus any extra
+      ``consumes``, mints ``new_dim`` onto every data variable, and adds ``new_dim`` as a
+      coordinate of its own — of *unknown* size, since the group count is a fact about
+      coordinate values;
     - :class:`~xrexpr.ir.WindowedReduce` keeps every dim and *resizes* the windowed ones
       (``coarsen`` only);
-    - :class:`~xrexpr.ir.WeightedReduce` removes its ``consumes`` like a plain reduce, and
-      then marks every surviving ``weight_dims`` entry unknown — the weights broadcast in
-      the dims the dataset lacks and align (so possibly *shrink*) the ones it shares;
+    - :class:`~xrexpr.ir.WeightedReduce` aggregates over its ``consumes`` like a plain
+      reduce, then mints any weight dim the dataset lacked and marks every weight dim's
+      extent unknown — the weights broadcast in the dims the dataset lacks and align (so
+      possibly *shrink*) the ones it shares;
     - :class:`~xrexpr.ir.Scan`/:class:`~xrexpr.ir.Rechunk`/:class:`~xrexpr.ir.Opaque`
-      leave dims untouched (a rechunk changes only chunk topology);
-    - a coordinate sharing a name with a removed dim disappears (all cases), and a
-      removed dim likewise disappears from every variable's dim tuple.
+      change nothing (a rechunk changes only chunk topology).
 
     An :class:`~xrexpr.ir.Opaque` is assumed variable-preserving, which is *not* true
     in general (``rename``/``drop_vars``/``assign``). That makes the schema exact only
     up to the first opaque op — a trust boundary the optimiser enforces rather than
-    this function (see ``optimize._trusted_prefix``).
+    this function (see ``optimize._trusted_prefix``). Within that boundary it really is
+    exact, coordinates included: ``test_tracked_schema_agrees_with_evaluation`` compares
+    the tracked variables and coordinates to a real evaluation's for equality, not
+    containment.
 
     ``assert_never`` on the final arm makes the union exhaustive: a new variant fails
     type-check here until handled.
     """
-    dims = dict(schema.dims)
-    data_vars = dict(schema.data_vars)
-    # Dims this node *adds*. Collected by the arms and applied to every variable once
-    # below, because two arms mint now and both mint onto every variable alike.
-    minted: set[Hashable] = set()
+    variables = dict(schema.variables)
+    coord_names = set(schema.coord_names)
+    sizes = dict(schema.dims)
 
     match node:
         case Reduce(consumes=consumes):
@@ -166,107 +241,178 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
             # too, not just a seventh ``Op``.
             match consumes:
                 case AllDims():
-                    dims.clear()  # a bare ``mean()`` -- whatever is here now, it goes
+                    over = schema.dim_names  # a bare ``mean()`` -- all of them
                 case frozenset() as named:
-                    for dim in named:
-                        dims.pop(dim, None)
+                    over = named
                 case _:
                     assert_never(consumes)
+            variables, coord_names = _aggregated(variables, coord_names, over)
         case Select(indexer=indexer) as select:
-            for dim in select.consumes:
-                dims.pop(dim, None)
+            # ``drop=True`` is the difference between the two coordinate rules, and it is
+            # the only place this arm needs to know which it is: without it a scalar select
+            # *demotes* the coords over its dim to 0-d and keeps them
+            # (``isel(lat=0)`` -> ``lat``, ``region`` both present, scalar); with it they go
+            # (verified against xarray 2026.7.0). Modelled rather than approximated because
+            # the conservative reading is now the *unsafe* one -- coords are asserted to be
+            # a subset of the result's, so keeping one xarray dropped is an over-report.
+            if select.kwargs.get("drop", False):
+                variables, coord_names = _aggregated(
+                    variables, coord_names, select.consumes
+                )
+            else:
+                variables = _indexed(variables, select.consumes)
             # A non-scalar select keeps its dim but changes its size (scalar selects
             # are already gone via ``consumes``).
             for dim, index in indexer.items():
-                if dim not in select.consumes and dim in dims:
-                    dims[dim] = _selected_size(select.name, index, dims[dim])
-        case Project(variables=variables):
-            data_vars = {v: data_vars[v] for v in variables if v in data_vars}
-            if all(v in schema.data_vars for v in variables):
-                # A projection **orphans** dims: xarray keeps
-                # only the dims the selected variables span, so ``ds[["elevation"]]``
-                # (``lat``, ``lon``) drops ``time`` outright rather than leaving it empty.
-                # Coordinates do not keep one alive either -- an aux coord over a dropped
-                # dim goes with it (verified against xarray 2026.7.0), so the ``removed``
-                # tail below handles coords with no extra work.
-                #
-                # Guarded on every projected name being a *tracked* variable: a name this
-                # layer doesn't know (a coord, or something an unmodelled op introduced)
-                # would make the union an under-report, and under-reporting dims is the
-                # unsafe direction. Unknown name → leave ``dims`` alone, as before.
-                spanned = {d for var_dims in data_vars.values() for d in var_dims}
-                dims = {d: size for d, size in dims.items() if d in spanned}
+                if dim not in select.consumes and dim in sizes:
+                    sizes[dim] = _selected_size(select.name, index, sizes[dim])
+        case Project(variables=names):
+            # Guarded on every projected name being a *tracked* data variable: a name this
+            # layer doesn't know (a coord, or something an unmodelled op introduced) would
+            # make the surviving dims an under-report, and under-reporting dims is the
+            # unsafe direction. Unknown name -> leave the store alone entirely.
+            #
+            # That "entirely" is the one behavioural difference from the pre-derivation
+            # shape, which restricted ``data_vars`` while leaving ``dims`` untouched -- i.e.
+            # it produced exactly the phantom-dim state deriving exists to forbid. Declining
+            # the whole projection over-reports in the same direction it used to, and stays
+            # constructible.
+            if all(n in schema.data_vars for n in names):
+                kept = {n: variables[n] for n in names}
+                # xarray prunes coordinates to those the *selected* variables still span,
+                # so ``ds[["elevation"]]`` (``lat``, ``lon``) drops ``time`` and the ``time``
+                # coordinate together. A scalar coord (no dims) is spanned by anything and
+                # survives. Verified against xarray 2026.7.0.
+                spanned = {d for var_dims in kept.values() for d in var_dims}
+                coord_names = {c for c in coord_names if set(variables[c]) <= spanned}
+                variables = {c: variables[c] for c in coord_names} | kept
         case GroupedReduce() as grouped:
-            for dim in (grouped.group_dim, *grouped.consumes):
-                dims.pop(dim, None)
+            variables, coord_names = _aggregated(
+                variables,
+                coord_names,
+                frozenset({grouped.group_dim}) | grouped.consumes,
+            )
+            variables = _minted(variables, coord_names, frozenset({grouped.new_dim}))
+            # The group labels become a coordinate of their own -- grouped-specific, and the
+            # reason this arm mints a *variable* rather than only a dim. A broadcast weight
+            # dim (below) need not have a coord at all.
+            variables[grouped.new_dim] = (grouped.new_dim,)
+            coord_names = coord_names | {grouped.new_dim}
             # The minted dim's extent is the number of groups -- a fact about coordinate
             # *values*, which this layer does not read. ``None`` rather than a guess.
-            dims[grouped.new_dim] = None
-            minted.add(grouped.new_dim)
+            sizes[grouped.new_dim] = None
         case WeightedReduce() as weighted:
             match weighted.consumes:
                 case AllDims():
-                    dims.clear()  # a bare weighted closer, like a bare ``mean()``
+                    # A bare weighted closer, like a bare ``mean()``: the weight dims go too.
+                    variables, coord_names = _aggregated(
+                        variables, coord_names, schema.dim_names
+                    )
                 case frozenset() as named:
-                    for dim in named:
-                        dims.pop(dim, None)
-                    for dim in weighted.weight_dims - named:
-                        # The weights have a dim effect of their own, via ``dot``'s
-                        # broadcast and alignment -- see ``WeightedReduce``. A weight dim
-                        # the dataset lacks is *minted*; one it shares may be *resized*
-                        # (misaligned weights inner-join and shrink it). Either way the
-                        # name is known and the extent is not, which is the answer the
-                        # ``int | None`` sizes exist for. Under ``ALL_DIMS`` above there is
-                        # nothing to do: a bare closer clears the weight dims too.
-                        if dim not in dims:
-                            minted.add(dim)
-                        dims[dim] = None
+                    variables, coord_names = _aggregated(variables, coord_names, named)
+                    # The weights have a dim effect of their own, via ``dot``'s broadcast
+                    # and alignment -- see ``WeightedReduce``. A weight dim the dataset
+                    # lacks is *minted*; one it shares may be *resized* (misaligned weights
+                    # inner-join and shrink it). Either way the name is known and the extent
+                    # is not, which is the answer the ``int | None`` sizes exist for.
+                    from_weights = frozenset(weighted.weight_dims) - named
+                    present = {d for var_dims in variables.values() for d in var_dims}
+                    variables = _minted(variables, coord_names, from_weights - present)
+                    for dim in from_weights:
+                        sizes[dim] = None
                 case _:
                     assert_never(weighted.consumes)
         case WindowedReduce() as windowed:
             for dim, window in windowed.window.items():
-                if dim in dims:
-                    dims[dim] = _windowed_size(windowed, dims[dim], window)
+                if dim in sizes:
+                    sizes[dim] = _windowed_size(windowed, sizes[dim], window)
         case Scan() | Rechunk() | Opaque():
             pass
         case _:
             assert_never(node)
 
-    removed = frozenset(schema.dims) - frozenset(dims)
-    coords = frozenset(c for c in schema.coords if c not in removed)
-    data_vars = {
-        name: tuple(d for d in var_dims if d not in removed)
-        for name, var_dims in data_vars.items()
-    }
-    if minted:
-        # Verified against xarray 2026.7.0, and the non-obvious half of the arms above:
-        # *every* variable comes back carrying a minted dim, including ones that could not
-        # have had it -- ``elevation(lat, lon)`` under ``groupby("time.month")`` is
-        # ``(month, lat, lon)``, and under ``weighted(w)`` with ``w(lat, member)`` it is
-        # ``(lon, member)``. So this is an addition to each variable, not a substitution of
-        # one dim for another.
-        #
-        # Sorted because ``minted`` is a set and :class:`SchemaState` is a *value*: an
-        # iteration-order-dependent dim tuple would make two snapshots folded from identical
-        # inputs unequal between processes. ``str`` is the key for the same reason
-        # ``pushdown_selects`` uses it — a dim name is only ``Hashable``, so it is the one
-        # total order available. Dim order is not otherwise meaningful here (``var_dims``
-        # unions into a set, and ``Dataset.sizes`` promises no order either).
-        ordered = sorted(minted, key=str)
-        data_vars = {
-            name: (*ordered, *(d for d in var_dims if d not in minted))
-            for name, var_dims in data_vars.items()
-        }
-    if isinstance(node, GroupedReduce):
-        # A minted *coordinate*, which is grouped-specific: the group labels become one.
-        # A weight dim broadcast in need not have a coord at all, and under-reporting one
-        # is allowed where under-reporting a dim is not -- ``coords`` is only ever asserted
-        # to be a *subset* of the result's (``test_tracked_schema_agrees_with_evaluation``),
-        # because a scalar select already leaves a coord this layer does not model.
-        coords = coords | {node.new_dim}
     return SchemaState(
-        dims=frozendict(dims), coords=coords, data_vars=frozendict(data_vars)
+        variables=frozendict(variables),
+        coord_names=frozenset(coord_names),
+        dims=frozendict(sizes),
     )
+
+
+def _aggregated(
+    variables: dict[Hashable, tuple[Hashable, ...]],
+    coord_names: set[Hashable],
+    over: frozenset[Hashable],
+) -> tuple[dict[Hashable, tuple[Hashable, ...]], set[Hashable]]:
+    """Apply an *aggregating* op over ``over``: data variables lose those dims, and
+    coordinates spanning any of them are **dropped outright**.
+
+    The asymmetry is xarray's, not a modelling choice (verified against xarray 2026.7.0):
+    ``ds.mean("lat")`` reduces ``tas(time, lat)`` to ``tas(time)`` but *removes* a
+    ``region(lat)`` coordinate rather than aggregating it, because there is no meaningful
+    average of a coordinate's labels. Compare :func:`_indexed`, where nothing is dropped.
+
+    A coordinate that spans none of ``over`` is untouched, which is what keeps ``time``
+    alive through ``groupby("lat").mean()`` while ``region(lat)`` goes.
+    """
+    kept = {
+        name: tuple(d for d in var_dims if d not in over)
+        for name, var_dims in variables.items()
+        if not (name in coord_names and not over.isdisjoint(var_dims))
+    }
+    return kept, coord_names & set(kept)
+
+
+def _indexed(
+    variables: dict[Hashable, tuple[Hashable, ...]], over: frozenset[Hashable]
+) -> dict[Hashable, tuple[Hashable, ...]]:
+    """Apply an *indexing* op over ``over``: every variable loses those dims, and **nothing
+    is dropped**.
+
+    A coordinate left with no dims is a 0-d coordinate, which is exactly what xarray
+    produces for ``isel(lat=0)`` — ``lat`` and ``region`` both survive, scalar. Uniform
+    over coordinates and data variables, which is the whole reason they share a store.
+    """
+    return {
+        name: tuple(d for d in var_dims if d not in over)
+        for name, var_dims in variables.items()
+    }
+
+
+def _minted(
+    variables: dict[Hashable, tuple[Hashable, ...]],
+    coord_names: set[Hashable],
+    new_dims: frozenset[Hashable],
+) -> dict[Hashable, tuple[Hashable, ...]]:
+    """Add ``new_dims`` to every **data** variable.
+
+    Verified against xarray 2026.7.0, and the non-obvious part: *every* data variable comes
+    back carrying a minted dim, including ones that could not have had it — ``elev(lat)``
+    under ``groupby("time.month")`` is ``(month, lat)``, and under ``weighted(w)`` with
+    ``w(lat, member)`` it is ``(member,)``. So this is an addition to each variable, not a
+    substitution of one dim for another.
+
+    Coordinates are **not** minted onto: the existing ones keep their own dims (``region``
+    stays ``(lat,)`` through ``groupby("time.month")``), and the minted coordinate a grouped
+    reduce adds is a new variable spanning only itself.
+
+    Sorted because ``new_dims`` is a set and :class:`SchemaState` is a *value*: an
+    iteration-order-dependent dim tuple would make two snapshots folded from identical
+    inputs unequal between processes. ``str`` is the key for the same reason
+    ``pushdown_selects`` uses it — a dim name is only ``Hashable``, so it is the one total
+    order available. Dim order is not otherwise meaningful here (``var_dims`` unions into a
+    set, and ``Dataset.sizes`` promises no order either).
+    """
+    if not new_dims:
+        return variables
+    ordered = sorted(new_dims, key=str)
+    return {
+        name: (
+            var_dims
+            if name in coord_names
+            else (*ordered, *(d for d in var_dims if d not in new_dims))
+        )
+        for name, var_dims in variables.items()
+    }
 
 
 def _windowed_size(

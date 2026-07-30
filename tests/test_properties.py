@@ -785,9 +785,10 @@ def test_tracked_schema_agrees_with_evaluation(case):
 
     - **dims**: the same dim names survive. This is what the rewrites actually reason
       about — ``consumes`` and the pushdown conflict check are name-based.
-    - **coords**: tracked coords are a *subset* of the result's. A scalar select drops
-      the dim but xarray keeps a scalar coordinate behind, which the schema does not
-      model.
+    - **coords and variables**: exactly the result's, not merely a subset. A scalar select
+      drops the dim while xarray keeps a scalar coordinate behind, and an aggregating op
+      removes that coordinate outright — both are modelled now that a coordinate is a
+      variable with dims, so there is nothing left to be conservative about.
 
     Dim *order* is deliberately not asserted: ``Dataset.sizes`` does not promise the
     insertion order the schema threads, so comparing as sets is the honest check.
@@ -810,23 +811,13 @@ def test_tracked_schema_agrees_with_evaluation(case):
 
     assert set(schema.dims) == set(result.sizes)
 
-    # Restricted to *dim* coordinates, which is exactly the strength this assertion already
-    # had: before the ``datasets`` widening added a non-dim coordinate, every coord it could
-    # see was a dim coord, and ``schema.py``'s ``removed`` filter drops a coord precisely
-    # when a dim of that name goes — so the filter below is a no-op on the old generator and
-    # excludes only the new case.
-    #
-    # That case is a **known gap** (issue #109, found by this widening): ``SchemaState.coords``
-    # is a bare set of names carrying no dims, so the fold cannot see a non-dim coordinate's
-    # lifetime at all. There is no weaker-but-still-true form to assert instead, because the
-    # rule is per-op rather than per-dim (verified against xarray 2026.7.0): an *aggregating*
-    # op drops a coordinate over the dim it aggregates (``mean("lat")`` drops ``region``,
-    # and so does ``groupby("lat").all()`` even though it re-mints ``lat``), while an
-    # *indexing* one keeps it (``isel(lat=0)`` demotes ``region`` to a 0-d coord; only
-    # ``drop=True`` removes it). Stating either half needs the coordinate's dims. Inert
-    # today: nothing in ``optimize`` reads ``coords``.
-    dim_coords = {c for c in schema.coords if c in schema.dims}
-    assert dim_coords <= set(result.coords)
+    # Every tracked coordinate, not just the dim coordinates — the restriction issue #109
+    # asked for is gone, because coordinates are variables now and their lifetimes are
+    # modelled per-op: an aggregating op drops one over the dim it aggregates, an indexing
+    # one demotes it to 0-d. Asserted **exactly** rather than as a subset, which the bare-name
+    # ``coords`` set could never have supported.
+    assert set(schema.coords) == set(result.coords)
+    assert set(schema.variables) == set(result.variables)
 
 
 @SETTINGS
@@ -914,9 +905,9 @@ def test_rewrites_survive_unknown_dim_sizes(case):
     plan, _ = _build_plan(ds, calls)
     base = SchemaState.from_dataset(ds)
     blanked = SchemaState(
+        variables=base.variables,  # the store is untouched; only the extents are blanked
+        coord_names=base.coord_names,
         dims=frozendict(dict.fromkeys(base.dims)),  # every size -> None
-        coords=base.coords,
-        data_vars=base.data_vars,
     )
     lowered = to_lower_ir(plan, _dims(ds))
     assert optimize(lowered, blanked) == optimize(lowered, base)
