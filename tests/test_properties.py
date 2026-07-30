@@ -730,7 +730,9 @@ def test_no_context_open_survives_lowering(case):
     """
     ds, calls = case
     plan, _ = _build_plan(ds, calls)
-    assert not any(isinstance(node, ContextOpen) for node in to_lower_ir(plan, _dims(ds)))
+    assert not any(
+        isinstance(node, ContextOpen) for node in to_lower_ir(plan, _dims(ds))
+    )
 
 
 @SETTINGS

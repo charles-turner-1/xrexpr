@@ -365,7 +365,9 @@ def test_a_coordinate_grouper_fuses_once_its_name_is_a_dim():
     # The guard tests membership, not spelling: the same call against a dataset where
     # ``region`` *is* a dim fuses exactly as before. Pins that the refusals above are the
     # dim check firing rather than some new syntactic narrowing.
-    (node,) = _lower(("groupby", ("region",), {}), ("mean", (), {}), dims=_DIMS | {"region"})
+    (node,) = _lower(
+        ("groupby", ("region",), {}), ("mean", (), {}), dims=_DIMS | {"region"}
+    )
     assert isinstance(node, GroupedReduce)
     assert (node.group_dim, node.new_dim) == ("region", "region")
 
