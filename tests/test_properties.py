@@ -818,10 +818,13 @@ def test_tracked_schema_agrees_with_evaluation(case):
     #
     # That case is a **known gap** (issue #109, found by this widening): ``SchemaState.coords``
     # is a bare set of names carrying no dims, so the fold cannot see a non-dim coordinate's
-    # lifetime at all. xarray drops one as soon as the dim it lives on is consumed — including
-    # when a dim of the same name is minted back, as ``groupby("lat").all()`` does — so there
-    # is no weaker-but-still-true form to assert here rather than exclude. Inert today:
-    # nothing in ``optimize`` reads ``coords``.
+    # lifetime at all. There is no weaker-but-still-true form to assert instead, because the
+    # rule is per-op rather than per-dim (verified against xarray 2026.7.0): an *aggregating*
+    # op drops a coordinate over the dim it aggregates (``mean("lat")`` drops ``region``,
+    # and so does ``groupby("lat").all()`` even though it re-mints ``lat``), while an
+    # *indexing* one keeps it (``isel(lat=0)`` demotes ``region`` to a 0-d coord; only
+    # ``drop=True`` removes it). Stating either half needs the coordinate's dims. Inert
+    # today: nothing in ``optimize`` reads ``coords``.
     dim_coords = {c for c in schema.coords if c in schema.dims}
     assert dim_coords <= set(result.coords)
 
