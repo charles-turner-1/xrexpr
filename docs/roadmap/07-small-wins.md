@@ -33,7 +33,8 @@ it names.
 > `ds[["temperature"]]["lat"]` materialises `temperature` and throws it away to return a
 > coordinate. Eliminating `p1` there is a *different* rewrite — it must prove the coord's
 > values survive `p1` untouched, which is a schema question inside `_trusted_prefix`,
-> not a key-set one. Filed separately.
+> not a key-set one. Filed as #115 (likely wanting #109 first, since it must ask which
+> dims a coordinate carries).
 
 `ds[["tas", "pr"]][["tas"]]` records two `Project` nodes; one suffices. New rule (or
 a case folded into a future merge pass): an adjacent `(Project p1, Project p2)` pair

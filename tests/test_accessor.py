@@ -304,7 +304,7 @@ def test_a_projection_naming_a_coord_is_left_and_still_replays(ds):
     There *is* a win here, and it is a different rule: ``p1`` materialises ``temperature``
     only to discard it, where the optimal plan reads the coord and never touches the data
     variable. That needs the schema (does ``lat`` survive ``p1`` untouched?), which puts it
-    in ``pushdown_projections``' family rather than the syntactic merge -- filed separately.
+    in ``pushdown_projections``' family rather than the syntactic merge -- filed as #115.
     """
     chain = ds.plan[["temperature"]]["lat"]
     assert [type(n) for n in chain._optimized()] == [Project, Project]
