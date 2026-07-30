@@ -42,10 +42,19 @@ from xrexpr.lower import Call, emit
 
 
 def format_plan(nodes: list[LoweredOp]) -> str:
-    """The plan as a numbered, multi-line listing — one line per lowered node.
+    """Render the plan as a numbered, multi-line listing — one line per lowered node.
 
-    Each line is ``N. Kind  <the calls this node replays as>``, plus ``[annotations]``
-    where the node knows something the calls do not say.
+    Parameters
+    ----------
+    nodes : list of LoweredOp
+        The plan to render, after lowering and optimisation.
+
+    Returns
+    -------
+    str
+        The listing. Each line is ``N. Kind  <the calls this node replays as>``, plus
+        ``[annotations]`` where the node knows something the calls do not say. An empty
+        plan renders as ``"plan (0 ops)"``.
     """
     if not nodes:
         return "plan (0 ops)"
@@ -54,7 +63,18 @@ def format_plan(nodes: list[LoweredOp]) -> str:
 
 
 def _format_node(node: LoweredOp) -> str:
-    """One line for one node: its kind, the calls it emits, and what those don't say."""
+    """Render one node: its kind, the calls it emits, and what those don't say.
+
+    Parameters
+    ----------
+    node : LoweredOp
+        The node to render.
+
+    Returns
+    -------
+    str
+        The line, without its index.
+    """
     calls = ".".join(_format_call(c) for c in emit([node]))
     annotation = _annotate(node)
     line = f"{type(node).__name__}  {calls}"
@@ -62,8 +82,21 @@ def _format_node(node: LoweredOp) -> str:
 
 
 def _annotate(node: LoweredOp) -> str:
-    """The derived facts for ``node`` that its *emitted calls* do not already state.
+    """Render the derived facts for ``node`` that its *emitted calls* do not already state.
 
+    Parameters
+    ----------
+    node : LoweredOp
+        The node to annotate.
+
+    Returns
+    -------
+    str
+        The annotation, or ``""`` when the calls already say everything — which is the
+        answer most kinds take.
+
+    Notes
+    -----
     That rule is the whole editorial policy of this module, and it is what keeps the
     listing worth reading: ``rolling(time=3).mean()`` already tells you the window, so
     restating :attr:`~xrexpr.ir.WindowedReduce.window` would be noise, while a bare
@@ -99,19 +132,55 @@ def _annotate(node: LoweredOp) -> str:
 
 
 def _dim_set(label: str, dims: DimSet) -> str:
-    """``label={a, b}``, or ``""`` for an empty set so the caller can drop it."""
+    """Render a labelled dim set.
+
+    Parameters
+    ----------
+    label : str
+        The label to prefix, e.g. ``"consumes"``.
+    dims : DimSet
+        The dims to render.
+
+    Returns
+    -------
+    str
+        ``label={a, b}``, ``label=every dim`` for :data:`~xrexpr.ir.ALL_DIMS`, or ``""``
+        for an empty set so the caller can drop it.
+    """
     if isinstance(dims, AllDims):
         return f"{label}=every dim"
     return f"{label}={_braced(dims)}" if dims else ""
 
 
 def _braced(dims: Iterable[Hashable]) -> str:
-    """Dim names in braces, sorted by ``str`` — sets have no order, output must."""
+    """Render dim names in braces.
+
+    Parameters
+    ----------
+    dims : iterable of Hashable
+        The dim names.
+
+    Returns
+    -------
+    str
+        The names in braces, sorted by ``str`` — sets have no order, output must.
+    """
     return "{" + ", ".join(str(d) for d in sorted(dims, key=str)) + "}"
 
 
 def _format_call(call: Call) -> str:
-    """One-line human-readable form of an emitted call."""
+    """Render an emitted call in one line.
+
+    Parameters
+    ----------
+    call : Call
+        The call to render.
+
+    Returns
+    -------
+    str
+        ``name(args, kw=...)``, or ``[key]`` for a ``__getitem__``.
+    """
     if call.name == "__getitem__":
         return f"[{_format_arg(call.args[0])}]"
     parts = [_format_arg(a) for a in call.args]
@@ -120,8 +189,20 @@ def _format_call(call: Call) -> str:
 
 
 def _format_arg(arg: object) -> str:
-    """``repr(arg)``, unless that repr is multi-line — then just its type.
+    """Render one call argument, eliding anything whose ``repr`` spans lines.
 
+    Parameters
+    ----------
+    arg : object
+        The argument to render.
+
+    Returns
+    -------
+    str
+        ``repr(arg)``, unless that repr is multi-line — then ``<TypeName>``.
+
+    Notes
+    -----
     One line per node is the whole shape of this listing, and an argument is allowed to be
     an array: ``ds.weighted(w)`` holds a ``DataArray`` whose ``repr`` is a five-line block
     of dims, values and coords, which would swallow the plan around it. Its *dims* are the

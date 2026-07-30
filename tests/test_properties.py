@@ -97,11 +97,30 @@ class Call(dict):
     """
 
     def __init__(self, name: str, *args: object, **kwargs: object) -> None:
+        """Record the method name and its positional args alongside the keyword mapping.
+
+        Parameters
+        ----------
+        name : str
+            The method to call.
+        *args : object
+            Positional arguments, kept because some calls only mean what they should when
+            spelled positionally — see the class docstring.
+        **kwargs : object
+            Keyword arguments, which are what the ``dict`` base holds.
+        """
         super().__init__(kwargs)
         self.name = name
         self.args = args
 
     def __repr__(self) -> str:
+        """Render the call as source, so a failing example reads as the chain that broke.
+
+        Returns
+        -------
+        str
+            ``name(arg, kw=value)`` — the whole reason this class exists over a tuple.
+        """
         parts = [repr(a) for a in self.args]
         parts += [f"{k}={v!r}" for k, v in self.items()]
         return f"{self.name}({', '.join(parts)})"
