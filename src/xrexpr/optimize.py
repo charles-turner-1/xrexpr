@@ -607,8 +607,8 @@ def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
 
     Reductions and selections act per variable, so a swap leaves the surviving variables'
     values untouched. A bare ``mean()`` carries :data:`~xrexpr.ir.ALL_DIMS`, resolved by
-    :func:`~xrexpr.schema.resolve_dims` against that same entering schema — so the subset test only
-    passes when the projected variables span every dim, which is exactly when the
+    :func:`~xrexpr.schema.resolve_dims` against that same entering schema — so the subset
+    test only passes when the projected variables span every dim, which is exactly when the
     verbatim replayed ``mean()`` reduces the same ones. Resolving *here* is what makes it
     exact: this rule already confines itself to the trusted prefix, where the fold is not
     a guess.

@@ -179,17 +179,66 @@ class SchemaState:
 def resolve_dims(
     consumes: DimSet, dim_names: frozenset[Hashable]
 ) -> frozenset[Hashable]:
-    """A dim spec made concrete: :data:`~xrexpr.ir.ALL_DIMS` becomes ``dim_names``.
+    """Expand a dim spec into the concrete set of dim names it stands for.
 
-    A bare ``ds.mean()`` names no dim and means *every dim the op finds when it runs*, so
-    the sentinel stays unexpanded in the plan (see :class:`~xrexpr.ir.AllDims`) until a
-    reader with an exact schema resolves it. This is that reader, for every caller that
-    needs one — the schema fold here, and ``optimize``'s rules, which must be inside the
-    trusted prefix for the fold to be exact rather than a guess.
+    A :data:`~xrexpr.ir.DimSet` is one of two things: an explicit ``frozenset`` of dim
+    names, or the :data:`~xrexpr.ir.ALL_DIMS` sentinel standing for *every dim present at
+    this point in the plan*. This turns the second into the first, and passes the first
+    through unchanged.
 
-    Dim *names* rather than a ``SchemaState`` because that is the whole of what resolving
-    needs, and one place for the ``DimSet`` ``assert_never``: a third dim-set shape fails
-    type-check here, once, instead of at each site that happens to spell out the match.
+    Parameters
+    ----------
+    consumes : DimSet
+        The dim spec to expand, as recorded on a node — a ``frozenset`` of dim names, or
+        :data:`~xrexpr.ir.ALL_DIMS`.
+    dim_names : frozenset of Hashable
+        The dims that exist where ``consumes`` applies: :attr:`SchemaState.dim_names` of
+        the schema *entering* the node carrying it.
+
+    Returns
+    -------
+    frozenset of Hashable
+        ``dim_names`` when ``consumes`` is :data:`~xrexpr.ir.ALL_DIMS`, otherwise
+        ``consumes`` unchanged.
+
+    See Also
+    --------
+    xrexpr.ir.AllDims : The sentinel, and why it stays unexpanded until something reads it.
+
+    Notes
+    -----
+    ``ds.mean()`` names no dim, and what it means depends on where it runs: every dim the
+    dataset has *at that point*, which the recorder cannot know. So ``to_opnode`` records
+    the sentinel rather than a guess, and it survives in the plan until a reader with an
+    exact schema expands it. This is that reader.
+
+    Callers must be somewhere the schema is exact. ``optimize``'s rules confine themselves
+    to the trusted prefix (``optimize._trusted_prefix``) for this reason: past the first
+    :class:`~xrexpr.ir.Opaque` the folded schema is a guess, and expanding against a guess
+    would silently widen or narrow what a bare reduce claims to consume.
+
+    Takes dim *names* rather than a :class:`SchemaState` because that is the whole of what
+    expanding needs, and it keeps the ``DimSet`` ``assert_never`` in one place: a third
+    dim-set shape fails type-check here, once, rather than at each site that spells the
+    match out for itself.
+
+    Examples
+    --------
+    An explicit set is returned as it stands:
+
+    >>> resolve_dims(frozenset({"lat"}), frozenset({"time", "lat"}))
+    frozenset({'lat'})
+
+    The sentinel becomes whatever dims are present:
+
+    >>> resolve_dims(ALL_DIMS, frozenset({"time", "lat"})) == frozenset({"time", "lat"})
+    True
+
+    So the *same* recorded node resolves differently earlier and later in a plan, which is
+    the whole point of deferring it:
+
+    >>> resolve_dims(ALL_DIMS, frozenset({"time"}))
+    frozenset({'time'})
     """
     match consumes:
         case AllDims():
