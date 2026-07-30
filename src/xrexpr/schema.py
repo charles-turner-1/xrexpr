@@ -49,7 +49,7 @@ from xrexpr.ir import (
 from xrexpr.operations import CONTEXT_METHODS
 from xrexpr.operations import spec as op_spec
 
-__all__ = ["SchemaState", "apply_schema", "to_opnode"]
+__all__ = ["SchemaState", "apply_schema", "resolve_dims", "to_opnode"]
 
 
 @dataclass(frozen=True)
