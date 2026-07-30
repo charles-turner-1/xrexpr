@@ -247,19 +247,27 @@ dated note (2026-07-29) saying exactly what its arm is. Nothing else in them cha
 
 | # | Item | Spec / issue | Why this position |
 |---|---|---|---|
-| 1 | **Fix #90** — `_grouper_dims` fuses non-dim coordinate groupers (`lower.py:331-353`; the `_fuse_grouped` docstring now carries the known-bug note). Fix: refuse unless the grouper's head names a dim, which needs the base schema (or its dim names) plumbed into `to_lower_ir`. Widen `test_properties.py`'s grouper generator (`~:390-395`) to draw non-dim coordinate groupers — the gap that hid it. | issue #90, `02-lowering.md` §5.5's boxed note | A live tracking bug feeding two rewrites; small, and first because everything later trusts the schema. |
-| 2 | **W4 — chunk taxonomy** (`chunks.py`, `Rechunk.chunks: frozendict[Hashable, ChunkSpec]`, `_pushable_rechunk` → exhaustive `match`) | [`04-chunk-taxonomy.md`](./04-chunk-taxonomy.md) | Removes the last `Any` and the last `isinstance` ladder; **the only thing holding the W8 Rust gate shut**; unblocks W7 §2. |
-| 3 | **W6 — `Scan` dims** | [`06-scan-dims.md`](./06-scan-dims.md) (see its 2026-07-29 note) | One PR; also unblocks W7 §3's `Scan` arm — take that in the same `dim_effect` answer if `requires=dims` is chosen. |
-| 4 | **W5 — `Elementwise`** | [`05-elementwise.md`](./05-elementwise.md) (see its 2026-07-29 note) | The biggest coverage win; 2–3 PRs. |
-| 5 | **W7 §1** merge adjacent `Project`s; **§2** merge adjacent `Rechunk`s (after W4); **§3** projections across `Scan`/`Rechunk` (the `Scan` half may already be paid by item 3; the `Rechunk` half needs §3's empirical check); **§5** `.plan` for `DataArray` | [`07-small-wins.md`](./07-small-wins.md) | Independent; slot between the numbered items. |
-| 6 | **Fix #60** — a `DataArray` indexer falls to `classify`'s `_scalar` catch-all (`indexers.py`, last line) and mis-evolves the schema. The issue body specifies scope and the conservative fallback (record such selects `Opaque`). | issue #60 | Older bug, less reachable than #90 (needs a bare reduce downstream), but the same "schema lies" family. |
+| 1 | ~~**#90** — `_grouper_dims` fuses non-dim coordinate groupers~~ **done 2026-07-30.** `to_lower_ir` now takes the base dim names and refuses a grouper whose head is not among them; the same bug turned out to live in the `resample` and dotted-`groupby_bins` branches too. The generator widening that caught it also surfaced **#109** (see item 6). | issue #90, `02-lowering.md` §5.5's note — rewritten to what was wrong and what stays open | Was first because everything later trusts the schema. |
+| 2 | **W4 — chunk taxonomy** (`chunks.py`, `Rechunk.chunks: frozendict[Hashable, ChunkSpec]`, `_pushable_rechunk` → exhaustive `match`) | issue #99, [`04-chunk-taxonomy.md`](./04-chunk-taxonomy.md) | Removes the last `Any` and the last `isinstance` ladder; **the only thing holding the W8 Rust gate shut**; unblocks W7 §2. |
+| 3 | **W6 — `Scan` dims** | issue #100, [`06-scan-dims.md`](./06-scan-dims.md) (see its 2026-07-29 note) | One PR; also unblocks W7 §3's `Scan` arm — take that in the same `dim_effect` answer if `requires=dims` is chosen. |
+| 4 | **W5 — `Elementwise`** | issue #101, [`05-elementwise.md`](./05-elementwise.md) (see its 2026-07-29 note) | The biggest coverage win; 2–3 PRs. |
+| 5 | **W7 §1** merge adjacent `Project`s (#102); **§2** merge adjacent `Rechunk`s (#103, after W4); **§3** projections across `Scan`/`Rechunk` (#104 — the `Scan` half may already be paid by item 3; the `Rechunk` half needs §3's empirical check); **§5** `.plan` for `DataArray` (#105) | [`07-small-wins.md`](./07-small-wins.md) | Independent; slot between the numbered items. |
+| 6 | **The rest of the "schema lies" family.** **#60** — a `DataArray` indexer falls to `classify`'s `_scalar` catch-all (`indexers.py`, last line) and mis-evolves the schema; the issue body specifies scope and the conservative fallback (record such selects `Opaque`). **#109** — `SchemaState.coords` is a bare set of names carrying no dims, so a coordinate xarray orphans by consuming the dim it is defined on is tracked as surviving; needs `coords` to become a mapping, mirroring `data_vars`. | issues #60, #109 | Both are the family item 1 belonged to. Less reachable than #90 was: #60 needs a bare reduce downstream, and nothing in `optimize` reads `coords` at all, so #109 is inert until the first rule does. |
 | 7 | **`.reduce` mis-tabulation** — `"reduce"` sits in `_REDUCTIONS` (`operations.py:30`) but takes a *function* first, which `_reduce_dims` misreads as a dim spec; the property generators exclude it by name. Either untabulate it (→ `Opaque`) or parse it properly. | issue #96, `07-small-wins.md` §7's closing note | Latent, excluded from generation, no known wrong replay. |
 | ~~8~~ | ~~**NumPy-style docstrings**~~ — **done** (issue #97). Every callable in `src/xrexpr/` now carries `Parameters`/`Returns`/`Raises` sections with its correctness argument under `Notes`, and the style is enforced rather than aspirational: ruff `D` with `convention = "numpy"`, plus the `numpydoc-validation` pre-commit hook for the content ruff can't check. | issue #97 | Landed. |
 
 Deliberately *not* on the list: the weighted **select** rule (`02` §8.1 — needs the
-package's first data-touching rewrite, and its own design decision), `GroupedMap`
-(`02` §5.6 — modelled spec, waiting on its stated trigger; issue #91), and the W8 Rust
-spike (gated on item 2; spec in [`08-rust-gate.md`](./08-rust-gate.md)).
+package's first data-touching rewrite, and its own design decision; issue #107),
+`GroupedMap` (`02` §5.6 — modelled spec, waiting on its stated trigger; issue #91), and
+the W8 Rust spike (gated on item 2; issue #106, spec in
+[`08-rust-gate.md`](./08-rust-gate.md)). All three are tracked so the gate is visible in
+the tracker rather than only here; none is scheduled.
+
+Every row above carries its issue number, and #99–#107 were filed in this table's order.
+Item numbers are kept stable as rows are struck through, so that ordering stays readable;
+#109 arrived later and sits with the family it belongs to rather than at the end. Anything
+added from here should be filed and linked in the same pass — the checkpoint is only useful
+while it and the tracker agree.
 
 ### Ground rules for the implementer
 

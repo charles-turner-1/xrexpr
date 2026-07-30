@@ -4,8 +4,13 @@
 ``apply_schema`` using only :data:`~xrexpr.ir.Op` metadata — no array data is touched.
 The nodes here are built by hand, which also documents the contract ``apply_schema``
 relies on: a scalar select drops its dim (``Select.consumes``, derived from ``indexer``);
-a non-scalar select leaves the dim in ``indexer`` only. ``data_vars`` (variable name
--> its dims) is tracked alongside, since that is what a projection rewrite consults.
+a non-scalar select leaves the dim in ``indexer`` only.
+
+``variables`` (every variable, coordinate or not, → the dims it spans) is the store, and
+``dims``/``data_vars``/``coords`` derive from it. So a schema **cannot** be built from dim
+sizes alone — a dim exists only because some variable spans it, and sizes for unspanned
+dims are pruned away. :func:`_dim_coords_only` builds the minimal schema with a given set
+of dims for the tests that care about sizes rather than variables.
 """
 
 import numpy as np
@@ -27,6 +32,22 @@ from xrexpr.ir import (
 from xrexpr.schema import SchemaState, apply_schema
 
 
+def _dim_coords_only(sizes, extra_coords=()):
+    """The minimal schema with dims ``sizes``: one dim coordinate each, no data variables.
+
+    Equivalent to ``xr.Dataset(coords={d: range(n) for d, n in sizes.items()})``. Spelled
+    out because ``variables`` is the store: ``SchemaState(dims=sizes)`` alone would derive
+    *no* dims and prune every size away, which is the phantom-dim state the shape forbids.
+
+    ``extra_coords`` adds scalar (0-d) coordinates, as ``ds.assign_coords(ref=1.0)`` would.
+    """
+    return SchemaState(
+        variables={d: (d,) for d in sizes} | {c: () for c in extra_coords},
+        coord_names=frozenset(sizes) | frozenset(extra_coords),
+        dims=sizes,
+    )
+
+
 def test_from_dataset_snapshots_dims_and_coords(ds):
     schema = SchemaState.from_dataset(ds)
     assert schema.dims == {"time": 4, "lat": 3, "lon": 5}
@@ -40,7 +61,7 @@ def test_from_dataarray_snapshots_dims(ds):
 
 
 def test_schema_is_immutable():
-    schema = SchemaState(dims={"time": 4}, coords={"time"})
+    schema = _dim_coords_only({"time": 4})
     with pytest.raises(TypeError):
         schema.dims["time"] = 1
     from dataclasses import FrozenInstanceError
@@ -76,12 +97,43 @@ def test_bare_reduce_expands_against_the_schema_it_is_given(ds):
     assert apply_schema(schema, Reduce(name="mean", consumes=ALL_DIMS)).dims == {}
 
 
-def test_scalar_isel_removes_dim(ds):
+def test_scalar_isel_removes_dim_but_keeps_the_coord(ds):
+    """``ds.isel(time=0)`` — the dim goes, the coordinate stays, demoted to 0-d.
+
+    .. code-block:: python
+
+        ds.isel(time=0).sizes    # {'lat': 3, 'lon': 5}      -- time is gone
+        ds.isel(time=0).coords   # time, lat, lon            -- time survives, scalar
+
+    The coordinate half was previously asserted the other way round, matching a schema
+    that dropped any coordinate sharing a name with a removed dim because a name was all
+    it had. Now that a coordinate carries dims it can lose ``time`` and remain, which is
+    what xarray does (verified against 2026.7.0).
+    """
     schema = SchemaState.from_dataset(ds)
     node = Select(name="isel", indexer={"time": 0})  # scalar -> consumes={"time"}
     after = apply_schema(schema, node)
     assert after.dims == {"lat": 3, "lon": 5}
+    assert "time" in after.coords
+    assert after.variables["time"] == ()  # 0-d: it lost its dim, not its existence
+
+
+def test_scalar_isel_with_drop_removes_the_coord_too(ds):
+    """``ds.isel(time=0, drop=True)`` — the dim *and* the coordinate go.
+
+    .. code-block:: python
+
+        ds.isel(time=0, drop=True).coords   # lat, lon  -- no time
+
+    ``drop`` is the whole difference between the indexing and aggregating coordinate
+    rules, and the only thing the ``Select`` arm consults to tell them apart.
+    """
+    schema = SchemaState.from_dataset(ds)
+    node = Select(name="isel", kwargs={"drop": True}, indexer={"time": 0})
+    after = apply_schema(schema, node)
+    assert after.dims == {"lat": 3, "lon": 5}
     assert "time" not in after.coords
+    assert "time" not in after.variables
 
 
 def test_scalar_sel_removes_dim(ds):
@@ -160,7 +212,7 @@ def test_positional_isel_slice_is_still_sized_exactly(ds):
 def test_unknown_size_propagates_through_a_later_select(ds):
     # Unknown in, unknown out -- and never silently coerced to 0, the failure mode the
     # ``var_dims`` docstring warns about for the variable-level counterpart.
-    unknown = SchemaState(dims={"time": None, "lat": 3}, coords={"time", "lat"})
+    unknown = _dim_coords_only({"time": None, "lat": 3})
     after = apply_schema(unknown, Select(name="isel", indexer={"time": slice(0, 2)}))
     assert after.dims["time"] is None
     assert after.dims["time"] != 0
@@ -169,10 +221,14 @@ def test_unknown_size_propagates_through_a_later_select(ds):
 
 def test_scalar_select_still_drops_a_dim_of_unknown_size(ds):
     # Dropping needs no size at all, so the unknown must not block it.
-    unknown = SchemaState(dims={"time": None, "lat": 3}, coords={"time", "lat"})
+    unknown = _dim_coords_only({"time": None, "lat": 3})
     after = apply_schema(unknown, Select(name="isel", indexer={"time": 0}))
     assert "time" not in after.dims
-    assert "time" not in after.coords
+    # The *dim* goes without needing a size; the coordinate survives as 0-d, which is a
+    # separate rule (see ``test_scalar_isel_removes_dim_but_keeps_the_coord``) and is
+    # asserted here only so this test cannot pass by dropping too much.
+    assert after.coords == {"time", "lat"}
+    assert after.variables["time"] == ()
 
 
 # --- grouped reduces -----------------------------------------------------------------
@@ -363,7 +419,7 @@ def test_unrecognised_boundary_marks_the_size_unknown():
 
 
 def test_windowing_an_unknown_size_stays_unknown():
-    unknown = SchemaState(dims={"time": None}, coords={"time"})
+    unknown = _dim_coords_only({"time": None})
     node = WindowedReduce(
         name="coarsen", reduce="mean", window={"time": 2}, kwargs={"time": 2}
     )
@@ -482,7 +538,7 @@ def test_several_minted_dims_land_in_a_deterministic_order(ds):
 
 
 def test_weighting_an_unknown_size_stays_unknown():
-    unknown = SchemaState(dims={"time": None, "lat": 3}, coords={"time", "lat"})
+    unknown = _dim_coords_only({"time": None, "lat": 3})
     w = xr.DataArray([1.0], dims="time")
     after = apply_schema(unknown, _weighted(frozenset({"lat"}), frozenset({"time"}), w))
     assert after.dims["time"] is None
@@ -497,11 +553,25 @@ def test_scan_leaves_schema_unchanged(ds):
 
 
 def test_schema_threads_through_a_chain(ds):
+    """Two ops in sequence, one aggregating and one indexing — and they differ on coords.
+
+    .. code-block:: python
+
+        ds.mean("lat").isel(time=0).sizes    # {'lon': 5}
+        ds.mean("lat").isel(time=0).coords   # lon, time
+
+    Verified against xarray 2026.7.0, and the pair is worth having in one test: ``lat``'s
+    coordinate is **dropped** by the aggregation, while ``time``'s survives the scalar
+    select as a 0-d coordinate. Same dim removed either way, opposite coordinate outcome —
+    the distinction only a coordinate carrying dims can express.
+    """
     schema = SchemaState.from_dataset(ds)
     schema = apply_schema(schema, Reduce(name="mean", args=("lat",), consumes=["lat"]))
     schema = apply_schema(schema, Select(name="isel", indexer={"time": 0}))
     assert schema.dims == {"lon": 5}
-    assert schema.coords == {"lon"}
+    assert schema.coords == {"lon", "time"}
+    assert schema.variables["time"] == ()  # survived, scalar
+    assert "lat" not in schema.variables  # aggregated away, coordinate and all
 
 
 def test_from_dataset_snapshots_variable_dims(ds):
@@ -555,10 +625,30 @@ def test_project_keeping_every_dim_leaves_the_schema_alone(ds):
     assert after.coords == schema.coords
 
 
-def test_project_of_an_unknown_name_yields_nothing_known(ds):
+def test_project_of_an_unknown_name_is_declined_whole(ds):
+    """An unmodellable projection gains no information, so the schema is left as it was.
+
+    ``ds[["nope"]]`` raises ``KeyError`` in xarray, so this state is only reachable when
+    something untracked introduced the name — an ``Opaque`` such as ``rename`` — which puts
+    the plan past ``optimize._trusted_prefix`` and out of reach of the variable-level rules
+    regardless.
+
+    **This is the one behavioural change the derivation forced.** The old shape restricted
+    ``data_vars`` to the known names (so ``{}``) while leaving ``dims`` untouched — a state
+    where no variable spanned ``time`` yet ``time`` existed, i.e. exactly the phantom-dim
+    contradiction deriving exists to forbid. It was chosen because over-reporting dims is
+    the safe direction and knowing no variables is *also* safe, and only the two fields
+    being independent made having both possible.
+
+    Declining the whole projection keeps the safe direction on dims — the assertion below,
+    and ``test_project_of_an_unknown_name_leaves_dims_alone`` — at the cost of reporting
+    variables that a modellable projection would have removed. Sound here because an
+    unmodellable ``Project`` is, at this layer, what an ``Opaque`` is: a node after which
+    nothing is claimed.
+    """
     schema = SchemaState.from_dataset(ds)
     after = apply_schema(schema, Project(name="__getitem__", variables=("nope",)))
-    assert after.data_vars == {}
+    assert after == schema
 
 
 def test_project_of_an_unknown_name_leaves_dims_alone(ds):
@@ -587,7 +677,7 @@ def test_var_dims_is_none_for_an_unknown_name(ds):
 
 def test_non_dimension_coord_survives_unrelated_removal():
     # a scalar coord ("ref") that is not a dim must not be dropped when "lat" goes
-    schema = SchemaState(dims={"lat": 3, "lon": 5}, coords={"lat", "lon", "ref"})
+    schema = _dim_coords_only({"lat": 3, "lon": 5}, extra_coords=("ref",))
     node = Reduce(name="mean", consumes=["lat"])
     after = apply_schema(schema, node)
     assert after.coords == {"lon", "ref"}

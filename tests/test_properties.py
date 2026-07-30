@@ -114,6 +114,16 @@ def _apply(obj, calls):
     return obj
 
 
+def _dims(ds):
+    """What ``to_lower_ir`` needs of the base dataset: its dim names, and nothing else.
+
+    Spelled out rather than inlined because it is the same argument at every call site, and
+    because getting it from the *base* dataset is the point — see ``to_lower_ir``'s
+    docstring on why base dims rather than dims-at-the-opener.
+    """
+    return frozenset(ds.sizes)
+
+
 def _build_plan(ds, calls):
     """Normalise ``calls`` the way the recorder would, and fold the schema over the result.
 
@@ -127,7 +137,7 @@ def _build_plan(ds, calls):
     """
     plan = [to_opnode(call.name, call.args, dict(call)) for call in calls]
     schema = SchemaState.from_dataset(ds)
-    for node in to_lower_ir(plan):
+    for node in to_lower_ir(plan, _dims(ds)):
         schema = apply_schema(schema, node)
     return plan, schema
 
@@ -163,6 +173,16 @@ def datasets(draw, dated=False):
     # their whole question is whether the projected *subset* still carries the dims the
     # crossed op names, which is vacuous when every variable carries every dim.
     elevation = np.arange(int(np.prod(sizes[1:])), dtype=float).reshape(sizes[1:])
+    # A **non-dim coordinate** on the last dim — the docs' ``region(lat)``, and everyday
+    # xarray. It is what the builder generators were blind to until issue #90: a grouper's
+    # *name* does not say which dim it consumes, because ``groupby("region")`` groups along
+    # the dim ``region`` is defined on and mints ``region`` in its place. Two labels
+    # whatever the size, so the grouping really aggregates rather than being the identity.
+    # Numeric region *ids* rather than the docs' ``"a"``/``"b"`` strings, because the coord
+    # has to survive everything else the generators draw: ``coarsen`` reduces coordinate
+    # values with ``coord_func="mean"``, which raises on a ``<U1`` dtype. The dtype is
+    # incidental to what this coordinate is here to exercise, which is its *dims*.
+    coords["region"] = (dims[-1], np.array([0.0, 1.0] * sizes[-1])[: sizes[-1]])
     if dated:
         # daily, so a 2-5 point index spans one month: ``time.month`` yields one group and
         # ``resample(time="2D")`` halves it. Both are legal, which is all that is needed.
@@ -382,12 +402,22 @@ def _builder_pair(draw, obj, kind=None):
     dim = "time" if kind == "resample" else draw(st.sampled_from(dims))
     size = obj.sizes[dim]
 
+    coord_grouper = False
     if kind == "groupby":
         groupers = [dim]
         if dim == "time" and _has_datetime_index(obj):
             groupers += ["time.month", "time.day"]
+        # The non-dim coordinate groupers defined on *this* dim, so the pair's group dim is
+        # still ``dim`` and the ``reduced`` bookkeeping below stays correct. This is the
+        # widening issue #90 asked for: pre-fix these fused with ``group_dim="region"`` and
+        # ``test_tracked_schema_agrees_with_evaluation`` catches it; post-fix they refuse and
+        # the equality property covers them through the opaque fallback.
+        coord_groupers = _coord_groupers(obj, dim)
+        groupers += coord_groupers
         # positional: the grouper is read off ``args[0]`` (see ``Call``)
-        opener = Call("groupby", draw(st.sampled_from(groupers)))
+        grouper = draw(st.sampled_from(groupers))
+        coord_grouper = grouper in coord_groupers
+        opener = Call("groupby", grouper)
     elif kind == "resample":
         opener = Call("resample", time=draw(st.sampled_from(["1D", "2D", "3D"])))
     elif kind == "rolling":
@@ -404,7 +434,13 @@ def _builder_pair(draw, obj, kind=None):
     # The closer's dim spec is drawn *first*, because which reductions are legal depends on
     # it: a grouped reduce removes the group dim plus whatever the closer named, and a
     # variable left with none of those trips :data:`EMPTY_AXIS_UNSAFE_REDUCES`.
-    spec = draw(_closer_dims(obj, kind, dim))
+    # A coordinate grouper takes a **bare** closer only. The map/aggregation distinction
+    # ``_closer_dims`` draws over is stated in terms of the group dim, and under a coordinate
+    # grouper the closer cannot name it — ``groupby("region").mean("region")`` is not the
+    # aggregation case, and naming the underlying dim instead is a shape whose eager
+    # behaviour would have to be established before it could be a reference. Bare is the
+    # case #90 is about, and unambiguously legal.
+    spec = {} if coord_grouper else draw(_closer_dims(obj, kind, dim))
     reduced = None
     if kind in {"groupby", "resample"}:
         # What each *variable* ends up reducing over, which is not the same as what the
@@ -421,6 +457,21 @@ def _builder_pair(draw, obj, kind=None):
     )
     closer = Call(draw(st.sampled_from(names)), **spec)
     return [opener, closer]
+
+
+def _coord_groupers(obj, dim):
+    """Non-dim coordinate names defined on ``dim`` alone.
+
+    Groupers whose name is not a dim, but which group along ``dim`` all the same — the
+    class ``lower._grouper_dims`` cannot read off the call, and so refuses to fuse.
+    Restricted to one-dim coordinates: a multi-dim one stacks and consumes *every* dim it
+    spans, which no single ``group_dim`` describes.
+    """
+    return [
+        name
+        for name, coord in obj.coords.items()
+        if name not in obj.sizes and coord.dims == (dim,)
+    ]
 
 
 @st.composite
@@ -632,7 +683,7 @@ def test_optimised_plan_matches_eager_evaluation(case):
     show no fused nodes at all would mean the builder widening had stopped biting.
     """
     ds, calls = case
-    for node in to_lower_ir(_build_plan(ds, calls)[0]):
+    for node in to_lower_ir(_build_plan(ds, calls)[0], _dims(ds)):
         if type(node).__name__.endswith("Reduce") and type(node).__name__ != "Reduce":
             event(f"fused: {type(node).__name__}")
     assert_equal(_apply(ds.plan, calls).collect(), _apply(ds, calls))
@@ -649,7 +700,7 @@ def test_optimize_is_idempotent(case):
     ds, calls = case
     plan, _ = _build_plan(ds, calls)
     schema = SchemaState.from_dataset(ds)
-    once = optimize(to_lower_ir(plan), schema)
+    once = optimize(to_lower_ir(plan, _dims(ds)), schema)
     assert optimize(once, schema) == once
 
 
@@ -664,8 +715,8 @@ def test_lowering_is_idempotent(case):
     """
     ds, calls = case
     plan, _ = _build_plan(ds, calls)
-    once = to_lower_ir(plan)
-    assert to_lower_ir(once) == once
+    once = to_lower_ir(plan, _dims(ds))
+    assert to_lower_ir(once, _dims(ds)) == once
 
 
 @SETTINGS
@@ -679,7 +730,9 @@ def test_no_context_open_survives_lowering(case):
     """
     ds, calls = case
     plan, _ = _build_plan(ds, calls)
-    assert not any(isinstance(node, ContextOpen) for node in to_lower_ir(plan))
+    assert not any(
+        isinstance(node, ContextOpen) for node in to_lower_ir(plan, _dims(ds))
+    )
 
 
 @SETTINGS
@@ -699,7 +752,7 @@ def test_emit_after_lowering_reproduces_the_recorded_calls(case):
     """
     ds, calls = case
     plan, _ = _build_plan(ds, calls)
-    assert emit(to_lower_ir(plan)) == [
+    assert emit(to_lower_ir(plan, _dims(ds))) == [
         Lowered(name=node.name, args=node.args, kwargs=node.kwargs) for node in plan
     ]
 
@@ -714,7 +767,7 @@ def test_adjacent_selects_collapse_without_changing_meaning(case):
     """
     ds, calls = case
     plan, _ = _build_plan(ds, calls)
-    optimised = optimize(to_lower_ir(plan), SchemaState.from_dataset(ds))
+    optimised = optimize(to_lower_ir(plan, _dims(ds)), SchemaState.from_dataset(ds))
 
     assert len(optimised) == 1, "a run of selects on distinct dims should fold to one"
     assert_equal(_apply(ds.plan, calls).collect(), _apply(ds, calls))
@@ -732,9 +785,10 @@ def test_tracked_schema_agrees_with_evaluation(case):
 
     - **dims**: the same dim names survive. This is what the rewrites actually reason
       about — ``consumes`` and the pushdown conflict check are name-based.
-    - **coords**: tracked coords are a *subset* of the result's. A scalar select drops
-      the dim but xarray keeps a scalar coordinate behind, which the schema does not
-      model.
+    - **coords and variables**: exactly the result's, not merely a subset. A scalar select
+      drops the dim while xarray keeps a scalar coordinate behind, and an aggregating op
+      removes that coordinate outright — both are modelled now that a coordinate is a
+      variable with dims, so there is nothing left to be conservative about.
 
     Dim *order* is deliberately not asserted: ``Dataset.sizes`` does not promise the
     insertion order the schema threads, so comparing as sets is the honest check.
@@ -752,11 +806,18 @@ def test_tracked_schema_agrees_with_evaluation(case):
     """
     ds, calls = case
     plan, schema = _build_plan(ds, calls)
-    assume(not any(isinstance(node, Opaque) for node in to_lower_ir(plan)))
+    assume(not any(isinstance(node, Opaque) for node in to_lower_ir(plan, _dims(ds))))
     result = _apply(ds, calls)
 
     assert set(schema.dims) == set(result.sizes)
-    assert set(schema.coords) <= set(result.coords)
+
+    # Every tracked coordinate, not just the dim coordinates — the restriction issue #109
+    # asked for is gone, because coordinates are variables now and their lifetimes are
+    # modelled per-op: an aggregating op drops one over the dim it aggregates, an indexing
+    # one demotes it to 0-d. Asserted **exactly** rather than as a subset, which the bare-name
+    # ``coords`` set could never have supported.
+    assert set(schema.coords) == set(result.coords)
+    assert set(schema.variables) == set(result.variables)
 
 
 @SETTINGS
@@ -844,11 +905,11 @@ def test_rewrites_survive_unknown_dim_sizes(case):
     plan, _ = _build_plan(ds, calls)
     base = SchemaState.from_dataset(ds)
     blanked = SchemaState(
+        variables=base.variables,  # the store is untouched; only the extents are blanked
+        coord_names=base.coord_names,
         dims=frozendict(dict.fromkeys(base.dims)),  # every size -> None
-        coords=base.coords,
-        data_vars=base.data_vars,
     )
-    lowered = to_lower_ir(plan)
+    lowered = to_lower_ir(plan, _dims(ds))
     assert optimize(lowered, blanked) == optimize(lowered, base)
 
 
@@ -873,7 +934,7 @@ def test_every_builder_kind_is_generated_and_replays_equal_to_eager(data, kind):
     pair = data.draw(_builder_pair(ds, kind=kind))
 
     assert pair is not None and pair[0].name == kind
-    lowered = to_lower_ir(_build_plan(ds, pair)[0])
+    lowered = to_lower_ir(_build_plan(ds, pair)[0], _dims(ds))
     event(f"{kind}: {'fused' if len(lowered) == 1 else 'opaque pair'}")
     assert len(lowered) == 1 or kind in {"groupby", "resample"}
 
