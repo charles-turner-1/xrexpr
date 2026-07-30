@@ -178,6 +178,79 @@ class SchemaState:
         return self.coord_names
 
 
+def resolve_dims(
+    consumes: DimSet, dim_names: frozenset[Hashable]
+) -> frozenset[Hashable]:
+    """Expand a dim spec into the concrete set of dim names it stands for.
+
+    A :data:`~xrexpr.ir.DimSet` is one of two things: an explicit ``frozenset`` of dim
+    names, or the :data:`~xrexpr.ir.ALL_DIMS` sentinel standing for *every dim present at
+    this point in the plan*. This turns the second into the first, and passes the first
+    through unchanged.
+
+    Parameters
+    ----------
+    consumes : DimSet
+        The dim spec to expand, as recorded on a node — a ``frozenset`` of dim names, or
+        :data:`~xrexpr.ir.ALL_DIMS`.
+    dim_names : frozenset of Hashable
+        The dims that exist where ``consumes`` applies: :attr:`SchemaState.dim_names` of
+        the schema *entering* the node carrying it.
+
+    Returns
+    -------
+    frozenset of Hashable
+        ``dim_names`` when ``consumes`` is :data:`~xrexpr.ir.ALL_DIMS`, otherwise
+        ``consumes`` unchanged.
+
+    See Also
+    --------
+    xrexpr.ir.AllDims : The sentinel, and why it stays unexpanded until something reads it.
+
+    Notes
+    -----
+    ``ds.mean()`` names no dim, and what it means depends on where it runs: every dim the
+    dataset has *at that point*, which the recorder cannot know. So ``to_opnode`` records
+    the sentinel rather than a guess, and it survives in the plan until a reader with an
+    exact schema expands it. This is that reader.
+
+    Callers must be somewhere the schema is exact. ``optimize``'s rules confine themselves
+    to the trusted prefix (``optimize._trusted_prefix``) for this reason: past the first
+    :class:`~xrexpr.ir.Opaque` the folded schema is a guess, and expanding against a guess
+    would silently widen or narrow what a bare reduce claims to consume.
+
+    Takes dim *names* rather than a :class:`SchemaState` because that is the whole of what
+    expanding needs, and it keeps the ``DimSet`` ``assert_never`` in one place: a third
+    dim-set shape fails type-check here, once, rather than at each site that spells the
+    match out for itself.
+
+    Examples
+    --------
+    An explicit set is returned as it stands:
+
+    >>> resolve_dims(frozenset({"lat"}), frozenset({"time", "lat"}))
+    frozenset({'lat'})
+
+    The sentinel becomes whatever dims are present:
+
+    >>> resolve_dims(ALL_DIMS, frozenset({"time", "lat"})) == frozenset({"time", "lat"})
+    True
+
+    So the *same* recorded node resolves differently earlier and later in a plan, which is
+    the whole point of deferring it:
+
+    >>> resolve_dims(ALL_DIMS, frozenset({"time"}))
+    frozenset({'time'})
+    """
+    match consumes:
+        case AllDims():
+            return dim_names
+        case frozenset() as named:
+            return named
+        case _:
+            assert_never(consumes)
+
+
 def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
     """Return the schema resulting from applying ``node`` to ``schema``.
 
@@ -237,18 +310,9 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
 
     match node:
         case Reduce(consumes=consumes):
-            # Nested rather than two ``Reduce`` arms: splitting the variant across arms
-            # leaves mypy unable to see it as exhausted, and this way ``DimSet`` gets an
-            # ``assert_never`` of its own -- a third dim-set shape fails type-check here
-            # too, not just a seventh ``Op``.
-            match consumes:
-                case AllDims():
-                    over = schema.dim_names  # a bare ``mean()`` -- all of them
-                case frozenset() as named:
-                    over = named
-                case _:
-                    assert_never(consumes)
-            variables, coord_names = _aggregated(variables, coord_names, over)
+            variables, coord_names = _aggregated(
+                variables, coord_names, resolve_dims(consumes, schema.dim_names)
+            )
         case Select(indexer=indexer) as select:
             # ``drop=True`` is the difference between the two coordinate rules, and it is
             # the only place this arm needs to know which it is: without it a scalar select
