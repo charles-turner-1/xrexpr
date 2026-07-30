@@ -39,7 +39,7 @@ need off the nodes themselves, but a *variable*-level rule can't: whether a proj
 cross an op depends on which dims the projected variables carry at that point in the plan.
 So :func:`optimize` takes the **base** schema and :func:`_schemas` folds it forward to give
 the schema each node sees — the plan's single fold, and also where a symbolic
-:data:`~xrexpr.ir.ALL_DIMS` is resolved (:func:`_resolve_dims`).
+:data:`~xrexpr.ir.ALL_DIMS` is resolved (:func:`~xrexpr.schema.resolve_dims`).
 :func:`~xrexpr.schema.apply_schema` models
 :class:`~xrexpr.ir.Opaque` as variable-preserving, which is not true of ``rename`` or
 ``drop_vars``, so those folded schemas are exact only up to the first opaque node —
@@ -79,7 +79,7 @@ from xrexpr.ir import (
     WeightedReduce,
     WindowedReduce,
 )
-from xrexpr.schema import SchemaState, apply_schema
+from xrexpr.schema import SchemaState, apply_schema, resolve_dims
 
 __all__ = ["optimize"]
 
@@ -133,16 +133,6 @@ def _schemas(nodes: Plan, base: SchemaState) -> list[SchemaState]:
     for node in nodes[:-1]:
         out.append(apply_schema(out[-1], node))
     return out
-
-
-def _resolve_dims(consumes: DimSet, entering: SchemaState) -> frozenset[Hashable]:
-    """``consumes`` made concrete against the schema *entering* the node that carries it.
-
-    :data:`~xrexpr.ir.ALL_DIMS` — a bare ``mean()`` — means every dim the op finds when
-    it runs, which is exactly what ``entering`` records. Callers must be inside the
-    trusted prefix, where that fold is exact rather than a guess.
-    """
-    return entering.dim_names if isinstance(consumes, AllDims) else consumes
 
 
 def _trusted_prefix(nodes: Plan) -> int:
@@ -617,7 +607,7 @@ def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
 
     Reductions and selections act per variable, so a swap leaves the surviving variables'
     values untouched. A bare ``mean()`` carries :data:`~xrexpr.ir.ALL_DIMS`, resolved by
-    :func:`_resolve_dims` against that same entering schema — so the subset test only
+    :func:`~xrexpr.schema.resolve_dims` against that same entering schema — so the subset test only
     passes when the projected variables span every dim, which is exactly when the
     verbatim replayed ``mean()`` reduces the same ones. Resolving *here* is what makes it
     exact: this rule already confines itself to the trusted prefix, where the fold is not
@@ -684,7 +674,7 @@ def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
         # crossed node, which is exact here because this loop stays inside the trusted
         # prefix. The subset test below then passes only when the projected variables span
         # every dim — exactly when the replayed bare reduce reduces the same ones.
-        needed = _resolve_dims(requires, schemas[i])
+        needed = resolve_dims(requires, schemas[i].dim_names)
         available = schemas[i].var_dims(project.variables)
         if available is None or not needed <= available:
             continue

@@ -49,7 +49,7 @@ from xrexpr.ir import (
 from xrexpr.operations import CONTEXT_METHODS
 from xrexpr.operations import spec as op_spec
 
-__all__ = ["SchemaState", "apply_schema", "to_opnode"]
+__all__ = ["SchemaState", "apply_schema", "resolve_dims", "to_opnode"]
 
 
 @dataclass(frozen=True)
@@ -176,6 +176,30 @@ class SchemaState:
         return self.coord_names
 
 
+def resolve_dims(
+    consumes: DimSet, dim_names: frozenset[Hashable]
+) -> frozenset[Hashable]:
+    """A dim spec made concrete: :data:`~xrexpr.ir.ALL_DIMS` becomes ``dim_names``.
+
+    A bare ``ds.mean()`` names no dim and means *every dim the op finds when it runs*, so
+    the sentinel stays unexpanded in the plan (see :class:`~xrexpr.ir.AllDims`) until a
+    reader with an exact schema resolves it. This is that reader, for every caller that
+    needs one — the schema fold here, and ``optimize``'s rules, which must be inside the
+    trusted prefix for the fold to be exact rather than a guess.
+
+    Dim *names* rather than a ``SchemaState`` because that is the whole of what resolving
+    needs, and one place for the ``DimSet`` ``assert_never``: a third dim-set shape fails
+    type-check here, once, instead of at each site that happens to spell out the match.
+    """
+    match consumes:
+        case AllDims():
+            return dim_names
+        case frozenset() as named:
+            return named
+        case _:
+            assert_never(consumes)
+
+
 def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
     """Return the schema resulting from applying ``node`` to ``schema``.
 
@@ -235,18 +259,9 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
 
     match node:
         case Reduce(consumes=consumes):
-            # Nested rather than two ``Reduce`` arms: splitting the variant across arms
-            # leaves mypy unable to see it as exhausted, and this way ``DimSet`` gets an
-            # ``assert_never`` of its own -- a third dim-set shape fails type-check here
-            # too, not just a seventh ``Op``.
-            match consumes:
-                case AllDims():
-                    over = schema.dim_names  # a bare ``mean()`` -- all of them
-                case frozenset() as named:
-                    over = named
-                case _:
-                    assert_never(consumes)
-            variables, coord_names = _aggregated(variables, coord_names, over)
+            variables, coord_names = _aggregated(
+                variables, coord_names, resolve_dims(consumes, schema.dim_names)
+            )
         case Select(indexer=indexer) as select:
             # ``drop=True`` is the difference between the two coordinate rules, and it is
             # the only place this arm needs to know which it is: without it a scalar select
