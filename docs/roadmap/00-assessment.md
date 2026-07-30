@@ -254,7 +254,7 @@ dated note (2026-07-29) saying exactly what its arm is. Nothing else in them cha
 | 5 | **W7 §1** merge adjacent `Project`s (#102); **§2** merge adjacent `Rechunk`s (#103, after W4); **§3** projections across `Scan`/`Rechunk` (#104 — the `Scan` half may already be paid by item 3; the `Rechunk` half needs §3's empirical check); **§5** `.plan` for `DataArray` (#105) | [`07-small-wins.md`](./07-small-wins.md) | Independent; slot between the numbered items. |
 | 6 | **The rest of the "schema lies" family.** **#60** — a `DataArray` indexer falls to `classify`'s `_scalar` catch-all (`indexers.py`, last line) and mis-evolves the schema; the issue body specifies scope and the conservative fallback (record such selects `Opaque`). **#109** — `SchemaState.coords` is a bare set of names carrying no dims, so a coordinate xarray orphans by consuming the dim it is defined on is tracked as surviving; needs `coords` to become a mapping, mirroring `data_vars`. | issues #60, #109 | Both are the family item 1 belonged to. Less reachable than #90 was: #60 needs a bare reduce downstream, and nothing in `optimize` reads `coords` at all, so #109 is inert until the first rule does. |
 | 7 | **`.reduce` mis-tabulation** — `"reduce"` sits in `_REDUCTIONS` (`operations.py:30`) but takes a *function* first, which `_reduce_dims` misreads as a dim spec; the property generators exclude it by name. Either untabulate it (→ `Opaque`) or parse it properly. | issue #96, `07-small-wins.md` §7's closing note | Latent, excluded from generation, no known wrong replay. |
-| 8 | **NumPy-style docstrings** — rewrite the existing docstrings in NumPy style without losing the correctness arguments they carry (move those into `Notes`). | issue #97 | Docs-only; can run alongside anything above. |
+| ~~8~~ | ~~**NumPy-style docstrings**~~ — **done** (issue #97). Every callable in `src/xrexpr/` now carries `Parameters`/`Returns`/`Raises` sections with its correctness argument under `Notes`, and the style is enforced rather than aspirational: ruff `D` with `convention = "numpy"`, plus the `numpydoc-validation` pre-commit hook for the content ruff can't check. | issue #97 | Landed. |
 
 Deliberately *not* on the list: the weighted **select** rule (`02` §8.1 — needs the
 package's first data-touching rewrite, and its own design decision; issue #107),
@@ -281,4 +281,18 @@ while it and the tracker agree.
 - Don't reintroduce sprint narration into comments; cite a roadmap file only for work
   that is still open.
 - Write **new or edited docstrings in NumPy style** (`Parameters`/`Returns`/`Raises`,
-  correctness arguments under `Notes`) — issue #97 tracks converting the existing ones.
+  correctness arguments under `Notes`). This is enforced, not a convention: ruff's `D`
+  rules run with `convention = "numpy"`, and the `numpydoc-validation` pre-commit hook
+  checks the sections against the signature — every parameter documented, in order, and
+  a `Returns` wherever a value comes back. Both run in CI's pre-commit job. The check
+  list and the two checks deliberately left off (`GL01`, and the
+  extended-summary family) are in `[tool.numpydoc_validation]` in `pyproject.toml`.
+  Module docstrings keep their design-narrative prose; the sectioned format is for
+  callables.
+- **Tests carry a docstring too.** Every test function gets a one-line NumPy-style
+  summary stating the scenario it pins — declaratively ("A select hops in front of a
+  disjoint rolling window..."), not as an instruction, since the sentence describes what
+  the test *is*, not an action to perform. Promote any load-bearing reasoning that would
+  otherwise sit in a leading `#` comment into a `Notes` section instead; leave trailing,
+  line-level comments where they are. `ruff`'s `D` rules run on `tests/**` too (only
+  `D401` is exempted there, for the declarative-summary point above).

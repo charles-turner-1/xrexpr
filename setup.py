@@ -1,4 +1,6 @@
 # type: ignore
+"""Shim so versioneer can supply the version; the real metadata is in pyproject.toml."""
+
 from setuptools import setup
 
 import versioneer

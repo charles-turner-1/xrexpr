@@ -80,6 +80,17 @@ _RESAMPLE_OPTION_KWARGS = frozenset(
 class Call:
     """One xarray method invocation — the unit replay actually performs.
 
+    Attributes
+    ----------
+    name : str
+        The method to invoke, e.g. ``"mean"`` or ``"__getitem__"``.
+    args : tuple
+        Positional arguments, verbatim.
+    kwargs : frozendict
+        Keyword arguments, verbatim.
+
+    Notes
+    -----
     Deliberately *not* an :data:`~xrexpr.ir.Op`: a node carries the normalised metadata
     the optimiser reasons about, whereas a ``Call`` is codegen output and carries only
     what ``getattr(ds, name)(*args, **kwargs)`` needs. Keeping them distinct is what lets
@@ -98,6 +109,23 @@ class Call:
 def to_lower_ir(nodes: list[FluentOp], dims: frozenset[Hashable]) -> list[LoweredOp]:
     """Translate a recorded plan into what it means, fusing builder chains.
 
+    Parameters
+    ----------
+    nodes : list of FluentOp
+        The recorded plan, one node per call as the fluent API spelled it.
+    dims : frozenset of Hashable
+        The base dataset's dim names — the one thing this pass cannot read off the calls.
+        See the notes for why base dims, and why names rather than a schema.
+
+    Returns
+    -------
+    list of LoweredOp
+        The same plan with every builder pair resolved: fused into one node where a
+        rule claims it, demoted to :class:`~xrexpr.ir.Opaque` where none does. Contains
+        no :class:`~xrexpr.ir.ContextOpen`, which its return type enforces.
+
+    Notes
+    -----
     Where the fluent API is one-to-one with semantics the recorded node is already right,
     so it passes through untouched — this is the *same* vocabulary plus the nodes a single
     call cannot express, not a translation into a poorer language. Only the multi-call
@@ -177,6 +205,24 @@ def _fuse_grouped(
 ) -> GroupedReduce | None:
     """Fuse a groupby-family pair into a :class:`~xrexpr.ir.GroupedReduce`, or refuse.
 
+    Parameters
+    ----------
+    opener : ContextOpen
+        The builder-returning call.
+    closer : FluentOp
+        The node recorded immediately after it.
+    dims : frozenset of Hashable
+        The base dataset's dim names, passed through to :func:`_grouper_dims` — a grouper
+        that does not name one refuses (issue #90).
+
+    Returns
+    -------
+    GroupedReduce or None
+        The fused node, or ``None`` to refuse — which the caller turns into a verbatim
+        opaque pair.
+
+    Notes
+    -----
     Refusing is always safe (the caller demotes to ``Opaque``), so every condition below
     is a *narrowing* of what v1 claims to understand rather than a correctness risk.
 
@@ -236,6 +282,21 @@ def _fuse_grouped(
 def _fuse_windowed(opener: ContextOpen, closer: FluentOp) -> WindowedReduce | None:
     """Fuse a rolling/coarsen pair into a :class:`~xrexpr.ir.WindowedReduce`, or refuse.
 
+    Parameters
+    ----------
+    opener : ContextOpen
+        The builder-returning call.
+    closer : FluentOp
+        The node recorded immediately after it.
+
+    Returns
+    -------
+    WindowedReduce or None
+        The fused node, or ``None`` to refuse — which the caller turns into a verbatim
+        opaque pair.
+
+    Notes
+    -----
     ``rolling_exp`` and ``cumulative`` are deliberately not here: the first is an
     exponential weighting rather than a fixed window, and the second is a scan wearing a
     builder's clothes. Neither is described by ``window``, so both keep replaying
@@ -273,8 +334,21 @@ def _fuse_windowed(opener: ContextOpen, closer: FluentOp) -> WindowedReduce | No
 
 
 def _window_spec(opener: ContextOpen) -> frozendict[Hashable, int]:
-    """The ``{dim: window}`` mapping of a ``rolling``/``coarsen`` call.
+    """Extract the ``{dim: window}`` mapping of a ``rolling``/``coarsen`` call.
 
+    Parameters
+    ----------
+    opener : ContextOpen
+        The ``rolling`` or ``coarsen`` call.
+
+    Returns
+    -------
+    frozendict
+        The windowed dims and their integer window sizes. Empty when no window is
+        statically known, which the caller reads as a refusal to fuse.
+
+    Notes
+    -----
     Both spell it the same two ways — a positional mapping or dim keywords — alongside
     option kwargs that are not dims, exactly as ``isel`` and ``chunk`` do; this is
     ``schema._select_indexer``'s shape for a third caller. A window that isn't a plain
@@ -293,6 +367,21 @@ def _window_spec(opener: ContextOpen) -> frozendict[Hashable, int]:
 def _fuse_weighted(opener: ContextOpen, closer: FluentOp) -> WeightedReduce | None:
     """Fuse a weighted pair into a :class:`~xrexpr.ir.WeightedReduce`, or refuse.
 
+    Parameters
+    ----------
+    opener : ContextOpen
+        The builder-returning call.
+    closer : FluentOp
+        The node recorded immediately after it.
+
+    Returns
+    -------
+    WeightedReduce or None
+        The fused node, or ``None`` to refuse — which the caller turns into a verbatim
+        opaque pair.
+
+    Notes
+    -----
     Unlike :func:`_fuse_windowed`, a closer that named dims is **fused, not refused**, and
     the asymmetry is a fact about the two signatures rather than a judgement:
     ``DatasetWeighted.mean`` is ``(dim=None, *, skipna=None, keep_attrs=None)`` — it really
@@ -334,8 +423,21 @@ def _fuse_weighted(opener: ContextOpen, closer: FluentOp) -> WeightedReduce | No
 
 
 def _weight_dims(opener: ContextOpen) -> frozenset[Hashable] | None:
-    """The dims the weights carry, or ``None`` if the weights aren't a shape we can read.
+    """Read the dims the weights carry off a ``weighted`` call.
 
+    Parameters
+    ----------
+    opener : ContextOpen
+        The ``weighted`` call, holding the weights in its verbatim header.
+
+    Returns
+    -------
+    frozenset of Hashable or None
+        The weights' dim names, or ``None`` if the weights aren't a shape this can read —
+        which the caller reads as a refusal to fuse.
+
+    Notes
+    -----
     ``Dataset.weighted`` takes exactly one argument, so the weights are ``args[0]`` or the
     ``weights=`` keyword. A 0-d weights array answers the empty set, which is honest: it
     broadcasts nothing and aligns nothing, so such a node's dim effect really is a plain
@@ -349,8 +451,24 @@ def _weight_dims(opener: ContextOpen) -> frozenset[Hashable] | None:
 def _grouper_dims(
     opener: ContextOpen, dims: frozenset[Hashable]
 ) -> tuple[Hashable, Hashable] | None:
-    """``(group_dim, new_dim)`` for a groupby-family opener, or ``None`` if not statically known.
+    """Read ``(group_dim, new_dim)`` off a groupby-family opener.
 
+    Parameters
+    ----------
+    opener : ContextOpen
+        The ``groupby``, ``groupby_bins`` or ``resample`` call.
+    dims : frozenset of Hashable
+        The base dataset's dim names. Every reading below assumes the grouper names a
+        dim, so every one is checked against this — see the notes.
+
+    Returns
+    -------
+    tuple of Hashable or None
+        The dim grouped along and the dim minted, or ``None`` when neither is statically
+        known — which the caller reads as a refusal to fuse.
+
+    Notes
+    -----
     Read off the call, since v1 fuses only string groupers:
 
     - ``groupby("time.month")`` groups along ``time`` and mints ``month``;
@@ -405,6 +523,19 @@ def _grouper_dims(
 def emit(nodes: list[LoweredOp]) -> list[Call]:
     """Generate the call sequence that reproduces a lowered plan.
 
+    Parameters
+    ----------
+    nodes : list of LoweredOp
+        The plan, after lowering and optimisation.
+
+    Returns
+    -------
+    list of Call
+        The calls to perform, in order — what
+        :meth:`~xrexpr.accessor.LazyDatasetProxy._replay` invokes against the dataset.
+
+    Notes
+    -----
     The inverse direction of :func:`to_lower_ir`: a node that stands for two calls emits
     two. A pure function of the plan — no dataset in sight — so codegen is unit-testable
     on its own, and :meth:`~xrexpr.accessor.LazyDatasetProxy._replay` stays the short
@@ -416,8 +547,21 @@ def emit(nodes: list[LoweredOp]) -> list[Call]:
 
 
 def _emit_node(node: LoweredOp) -> tuple[Call, ...]:
-    """The calls one lowered node stands for.
+    """Generate the calls one lowered node stands for.
 
+    Parameters
+    ----------
+    node : LoweredOp
+        The node to emit.
+
+    Returns
+    -------
+    tuple of Call
+        One call for most kinds; two for a fused node, reassembled from the headers it
+        fused.
+
+    Notes
+    -----
     Most nodes are one call and reproduce it from the verbatim header the recorder kept,
     so an unmodified plan emits exactly the calls the user wrote, spelling included. A
     :class:`~xrexpr.ir.GroupedReduce` is the case the whole design is for: one node, two

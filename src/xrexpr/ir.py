@@ -88,6 +88,8 @@ __all__ = [
 class AllDims:
     """Sentinel: *every dim present at this point*, whatever they turn out to be.
 
+    Notes
+    -----
     The dim set of a call that names none — ``ds.mean()``, ``ds.mean(dim=None)``. It
     stays unexpanded until a reader with an exact schema resolves it, which is what
     keeps a record-time guess about the dims from being frozen into the plan.
@@ -112,12 +114,26 @@ DimSet = frozenset[Hashable] | AllDims
 class Reduce:
     """A dimension-destroying reduction (``mean``/``sum``/``std``/...).
 
-    ``consumes`` — the dims the reduction removes — is *stored*, parsed by ``to_opnode``
-    from the ``dim`` spec. A bare ``mean()`` names no dim and so consumes
-    :data:`ALL_DIMS`, left symbolic rather than expanded against the record-time schema
-    (see the module docstring). ``args``/``kwargs`` are coerced to immutable containers
-    so the node is safe to share between plans, and hashable when its payload is (see the
-    module docstring on why that last part is conditional).
+    Attributes
+    ----------
+    name : str
+        The method name. An open set of tabulated reductions, so ``str`` — kind-safety
+        comes from ``operations.OP_TABLE``.
+    args : tuple
+        The call's positional arguments, verbatim.
+    kwargs : frozendict
+        The call's keyword arguments, verbatim.
+    consumes : DimSet
+        The dims the reduction removes.
+
+    Notes
+    -----
+    ``consumes`` is *stored*, parsed by ``to_opnode`` from the ``dim`` spec. A bare
+    ``mean()`` names no dim and so consumes :data:`ALL_DIMS`, left symbolic rather than
+    expanded against the record-time schema (see the module docstring).
+    ``args``/``kwargs`` are coerced to immutable containers so the node is safe to share
+    between plans, and hashable when its payload is (see the module docstring on why that
+    last part is conditional).
     """
 
     name: str  # open set of tabulated reductions → str (kind-safety via OP_TABLE)
@@ -136,6 +152,20 @@ class Reduce:
 class Select:
     """An ``isel``/``sel`` selection, described by its ``{dim: indexer}`` mapping.
 
+    Attributes
+    ----------
+    name : {"isel", "sel"}
+        Which selection this is. A closed set, so a ``Literal`` — it rejects
+        ``Select(name="mean")``.
+    args : tuple
+        The call's positional arguments, verbatim.
+    kwargs : frozendict
+        The call's keyword arguments, verbatim.
+    indexer : frozendict
+        The ``{dim: indexer}`` mapping the optimiser reasons about.
+
+    Notes
+    -----
     Each indexer value is an :data:`~xrexpr.indexers.Indexer` — the closed value sum type
     the optimiser reasons about — normalised from its raw ``isel``/``sel`` form by
     ``__post_init__`` (via :func:`~xrexpr.indexers.classify`), so a value is *always* a
@@ -167,7 +197,13 @@ class Select:
 
     @property
     def consumes(self) -> frozenset[Hashable]:
-        """Dims this select drops: the scalar-indexed ones (slices/sequences keep theirs)."""
+        """Dims this select drops: the scalar-indexed ones (slices/sequences keep theirs).
+
+        Returns
+        -------
+        frozenset of Hashable
+            The dropped dims, derived from :attr:`indexer` so the two cannot disagree.
+        """
         return frozenset(d for d, v in self.indexer.items() if v.drops_dim)
 
 
@@ -175,6 +211,17 @@ class Select:
 class Scan:
     """An order-significant scan (``cumsum``/``cumprod``/``diff``) — *keeps* its dim.
 
+    Attributes
+    ----------
+    name : {"cumsum", "cumprod", "diff"}
+        Which scan this is. A closed set, so a ``Literal``.
+    args : tuple
+        The call's positional arguments, verbatim.
+    kwargs : frozendict
+        The call's keyword arguments, verbatim.
+
+    Notes
+    -----
     Distinct from a reduce (which destroys its dim) and from an opaque op (a scan is
     *known* to preserve dims, so a rule must not reorder across it); its scanned-dim
     metadata arrives with the first scan-aware rule.
@@ -193,15 +240,28 @@ class Scan:
 class Project:
     """A variable projection — ``ds["tas"]`` or ``ds[["tas", "pr"]]``.
 
+    Attributes
+    ----------
+    name : {"__getitem__"}
+        Always ``"__getitem__"``. A closed set, so a ``Literal``.
+    args : tuple
+        The call's positional arguments, verbatim — the key itself.
+    kwargs : frozendict
+        The call's keyword arguments, verbatim.
+    variables : tuple of Hashable
+        The requested variable names, in order.
+
+    Notes
+    -----
     The one op recognised by the *shape of its key* rather than by a method name:
     ``__getitem__`` isn't in ``OP_TABLE`` because the same call is a projection only
     when its key names variables (a boolean-mask key stays :class:`Opaque`).
 
-    ``variables`` is the requested names in order. ``single`` — whether the call
-    returns a ``DataArray`` (a bare name) rather than a ``Dataset`` (a list of them)
-    — is *derived* from the verbatim key, never stored, so it cannot disagree with
-    what replay will actually do. The list/hashable split mirrors xarray's own
-    ``Dataset.__getitem__``, so a tuple key reads as one name rather than several.
+    ``single`` — whether the call returns a ``DataArray`` (a bare name) rather than a
+    ``Dataset`` (a list of them) — is *derived* from the verbatim key, never stored, so
+    it cannot disagree with what replay will actually do. The list/hashable split mirrors
+    xarray's own ``Dataset.__getitem__``, so a tuple key reads as one name rather than
+    several.
     """
 
     name: Literal["__getitem__"]  # closed set → Literal
@@ -216,7 +276,14 @@ class Project:
 
     @property
     def single(self) -> bool:
-        """Whether this projects *one* variable to a ``DataArray`` (``ds["tas"]``)."""
+        """Whether this projects *one* variable to a ``DataArray`` (``ds["tas"]``).
+
+        Returns
+        -------
+        bool
+            ``True`` for a bare-name key, ``False`` for a list of them — derived from the
+            verbatim key, so it cannot disagree with what replay does.
+        """
         return bool(self.args) and not isinstance(self.args[0], list)
 
 
@@ -224,6 +291,19 @@ class Project:
 class Rechunk:
     """A ``chunk`` call: changes chunk topology only — never a dim, size or value.
 
+    Attributes
+    ----------
+    name : {"chunk"}
+        Always ``"chunk"``. A closed set, so a ``Literal``.
+    args : tuple
+        The call's positional arguments, verbatim.
+    kwargs : frozendict
+        The call's keyword arguments, verbatim.
+    chunks : frozendict
+        The mapping-form ``{dim: spec}`` — see the notes.
+
+    Notes
+    -----
     ``chunks`` holds the **mapping-form** ``{dim: spec}`` only (a positional dict and/or
     dim kwargs). It stays empty for the uniform forms — ``chunk()``, ``chunk(100)``,
     ``chunk("auto")`` — whose spec names no dim and so lives verbatim in ``args``. That
@@ -248,7 +328,17 @@ class Rechunk:
 
 @dataclass(frozen=True)
 class Opaque:
-    """Any op the optimiser doesn't model — replayed verbatim, never reordered."""
+    """Any op the optimiser doesn't model — replayed verbatim, never reordered.
+
+    Attributes
+    ----------
+    name : str
+        The method name, verbatim. Any name at all, which is the point of the variant.
+    args : tuple
+        The call's positional arguments, verbatim.
+    kwargs : frozendict
+        The call's keyword arguments, verbatim.
+    """
 
     name: str
     args: tuple[Any, ...] = ()
@@ -263,6 +353,17 @@ class Opaque:
 class ContextOpen:
     """A builder-returning call — ``groupby``/``rolling``/``weighted``/... .
 
+    Attributes
+    ----------
+    name : ContextOpenName
+        Which builder the call opens. A closed set, so a ``Literal``.
+    args : tuple
+        The call's positional arguments, verbatim.
+    kwargs : frozendict
+        The call's keyword arguments, verbatim.
+
+    Notes
+    -----
     **Fluent IR only.** xarray spells some single semantic operations as two calls via a
     builder object, and this is the first of the pair: it says *a context opens here*,
     which is decidable from the call alone (``groupby(...)`` opens one no matter what
@@ -307,6 +408,29 @@ ContextOpenName = Literal[
 class GroupedReduce:
     """A grouped aggregation — ``ds.groupby("time.month").mean()`` — as *one* node.
 
+    Attributes
+    ----------
+    name : {"groupby", "groupby_bins", "resample"}
+        Which opener was fused. A closed set, so a ``Literal``.
+    group_dim : Hashable
+        The dim grouped along, and consumed.
+    new_dim : Hashable
+        The dim minted to index the groups.
+    reduce : str
+        The closing method — ``mean``/``sum``/``std``/... . An open set, so ``str``.
+    args : tuple
+        The opener's positional arguments, verbatim.
+    kwargs : frozendict
+        The opener's keyword arguments, verbatim.
+    reduce_args : tuple
+        The closer's positional arguments, verbatim.
+    reduce_kwargs : frozendict
+        The closer's keyword arguments, verbatim.
+    consumes : frozenset of Hashable
+        What the closing reduction removes *in addition* to ``group_dim``.
+
+    Notes
+    -----
     Flat, not nested: the semantic fields rules match on, plus the two verbatim call
     headers :func:`~xrexpr.lower.emit` replays. "A context wrapping a call" is how xarray
     *spells* this, not what it is, and discarding that spelling is what lowering is for.
@@ -352,6 +476,26 @@ class GroupedReduce:
 class WindowedReduce:
     """A windowed aggregation — ``ds.rolling(time=5).mean()`` — as *one* node.
 
+    Attributes
+    ----------
+    name : {"rolling", "coarsen"}
+        Which opener was fused. A closed set, so a ``Literal``.
+    reduce : str
+        The closing method — ``mean``/``sum``/``max``/... . An open set, so ``str``.
+    window : frozendict
+        The ``{dim: window}`` mapping of windowed dims.
+    args : tuple
+        The opener's positional arguments, verbatim.
+    kwargs : frozendict
+        The opener's keyword arguments, verbatim. Kept whole because ``coarsen``'s size
+        effect depends on the ``boundary`` option — see the notes.
+    reduce_args : tuple
+        The closer's positional arguments, verbatim.
+    reduce_kwargs : frozendict
+        The closer's keyword arguments, verbatim.
+
+    Notes
+    -----
     Simpler than :class:`GroupedReduce`, in the direction that matters: a window consumes
     no dim and mints none, so there is no ``consumes`` field to get wrong. What changes is
     only the *size* of the windowed dims, and only for ``coarsen``:
@@ -390,6 +534,29 @@ class WindowedReduce:
 class WeightedReduce:
     """A weighted aggregation — ``ds.weighted(w).mean("time")`` — as *one* node.
 
+    Attributes
+    ----------
+    name : {"weighted"}
+        Always ``"weighted"``. A closed set, so a ``Literal``.
+    reduce : str
+        The closing method — ``mean``/``sum``/``std``/``var``. An open set, so ``str``.
+    weight_dims : frozenset of Hashable
+        The dims the weights carry. Read off ``w.dims`` at fusion time — metadata only,
+        materialising nothing — and the reason this node is not a relabelled
+        :class:`Reduce`.
+    args : tuple
+        The opener's positional arguments, verbatim. Holds the weights themselves.
+    kwargs : frozendict
+        The opener's keyword arguments, verbatim.
+    reduce_args : tuple
+        The closer's positional arguments, verbatim.
+    reduce_kwargs : frozendict
+        The closer's keyword arguments, verbatim.
+    consumes : DimSet
+        The dims the closing reduction removes — exactly a plain reduce's.
+
+    Notes
+    -----
     The variant exists as much for what it **blocks** as for what it describes. Lowered to
     a plain :class:`Reduce` it would be indistinguishable from one, so ``pushdown_selects``
     would match it and hop a select in front of a weighted mean with the weights left
@@ -430,8 +597,6 @@ class WeightedReduce:
 
     name: Literal["weighted"]  # closed set → Literal
     reduce: str  # the closing method: mean/sum/std/var (open set → str)
-    #: The dims the weights carry. Read off ``w.dims`` at fusion time — metadata only,
-    #: materialising nothing — and the reason this node is not a relabelled ``Reduce``.
     weight_dims: frozenset[Hashable] = frozenset()
     args: tuple[Any, ...] = ()  # the opener's header, verbatim (holds the weights)
     kwargs: frozendict[str, Any] = field(default_factory=frozendict)

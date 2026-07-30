@@ -18,12 +18,21 @@ from typing import NamedTuple
 
 
 class OpSpec(NamedTuple):
-    #: op family; one of ``"reduce"``/``"scan"``/``"select"``/``"rechunk"``.
-    #: ``to_opnode`` maps this to the matching :data:`~xrexpr.ir.Op` variant
-    #: (untabulated names → ``Opaque``).
+    """What :data:`OP_TABLE` records about one tabulated xarray method.
+
+    Attributes
+    ----------
+    kind : str
+        Op family; one of ``"reduce"``/``"scan"``/``"select"``/``"rechunk"``.
+        :func:`~xrexpr.schema.to_opnode` maps this to the matching
+        :data:`~xrexpr.ir.Op` variant (untabulated names → ``Opaque``).
+    consumes_dim : bool
+        Whether the given dim is removed. True for a reduce; false for
+        scan/select/rechunk — a select resolves its actual dim removal from the
+        *indexer* at record time, not from here.
+    """
+
     kind: str
-    #: reduce: the given dim is removed. scan/select/rechunk: dim kept — selects resolve
-    #: their actual dim removal from the *indexer* at record time, not from here.
     consumes_dim: bool
 
 
@@ -76,5 +85,17 @@ CONTEXT_METHODS = frozenset(
 
 
 def spec(name: str) -> OpSpec | None:
-    """Return the :class:`OpSpec` for ``name``, or ``None`` if it isn't tabulated."""
+    """Look up the :class:`OpSpec` for a method name.
+
+    Parameters
+    ----------
+    name : str
+        The xarray method name as recorded, e.g. ``"mean"`` or ``"isel"``.
+
+    Returns
+    -------
+    OpSpec or None
+        The tabulated spec, or ``None`` if ``name`` is not in :data:`OP_TABLE` — which
+        :func:`~xrexpr.schema.to_opnode` reads as :class:`~xrexpr.ir.Opaque`.
+    """
     return OP_TABLE.get(name)

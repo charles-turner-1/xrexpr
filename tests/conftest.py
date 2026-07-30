@@ -22,6 +22,15 @@ from xrexpr.schema import SchemaState
 
 @pytest.fixture
 def ds() -> xr.Dataset:
+    """The canonical dataset, with seeded random values, for modules that evaluate results.
+
+    Returns
+    -------
+    xarray.Dataset
+        ``temperature(time, lat, lon)`` sized ``(4, 3, 5)`` alongside
+        ``elevation(lat, lon)``, which is *missing* ``time`` — the variable the
+        projection-pushdown rule must refuse to reorder past a ``time`` reduction.
+    """
     rng = np.random.default_rng(0)
     return xr.Dataset(
         {
@@ -40,6 +49,14 @@ def ds() -> xr.Dataset:
 
 @pytest.fixture
 def schema() -> SchemaState:
+    """The canonical schema, for modules that only reason about metadata.
+
+    Returns
+    -------
+    SchemaState
+        The snapshot of a zeros dataset shaped exactly like :func:`ds`, so the two
+        fixtures agree on dims, sizes and variables without either evaluating anything.
+    """
     ds = xr.Dataset(
         {
             "temperature": (("time", "lat", "lon"), np.zeros((4, 3, 5))),
