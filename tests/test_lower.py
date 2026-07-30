@@ -12,6 +12,10 @@ ones: each pins a narrowing of what is claimed, not a bug.
 end-to-end equality lives in ``test_accessor.py`` and ``test_properties.py``. The weighted
 cases do build a ``DataArray``, but only as a payload whose ``.dims`` fusion reads —
 metadata, materialising nothing.
+
+``to_lower_ir``'s second argument is the base dataset's dim names, the one thing lowering
+cannot read off the calls. :data:`_DIMS` stands in for a dataset with those three dims, so a
+grouper naming anything else is a *coordinate* grouper as far as fusion is concerned.
 """
 
 import numpy as np
@@ -34,6 +38,9 @@ from xrexpr.ir import (
 )
 from xrexpr.lower import Call, emit, to_lower_ir
 from xrexpr.schema import to_opnode
+
+#: The dims of the notional dataset these plans are lowered against.
+_DIMS = frozenset({"time", "lat", "lon"})
 
 
 @pytest.fixture
@@ -64,23 +71,23 @@ def test_the_fixture_plan_really_covers_every_variant(plan):
 def test_a_plan_with_no_builder_chain_passes_through_unchanged(plan):
     # every multi-call spelling is a ``ContextOpen`` pair, so a plan without one is
     # already what it means and lowering must leave it alone
-    assert to_lower_ir(plan) == plan
+    assert to_lower_ir(plan, _DIMS) == plan
 
 
 def test_lowering_is_idempotent(plan):
-    once = to_lower_ir(plan)
-    assert to_lower_ir(once) == once
+    once = to_lower_ir(plan, _DIMS)
+    assert to_lower_ir(once, _DIMS) == once
 
 
 def test_lowering_does_not_mutate_its_input(plan):
     before = list(plan)
-    to_lower_ir(plan).append(to_opnode("mean", (), {}))
+    to_lower_ir(plan, _DIMS).append(to_opnode("mean", (), {}))
     assert plan == before
 
 
 def test_emit_reproduces_every_call_verbatim(plan):
     # one node, one call, header untouched -- an unmodified plan replays what was written
-    assert emit(to_lower_ir(plan)) == [
+    assert emit(to_lower_ir(plan, _DIMS)) == [
         Call(name=node.name, args=node.args, kwargs=node.kwargs) for node in plan
     ]
 
@@ -88,12 +95,12 @@ def test_emit_reproduces_every_call_verbatim(plan):
 def test_emit_keeps_the_recorded_spelling(plan):
     # ``isel(time=0, drop=True)`` was recorded as kwargs and stays kwargs -- emit must not
     # canonicalise it to the positional-dict form the merge rule happens to build.
-    select = emit(to_lower_ir(plan))[2]
+    select = emit(to_lower_ir(plan, _DIMS))[2]
     assert select == Call(name="isel", kwargs=frozendict({"time": 0, "drop": True}))
 
 
 def test_emit_of_an_empty_plan_is_empty():
-    assert emit(to_lower_ir([])) == []
+    assert emit(to_lower_ir([], _DIMS)) == []
 
 
 def test_call_coerces_to_immutable_containers_and_hashes():
@@ -111,9 +118,9 @@ def test_calls_compare_by_value():
 # --- fusing the groupby family -------------------------------------------------------
 
 
-def _lower(*calls):
+def _lower(*calls, dims=_DIMS):
     """Lower the plan the recorder would build from ``(name, args, kwargs)`` triples."""
-    return to_lower_ir([to_opnode(*call) for call in calls])
+    return to_lower_ir([to_opnode(*call) for call in calls], dims)
 
 
 @pytest.mark.parametrize(
@@ -323,13 +330,46 @@ def test_lowering_stays_idempotent_with_a_weighted_pair():
     # elementwise ``==`` has no truth value), so this also pins that the *same* payload
     # object is carried through rather than rebuilt -- see ``test_ir.py``.
     once = _lower(("weighted", (_weights("lat"),), {}), ("mean", (), {}))
-    assert to_lower_ir(once) == once
+    assert to_lower_ir(once, _DIMS) == once
 
 
 def test_non_string_grouper_does_not_fuse():
     # A DataArray/Grouper argument has no single statically-known group dim.
     lowered = _lower(("groupby", (object(),), {}), ("mean", (), {}))
     assert [type(n) for n in lowered] == [Opaque, Opaque]
+
+
+@pytest.mark.parametrize(
+    "opener",
+    [
+        # issue #90: each of these reads a plausible ``group_dim`` off the call, and each
+        # reading is wrong -- the dim actually consumed is whichever one the *coordinate*
+        # is defined on, which the call does not say. Refusing is the fix.
+        ("groupby", ("region",), {}),
+        ("groupby", ("region.foo",), {}),
+        ("groupby_bins", ("region", 2), {}),
+        ("resample", (), {"region": "2D"}),
+        # dotted bins: the head is a dim, so a head-only guard would admit it, but the
+        # minted name is ``month_bins`` rather than ``time.month_bins`` (verified against
+        # xarray 2026.7.0). Refused until it has its own goldens.
+        ("groupby_bins", ("time.month", 2), {}),
+    ],
+)
+def test_a_grouper_whose_head_is_not_a_dim_does_not_fuse(opener):
+    lowered = _lower(opener, ("mean", (), {}))
+    assert [type(n) for n in lowered] == [Opaque, Opaque]
+    assert [n.name for n in lowered] == [opener[0], "mean"]
+
+
+def test_a_coordinate_grouper_fuses_once_its_name_is_a_dim():
+    # The guard tests membership, not spelling: the same call against a dataset where
+    # ``region`` *is* a dim fuses exactly as before. Pins that the refusals above are the
+    # dim check firing rather than some new syntactic narrowing.
+    (node,) = _lower(
+        ("groupby", ("region",), {}), ("mean", (), {}), dims=_DIMS | {"region"}
+    )
+    assert isinstance(node, GroupedReduce)
+    assert (node.group_dim, node.new_dim) == ("region", "region")
 
 
 def test_untabulated_closer_does_not_fuse():
@@ -378,4 +418,4 @@ def test_lowering_stays_idempotent_with_fusion():
     once = _lower(
         ("groupby", ("time.month",), {}), ("mean", (), {}), ("cumsum", ("lat",), {})
     )
-    assert to_lower_ir(once) == once
+    assert to_lower_ir(once, _DIMS) == once
