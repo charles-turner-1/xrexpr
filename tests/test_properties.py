@@ -82,8 +82,9 @@ HAS_DASK = importlib.util.find_spec("dask") is not None
 #: a dim once a ``chunk`` is in the chain. Hoisting the select in front leaves the rechunk
 #: looking at a zero-length dim, and dask's auto-chunking divides by the largest block —
 #: ``ZeroDivisionError`` where the eager order succeeds. It predates the chunk taxonomy (the
-#: rule crossed ``"auto"`` before it too); it is pinned by example in ``test_optimize.py`` and
-#: excluded here so this suite reports *new* breakage rather than that one, every run.
+#: rule crossed ``"auto"`` before it too) and is issue #121; it is pinned by example in
+#: ``test_accessor.py`` and excluded here so this suite reports *new* breakage rather than
+#: that one, every run. **Removing this exclusion is the acceptance test for #121.**
 EMPTIED_DIM_BUG = "an empty dim in front of an auto-sizing rechunk raises in dask"
 
 #: What may follow a ``chunk`` in a generated chain. Dask-backed data is what narrows this,

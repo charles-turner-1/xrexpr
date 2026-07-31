@@ -255,6 +255,7 @@ dated note (2026-07-29) saying exactly what its arm is. Nothing else in them cha
 | 5 | ~~**W7 §1** merge adjacent `Project`s (#102)~~ **done 2026-07-30** (`merge_adjacent_projects`; the failing-subset case left a *different* rewrite on the table, filed as #115); **§2** merge adjacent `Rechunk`s (#103, after W4); **§3** projections across `Scan`/`Rechunk` (#104 — the `Scan` half may already be paid by item 3; the `Rechunk` half needs §3's empirical check); **§5** `.plan` for `DataArray` (#105) | [`07-small-wins.md`](./07-small-wins.md) | Independent; slot between the numbered items. |
 | 6 | **The rest of the "schema lies" family.** **#60** — a `DataArray` indexer falls to `classify`'s `_scalar` catch-all (`indexers.py`, last line) and mis-evolves the schema; the issue body specifies scope and the conservative fallback (record such selects `Opaque`). **#109** — `SchemaState.coords` is a bare set of names carrying no dims, so a coordinate xarray orphans by consuming the dim it is defined on is tracked as surviving; needs `coords` to become a mapping, mirroring `data_vars`. | issues #60, #109 | Both are the family item 1 belonged to. Less reachable than #90 was: #60 needs a bare reduce downstream, and nothing in `optimize` reads `coords` at all, so #109 is inert until the first rule does. |
 | ~~7~~ | ~~**`.reduce` mis-tabulation**~~ — **done 2026-07-30** (issue #96). **Parsed properly**, not untabulated: which positional holds the dim spec is now the `schema._DIM_ARG_POSITION` table, so `.reduce` records an honest `Reduce` and its chains optimise. The generator draws it positionally (3.1% of chains). Closing it surfaced a **live** bug in the same branch — `keepdims=True` keeps its dims at size 1, so the recorded `consumes` made the optimiser *reject a valid chain*; now `Opaque`, with the modelling spec'd as `07-small-wins.md` §9 (issue #117). | issue #96, `07-small-wins.md` §7's closing note | Landed. |
+| 9 | **#121 — an emptying select crosses an auto-sizing rechunk.** Hoisted in front of `chunk({dim: "auto"})`, a select that leaves a dim at length 0 makes dask's auto-chunking divide by zero: the optimised plan *raises* where the eager chain succeeds. Predates W4 and was found by its property widening. Pinned as a strict xfail; the fix needs the rule to read sizes at its own position, and to decide what an *unknown* size means there. | issue #121 | Small in surface, real in kind — it is the only case in the package where the rewrite is worse than eager rather than merely different (contrast `07-small-wins.md` §8). |
 | ~~8~~ | ~~**NumPy-style docstrings**~~ — **done** (issue #97). Every callable in `src/xrexpr/` now carries `Parameters`/`Returns`/`Raises` sections with its correctness argument under `Notes`, and the style is enforced rather than aspirational: ruff `D` with `convention = "numpy"`, plus the `numpydoc-validation` pre-commit hook for the content ruff can't check. | issue #97 | Landed. |
 
 Deliberately *not* on the list: the weighted **select** rule (`02` §8.1 — needs the
@@ -266,7 +267,9 @@ the tracker rather than only here; none is scheduled.
 
 Every row above carries its issue number, and #99–#107 were filed in this table's order.
 Item numbers are kept stable as rows are struck through, so that ordering stays readable;
-#109 arrived later and sits with the family it belongs to rather than at the end. Anything
+#109 arrived later and sits with the family it belongs to rather than at the end, and #121
+later still — as item 9, since it belongs to no family and the numbering is a reading order
+rather than a priority. Anything
 added from here should be filed and linked in the same pass — the checkpoint is only useful
 while it and the tracker agree.
 
