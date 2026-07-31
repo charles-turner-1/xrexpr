@@ -537,32 +537,48 @@ def test_explicit_block_tuple_chain_matches_eager(chunky_ds):
 
 
 @requires_dask
-@pytest.mark.xfail(
-    strict=True,
-    raises=ZeroDivisionError,
-    reason="issue #121: hoisting the select leaves the rechunk looking at a zero-length dim, "
-    "and dask's auto-chunking divides by the largest block. Predates the chunk taxonomy -- "
-    "the rule crossed an 'auto' spec before it too -- and found by the property widening "
-    "that came with it. Kept as a strict xfail rather than deleted because it is the one "
-    "case where the optimised plan *raises* where the eager chain succeeds: flip it to "
-    "passing when the rule learns to refuse an emptying select.",
-)
-def test_an_emptying_select_may_not_cross_an_auto_rechunk(chunky_ds):
-    """A select that empties a dim crosses an ``"auto"`` rechunk and makes dask divide by zero.
+def test_an_emptying_select_does_not_cross_an_auto_rechunk(chunky_ds):
+    """A select that empties a dim stays behind an ``"auto"`` rechunk, and the chain matches eager.
 
     Notes
     -----
     ``isel(lat=[])`` keeps ``lat`` at length 0. Eagerly the rechunk runs first, on data that
-    is still full, and only then is the dim emptied; hoisted, the rechunk is handed a
-    zero-size array and asked to size ``time``'s blocks against it.
+    is still full, and only then is the dim emptied; hoisted, it would be handed a zero-size
+    array and asked to size ``time``'s blocks against it — ``ZeroDivisionError``, the one
+    case where the optimised plan raised where the eager chain succeeds (issue #121).
 
-    The failure is specific to the **mapping form** with an auto-sizing spec: a uniform
-    ``chunk("auto")`` takes a different path in dask and survives an empty dim, as do
-    ``-1``, ``None`` and any explicit size.
+    Both halves matter. Replaying equal to eager says the plan runs at all; the order
+    assertion says it runs because the rule *refused the hop*, not because dask happened to
+    tolerate it. The refusal is specific to the **mapping form** with an auto-sizing spec: a
+    uniform ``chunk("auto")`` takes a different path in dask and survives an empty dim, as do
+    ``-1``, ``None`` and any explicit size — each of which still crosses.
     """
     ds = chunky_ds
     chain = ds.plan.chunk({"time": "auto"}).isel(lat=[])
+
     assert_equal(chain.collect(), ds.chunk({"time": "auto"}).isel(lat=[]).compute())
+    text = chain.explain()
+    assert text.index("chunk") < text.index("isel")
+
+
+@requires_dask
+def test_a_harmless_select_still_crosses_an_auto_rechunk(chunky_ds):
+    """A select that leaves every dim non-empty still hops in front of an ``"auto"`` rechunk.
+
+    Notes
+    -----
+    The other side of :func:`test_an_emptying_select_does_not_cross_an_auto_rechunk`, and
+    the reason #121 was fixed with an emptiness guard rather than by barriering every
+    auto-sizing spec: the hop this rule exists for is still made.
+    """
+    ds = chunky_ds
+    chain = ds.plan.chunk({"time": "auto"}).isel(lat=slice(0, 2))
+
+    assert_equal(
+        chain.collect(), ds.chunk({"time": "auto"}).isel(lat=slice(0, 2)).compute()
+    )
+    text = chain.explain()
+    assert text.index("isel") < text.index("chunk")
 
 
 @requires_dask

@@ -578,6 +578,86 @@ def test_rechunk_option_kwarg_is_a_barrier(schema):
     assert [n.name for n in out] == ["chunk", "isel"]
 
 
+def test_emptying_select_is_a_barrier_at_an_auto_sizing_rechunk(schema):
+    """A select that empties a dim may not cross a rechunk that asks dask to size the blocks.
+
+    Notes
+    -----
+    Issue #121. ``"auto"`` and a byte target are resolved by *dividing* by the array's own
+    extent, so hoisting ``isel(time=[])`` in front of one hands dask a zero-size array and it
+    raises ``ZeroDivisionError`` — the optimised plan failing where the eager chain runs. The
+    guard is the only place the optimiser reads an extent, and it reads it only to refuse.
+    """
+    for spec in ("auto", "1MB"):
+        plan = [_node("chunk", {"lat": spec}), _node("isel", time=[])]
+        out = optimize(plan, schema)
+        assert [n.name for n in out] == ["chunk", "isel"]
+
+
+def test_emptying_select_still_crosses_a_sized_rechunk(schema):
+    """A select that empties a dim crosses every spec dask does *not* size from the array.
+
+    Notes
+    -----
+    The narrowness of the #121 guard, pinned: a fixed size is that size either way, ``-1`` is
+    one block and ``None`` keeps what is there, and all three were measured to survive an
+    empty dim (xarray 2026.7.0 / dask 2026.7.1). Only the auto-sizing pair barriers.
+    """
+    for spec in (2, -1, None):
+        plan = [_node("chunk", {"lat": spec}), _node("isel", time=[])]
+        out = optimize(plan, schema)
+        assert [n.name for n in out] == ["isel", "chunk"]
+
+
+def test_uniform_auto_still_crosses_an_emptying_select(schema):
+    """A uniform ``chunk("auto")`` crosses an emptying select, because dask sizes it elsewhere.
+
+    Notes
+    -----
+    The uniform form names no dim, so it never reaches the taxonomy — and it takes a
+    different path in dask, one that survives an empty dim. Measured, not assumed: this is
+    why the guard asks :func:`~xrexpr.optimize._auto_sizing` about ``chunks`` rather than
+    treating every ``"auto"`` alike.
+    """
+    plan = [_node("chunk", "auto"), _node("isel", time=[])]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["isel", "chunk"]
+
+
+def test_non_emptying_select_crosses_an_auto_sizing_rechunk(schema):
+    """A select that leaves every dim non-empty still crosses an ``"auto"`` rechunk.
+
+    Notes
+    -----
+    The hop #121 was fixed *without* giving up. Barriering every auto-sizing spec would have
+    been five lines; over 400 generated chains it would have cost four of the seventeen
+    pushes this rule makes, so the guard tests the pair instead of the node.
+    """
+    plan = [_node("chunk", {"lat": "auto"}), _node("isel", time=slice(0, 2))]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["isel", "chunk"]
+
+
+def test_unknown_extent_is_a_barrier_at_an_auto_sizing_rechunk(schema):
+    """With every extent blanked, the same hop is refused: unknown is read as empty.
+
+    Notes
+    -----
+    The contract ``SchemaState.sizes`` states — a caller must treat ``None`` as "no rewrite",
+    never as size zero — applied at the one site that reads an extent. This is also what
+    ``test_rewrites_survive_unknown_dim_sizes`` now excludes: blanking may *withhold* this
+    rewrite, which is the safe direction, so the property carves the adjacency out and this
+    test covers it deterministically.
+    """
+    blanked = SchemaState(
+        variables=schema.variables,
+        coord_names=schema.coord_names,
+        sizes=frozendict(dict.fromkeys(schema.sizes)),
+    )
+    plan = [_node("chunk", {"lat": "auto"}), _node("isel", time=slice(0, 2))]
+    assert [n.name for n in optimize(plan, blanked)] == ["chunk", "isel"]
+
+
 def test_rechunk_never_raises_on_a_reduced_dim(schema):
     """Unlike a reduce, a rechunk can never make a following select unreplayable, so it never raises."""
     plan = [_node("chunk", {"time": 100}), _node("sel", time=0)]

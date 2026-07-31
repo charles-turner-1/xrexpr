@@ -48,6 +48,14 @@ the schema each node sees — the plan's single fold, and also where a symbolic
 ``drop_vars``, so those folded schemas are exact only up to the first opaque node —
 :func:`_trusted_prefix` marks that boundary and rules that consult ``data_vars`` stay
 inside it.
+
+**Extents are read by exactly one rule, and only to decline.** Everything else here reasons
+about dim *names*. The exception is :func:`pushdown_selects_past_rechunks`, because an
+auto-sizing chunk spec asks dask to divide by the array's own extent and a hoisted select can
+make that extent zero (issue #121). It reads a size only to *withhold* a hop, never to
+license one, and treats "don't know" exactly as it treats zero — so a mismodelled extent can
+cost an optimisation and cannot change an answer. ``SchemaState.sizes`` states the same
+contract from the other side.
 """
 
 from collections.abc import Callable, Hashable, Iterable, Mapping
@@ -998,7 +1006,9 @@ def pushdown_selects_past_rechunks(nodes: Plan, schema: SchemaState) -> Plan | N
     nodes : Plan
         The plan to rewrite.
     schema : SchemaState
-        The schema entering the plan. Unused — this rule has no disjointness test at all.
+        The schema entering the plan. This rule has no disjointness test at all, so the
+        schema is read for one thing only: whether the hop would leave a dim empty in
+        front of an auto-sizing spec (see the notes).
 
     Returns
     -------
@@ -1021,7 +1031,8 @@ def pushdown_selects_past_rechunks(nodes: Plan, schema: SchemaState) -> Plan | N
 
     - **no named dim dropped** — swap as-is (this covers the uniform forms, ``chunk()`` /
       ``chunk(100)`` / ``chunk("auto")``, which name no dim at all; ``"auto"`` simply
-      re-picks block sizes against whatever survives, which is the point of asking for it).
+      re-picks block sizes against whatever survives, which is the point of asking for it —
+      subject to the emptiness guard below).
     - **some named dims dropped** — swap, rebuilding the rechunk from the surviving keys.
     - **every named dim dropped** — swap and *drop the rechunk*. What is left would be
       ``chunk({})``: a single-chunk dask array, so no parallelism and no out-of-core
@@ -1030,14 +1041,46 @@ def pushdown_selects_past_rechunks(nodes: Plan, schema: SchemaState) -> Plan | N
       A rechunk that named no dim to begin with is kept, since there the conversion is
       the stated purpose rather than a leftover.
 
+    **The emptiness guard, and the one extent this optimiser reads.** ``"auto"`` and a byte
+    target are the two specs dask resolves by *dividing* by the array's own extent, so a
+    select that empties a dim changes their answer into a ``ZeroDivisionError``: eagerly the
+    rechunk sees full data and only then is the dim emptied, while hoisted it is handed a
+    zero-size array. That made the optimised plan **raise where the eager chain succeeds**
+    (issue #121) — the one way this rewrite could be worse than no rewrite. So when
+    :func:`_auto_sizing` holds, the select is sized against the folded schema first and the
+    hop is refused unless every extent survives it. Measured against xarray 2026.7.0 /
+    dask 2026.7.1: the mapping forms ``{"lon": "auto"}`` and ``{"lon": "1MB"}`` raise on an
+    array with an empty ``lat``, while ``{"lon": 4}``, ``{"lon": None}``, ``{"lon": -1}`` and
+    every uniform form (``chunk()`` / ``chunk(4)`` / ``chunk("auto")``, which take a
+    different path in dask) do not — hence the guard reads the taxonomy rather than testing
+    for ``chunk`` at large.
+
+    The guard reads sizes **only to decline**, and an unknown extent counts as an empty one,
+    so a mismodelled size costs an optimisation and can never change an answer. Sizes past an
+    :class:`~xrexpr.ir.Opaque` are a guess (:func:`_trusted_prefix`), so an auto-sizing hop
+    there is refused outright; every other hop keeps firing across the whole plan.
+
     Unlike :func:`pushdown_selects` this never raises: a rechunk cannot make a select
     unreplayable, only slower. One hop per call.
     """
+    trusted = _trusted_prefix(nodes)
+    # Fold only for a plan that could need it -- the same early-out
+    # ``pushdown_projections`` makes for a projection-free plan.
+    schemas = (
+        _schemas(nodes[:trusted], schema)
+        if any(isinstance(node, Rechunk) and _auto_sizing(node) for node in nodes)
+        else []
+    )
     for i in range(len(nodes) - 1):
         match nodes[i], nodes[i + 1]:
             case (Rechunk() as rechunk, Select() as select) if _pushable_rechunk(
                 rechunk
             ):
+                if _auto_sizing(rechunk) and not (
+                    i + 1 < trusted
+                    and _survives_the_select(apply_schema(schemas[i + 1], select))
+                ):
+                    continue
                 kept = {
                     dim: spec
                     for dim, spec in rechunk.chunks.items()
@@ -1103,6 +1146,10 @@ def _pushable_rechunk(node: Rechunk) -> bool:
     - everything else crosses. A size, a byte target, ``"auto"``, ``-1`` and ``None`` each
       describe blocks in terms xarray re-resolves against whatever data survives the
       select, which is the whole reason moving the select in front is safe.
+
+    The **emptiness** test that guards the auto-sizing specs is deliberately not here: it is
+    a fact about the *pair* — which dims that particular select leaves empty — and this
+    function sees only the node. It lives in the caller, with the folded schema.
     """
     if any(key not in node.chunks for key in node.kwargs):
         return False
@@ -1117,6 +1164,71 @@ def _pushable_rechunk(node: Rechunk) -> bool:
             case _:
                 assert_never(spec)
     return True
+
+
+def _auto_sizing(node: Rechunk) -> bool:
+    """Report whether any of ``node``'s specs asks dask to size blocks from the array.
+
+    Parameters
+    ----------
+    node : Rechunk
+        The rechunk to classify.
+
+    Returns
+    -------
+    bool
+        ``True`` when some dim's spec is :class:`~xrexpr.chunks.Auto` or
+        :class:`~xrexpr.chunks.ByteSize`.
+
+    Notes
+    -----
+    The second policy site the chunk taxonomy bought (#99), and the discriminant issue #121
+    turns on: these two specs mean "pick block sizes for me", which dask answers by dividing
+    a byte budget by the extent of the array it is handed — so what they mean *changes* when
+    a select moves in front, and becomes a ``ZeroDivisionError`` if that select empties a
+    dim. Every other variant states blocks in terms no select can invalidate: a fixed size
+    is that size either way, ``-1`` is one block, ``None`` keeps what is there, and the two
+    barrier forms never get this far.
+
+    A ``match`` closed with ``assert_never``, so a new variant fails mypy here until someone
+    says whether dask sizes it from the array. Only the mapping form is asked about: a
+    uniform ``chunk("auto")`` names no dim, lives in ``args`` rather than ``chunks``, and
+    was measured to survive an empty dim (xarray 2026.7.0 / dask 2026.7.1).
+    """
+    for spec in node.chunks.values():
+        match spec:
+            case Auto() | ByteSize():
+                return True
+            case SingleSize() | FullDim() | NoChange() | BlockSeq() | OpaqueChunk():
+                continue
+            case _:
+                assert_never(spec)
+    return False
+
+
+def _survives_the_select(after: SchemaState) -> bool:
+    """Report whether every dim still has data once the select has run.
+
+    Parameters
+    ----------
+    after : SchemaState
+        The schema *leaving* the select, i.e. ``apply_schema`` applied to the select at its
+        own position in the plan.
+
+    Returns
+    -------
+    bool
+        ``True`` when every extent is known and non-zero.
+
+    Notes
+    -----
+    Zero and ``None`` are answered the same way, and that is the whole discipline: an
+    unknown extent *may* be zero, and :class:`~xrexpr.schema.SchemaState` says outright that
+    a caller must read "don't know" as "no rewrite", never as size zero. Since the only
+    caller uses this to *withhold* a hop, treating the two alike costs a missed optimisation
+    at worst — never a wrong answer.
+    """
+    return all(size for size in after.sizes.values())
 
 
 _RULES: tuple[Rule, ...] = (

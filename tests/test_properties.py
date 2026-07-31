@@ -51,11 +51,11 @@ import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
 
 # aliased: this module's own ``Call`` is a generated *recorded* call (name + args/kwargs),
 # a different thing from the emitted call header ``lower.Call`` denotes.
-from xrexpr.ir import ContextOpen, Opaque
+from xrexpr.ir import ContextOpen, Opaque, Rechunk, Select
 from xrexpr.lower import Call as Lowered
 from xrexpr.lower import emit, to_lower_ir
 from xrexpr.operations import CONTEXT_METHODS, OP_TABLE, ReduceSpec
-from xrexpr.optimize import optimize
+from xrexpr.optimize import _auto_sizing, optimize
 from xrexpr.schema import SchemaState, apply_schema, to_opnode
 
 # Reductions spelled ``name(dim=...)``: every tabulated reduce except ``reduce``, whose
@@ -77,15 +77,6 @@ REDUCE_METHOD_FUNC = np.mean
 #: Whether ``chunk`` calls are generated at all. xrexpr never needs dask, but *replaying* a
 #: rechunk does, so without a chunk manager the drawn chain would raise rather than chunk.
 HAS_DASK = importlib.util.find_spec("dask") is not None
-
-#: The one *divergence* this widening found, and the reason a generated select may not empty
-#: a dim once a ``chunk`` is in the chain. Hoisting the select in front leaves the rechunk
-#: looking at a zero-length dim, and dask's auto-chunking divides by the largest block —
-#: ``ZeroDivisionError`` where the eager order succeeds. It predates the chunk taxonomy (the
-#: rule crossed ``"auto"`` before it too) and is issue #121; it is pinned by example in
-#: ``test_accessor.py`` and excluded here so this suite reports *new* breakage rather than
-#: that one, every run. **Removing this exclusion is the acceptance test for #121.**
-EMPTIED_DIM_BUG = "an empty dim in front of an auto-sizing rechunk raises in dask"
 
 #: What may follow a ``chunk`` in a generated chain. Dask-backed data is what narrows this,
 #: not the optimiser: several ops xarray accepts eagerly it refuses on a chunked array
@@ -781,8 +772,6 @@ def _calls(draw, ds, max_ops=4, builders=False):
                 break
             dim = draw(st.sampled_from(available))
             call = Call(kind, **{dim: draw(indexers(current, dim, kind))})
-            if chunked and not all(_apply(current, [call]).sizes.values()):
-                continue  # would empty a dim in front of a rechunk -- see EMPTIED_DIM_BUG
             selected_dims.add(dim)
 
         current = _apply(current, [call])
@@ -1068,6 +1057,14 @@ def test_sel_label_slice_size_is_unknown_rather_than_wrong():
     assert schema.sizes["lat"] != 0  # the under-report this replaced
 
 
+def _reads_extents(nodes):
+    """Whether any rule would consult an extent to decide this plan (see #121)."""
+    return any(
+        isinstance(a, Rechunk) and _auto_sizing(a) and isinstance(b, Select)
+        for a, b in zip(nodes, nodes[1:], strict=False)
+    )
+
+
 @SETTINGS
 @given(any_plans())
 def test_rewrites_survive_unknown_dim_sizes(case):
@@ -1078,6 +1075,15 @@ def test_rewrites_survive_unknown_dim_sizes(case):
     surviving weight dims unknown, so the plans the rules see carry ``None`` sizes
     routinely — builder chains are generated here, so this is not a hypothetical. Every
     rule reasons about dim *names*, so blanking every size must change nothing.
+
+    **One carve-out**, and it is the only one: ``pushdown_selects_past_rechunks`` reads an
+    extent to decide whether hoisting a select would empty a dim in front of an auto-sizing
+    chunk spec (#121). Blanking may legitimately *withhold* that hop — an unknown extent is
+    read as an empty one, which is the safe direction — so equality is asked of every plan
+    the guard cannot fire on, and the withholding itself is pinned deterministically by
+    ``test_unknown_extent_is_a_barrier_at_an_auto_sizing_rechunk``. The exclusion is by the
+    adjacency the rule looks for, not by "contains a chunk", so the widening keeps testing
+    every rechunk it can.
     """
     ds, calls = case
     plan, _ = _build_plan(ds, calls)
@@ -1088,6 +1094,7 @@ def test_rewrites_survive_unknown_dim_sizes(case):
         sizes=frozendict(dict.fromkeys(base.sizes)),  # every size -> None
     )
     lowered = to_lower_ir(plan, _dim_names(ds))
+    assume(not _reads_extents(lowered))
     assert optimize(lowered, blanked) == optimize(lowered, base)
 
 
