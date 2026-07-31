@@ -21,7 +21,7 @@ normalises a raw recorded call into that ``Op`` variant.
 
 from collections.abc import Hashable, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal, cast
+from typing import Any, Final, Literal, cast
 
 import xarray as xr
 from frozendict import frozendict
@@ -863,7 +863,7 @@ def _projected_names(args: tuple[Any, ...]) -> tuple[Hashable, ...] | None:
 #: dim spec is what made ``ds.reduce(np.mean, "time")`` record a nonsense ``consumes``
 #: (#96). Keyed by method name rather than special-cased inline so a second such signature
 #: is a table entry.
-_DIM_ARG_POSITION: dict[str, int] = {"reduce": 1}
+_DIM_ARG_POSITION: Final[frozendict[str, int]] = frozendict({"reduce": 1})
 
 
 def _reduce_dims(name: str, args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> DimSet:
