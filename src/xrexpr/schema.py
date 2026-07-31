@@ -365,9 +365,9 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
     - :class:`~xrexpr.ir.WindowedReduce` keeps every dim and *resizes* the windowed ones
       (``coarsen`` only);
     - :class:`~xrexpr.ir.WeightedReduce` aggregates over its ``consumes`` like a plain
-      reduce, then mints any weight dim the dataset lacked and marks every weight dim's
-      extent unknown — the weights broadcast in the dims the dataset lacks and align (so
-      possibly *shrink*) the ones it shares;
+      reduce, then mints every surviving weight dim onto each **variable** that lacks it
+      and marks every weight dim's extent unknown — the weights broadcast in the dims a
+      variable lacks and align (so possibly *shrink*) the ones it shares;
     - :class:`~xrexpr.ir.Scan`/:class:`~xrexpr.ir.Rechunk`/:class:`~xrexpr.ir.Opaque`
       change nothing (a rechunk changes only chunk topology).
 
@@ -455,13 +455,21 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
                 case frozenset() as named:
                     variables, coord_names = _aggregated(variables, coord_names, named)
                     # The weights have a dim effect of their own, via ``dot``'s broadcast
-                    # and alignment -- see ``WeightedReduce``. A weight dim the dataset
-                    # lacks is *minted*; one it shares may be *resized* (misaligned weights
-                    # inner-join and shrink it). Either way the name is known and the extent
-                    # is not, which is the answer the ``int | None`` sizes exist for.
+                    # and alignment -- see ``WeightedReduce``. A weight dim a *variable*
+                    # lacks is minted onto it; one it shares may be *resized* (misaligned
+                    # weights inner-join and shrink it). Either way the name is known and
+                    # the extent is not, which is the answer the ``int | None`` sizes exist
+                    # for.
+                    #
+                    # Minted per variable, not per dataset: the broadcast is ``dot``'s, so
+                    # it reaches each variable on its own terms. Skipping the mint when some
+                    # *other* variable already carried the dim under-reported ``elevation``
+                    # after ``weighted(w(time)).mean("lat")`` on a dataset that also held
+                    # ``temperature(time, lat)`` -- issue #125. ``_minted`` is per-variable
+                    # and idempotent, so handing it the whole set is both correct and the
+                    # simpler statement.
                     from_weights = frozenset(weighted.weight_dims) - named
-                    present = {d for var_dims in variables.values() for d in var_dims}
-                    variables = _minted(variables, coord_names, from_weights - present)
+                    variables = _minted(variables, coord_names, from_weights)
                     for dim in from_weights:
                         sizes[dim] = None
                 case _:
