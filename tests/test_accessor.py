@@ -565,12 +565,12 @@ def test_unparseable_byte_target_fails_exactly_as_eager_does(chunky_ds):
 @pytest.mark.xfail(
     strict=True,
     raises=ZeroDivisionError,
-    reason="hoisting the select leaves the rechunk looking at a zero-length dim, and dask's "
-    "auto-chunking divides by the largest block. Predates the chunk taxonomy -- the rule "
-    "crossed an 'auto' spec before it too -- and found by the property widening that came "
-    "with it. Kept as a strict xfail rather than deleted because it is the one case where "
-    "the optimised plan *raises* where the eager chain succeeds: flip it to passing when "
-    "the rule learns to refuse an emptying select.",
+    reason="issue #121: hoisting the select leaves the rechunk looking at a zero-length dim, "
+    "and dask's auto-chunking divides by the largest block. Predates the chunk taxonomy -- "
+    "the rule crossed an 'auto' spec before it too -- and found by the property widening "
+    "that came with it. Kept as a strict xfail rather than deleted because it is the one "
+    "case where the optimised plan *raises* where the eager chain succeeds: flip it to "
+    "passing when the rule learns to refuse an emptying select.",
 )
 def test_an_emptying_select_may_not_cross_an_auto_rechunk(chunky_ds):
     """A select that empties a dim crosses an ``"auto"`` rechunk and makes dask divide by zero.
