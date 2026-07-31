@@ -2,6 +2,23 @@
 
 *(Anchors refreshed 2026-07-29 against `main`; the spec itself is unchanged.)*
 
+**Landed 2026-07-31 (#99), as specified, with the three open questions answered by
+measurement rather than choice:**
+
+- **`None` is not `-1`.** On an already-chunked dim, `None` keeps the existing blocks and
+  `-1` collapses them into one, so both `NoChange` and `FullDim` exist. The evidence is in
+  `chunks.py`'s module docstring and pinned by
+  `test_chunks.test_no_change_and_full_dim_are_different_behaviours`.
+- **`BlockSeq.to_raw()` returns a tuple**, which xarray accepts — unlike the sequence
+  indexers, which must be lists.
+- **The catch-all is `OpaqueChunk(value)`**, a barrier, taking the role `Label` plays for
+  indexers. It is what makes `classify_chunk` total, which `Rechunk.__post_init__` needs.
+  Two kinds of value reach it: ones xarray rejects outright (`0`, `-2`), where the error
+  stays xarray's to word at replay, and ones dask tolerates but xarray's API does not offer
+  (a whole float, `True`). The second is a **deliberate, conservative behaviour change** —
+  such a rechunk used to push and is now a barrier, costing an optimisation and never
+  correctness.
+
 **Goal:** finish `structural-dispatch-2.md` §3. The indexer half of the value sum type
 shipped in #66–#71; the chunk half is still `Any`: `Rechunk.chunks:
 frozendict[Hashable, Any]` (`ir.py:241`) and the `isinstance` ladder in

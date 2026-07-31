@@ -562,6 +562,35 @@ def test_unparseable_byte_target_fails_exactly_as_eager_does(chunky_ds):
 
 
 @requires_dask
+@pytest.mark.xfail(
+    strict=True,
+    raises=ZeroDivisionError,
+    reason="hoisting the select leaves the rechunk looking at a zero-length dim, and dask's "
+    "auto-chunking divides by the largest block. Predates the chunk taxonomy -- the rule "
+    "crossed an 'auto' spec before it too -- and found by the property widening that came "
+    "with it. Kept as a strict xfail rather than deleted because it is the one case where "
+    "the optimised plan *raises* where the eager chain succeeds: flip it to passing when "
+    "the rule learns to refuse an emptying select.",
+)
+def test_an_emptying_select_may_not_cross_an_auto_rechunk(chunky_ds):
+    """A select that empties a dim crosses an ``"auto"`` rechunk and makes dask divide by zero.
+
+    Notes
+    -----
+    ``isel(lat=[])`` keeps ``lat`` at length 0. Eagerly the rechunk runs first, on data that
+    is still full, and only then is the dim emptied; hoisted, the rechunk is handed a
+    zero-size array and asked to size ``time``'s blocks against it.
+
+    The failure is specific to the **mapping form** with an auto-sizing spec: a uniform
+    ``chunk("auto")`` takes a different path in dask and survives an empty dim, as do
+    ``-1``, ``None`` and any explicit size.
+    """
+    ds = chunky_ds
+    chain = ds.plan.chunk({"time": "auto"}).isel(lat=[])
+    assert_equal(chain.collect(), ds.chunk({"time": "auto"}).isel(lat=[]).compute())
+
+
+@requires_dask
 def test_rechunk_and_reduce_pushdown_compose(chunky_ds):
     """Rechunk pushdown composes with reduce pushdown, end to end, matching the eager result."""
     ds = chunky_ds
