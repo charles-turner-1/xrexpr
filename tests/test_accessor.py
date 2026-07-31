@@ -268,6 +268,67 @@ def test_blocked_projection_still_replays(ds):
     assert_equal(got, ds.mean("time")[["elevation"]])
 
 
+def test_merged_projections_equal(ds):
+    """Two projections merged into one collect to the eager result, auxiliary coords included.
+
+    Notes
+    -----
+    ``assert_identical`` rather than ``assert_equal``: the claim the merge rests on is
+    that a projection's *coordinate* pruning composes, so names and attrs are exactly
+    what is under test -- the ``area(lat, lon)`` coord this module's fixture adds is the
+    one a sloppier rule would drop.
+    """
+    got = ds.plan[["temperature", "elevation"]][["temperature"]].collect()
+    assert len(ds.plan[["temperature", "elevation"]][["temperature"]]._optimized()) == 1
+    xr.testing.assert_identical(got, ds[["temperature", "elevation"]][["temperature"]])
+
+
+def test_merged_projections_keep_the_dataarray_result(ds):
+    """A list projection merged with a following bare name still yields the eager ``DataArray``."""
+    got = ds.plan[["temperature", "elevation"]]["temperature"].collect()
+    assert isinstance(got, xr.DataArray)
+    xr.testing.assert_identical(got, ds[["temperature", "elevation"]]["temperature"])
+
+
+def test_a_projection_naming_a_coord_is_left_and_still_replays(ds):
+    """A projection naming a *coordinate* fails the subset test, is left alone, and replays equal.
+
+    Notes
+    -----
+    ``ds[["temperature"]]["lat"]`` is valid eagerly, because a projection keeps the coords
+    its variables span. It is *not* a spelling of ``ds["lat"]``: the chain reads ``lat`` as
+    it exists inside ``p1``'s result, which agrees with the base coord only by accident --
+    a select or reduce between the two projections, or a ``p1`` that prunes or resizes it,
+    and they differ. So this asserts the conservative leg, not a missed rewrite.
+
+    There *is* a win here, and it is a different rule: ``p1`` materialises ``temperature``
+    only to discard it, where the optimal plan reads the coord and never touches the data
+    variable. That needs the schema (does ``lat`` survive ``p1`` untouched?), which puts it
+    in ``pushdown_projections``' family rather than the syntactic merge -- filed as #115.
+    """
+    chain = ds.plan[["temperature"]]["lat"]
+    assert [type(n) for n in chain._optimized()] == [Project, Project]
+    xr.testing.assert_identical(chain.collect(), ds[["temperature"]]["lat"])
+
+
+def test_merging_projections_skips_an_error_from_a_discarded_name(ds):
+    """Merging drops a first projection whose extra name doesn't exist — §8's discarded-work clause.
+
+    Notes
+    -----
+    Eager raises ``KeyError`` building an intermediate the chain throws away one node
+    later; the merged plan asks only for what the chain actually wanted and succeeds. The
+    same licence ``pushdown_projections`` runs on
+    (``test_projection_pushdown_skips_an_error_from_a_discarded_variable``): no value
+    moves, and the skipped error comes from work whose result is discarded.
+    """
+    with pytest.raises(KeyError):
+        ds[["temperature", "nope"]][["temperature"]]
+
+    got = ds.plan[["temperature", "nope"]][["temperature"]].collect()
+    xr.testing.assert_identical(got, ds[["temperature"]])
+
+
 def test_explain_shows_projection_pushdown(ds):
     """``explain()`` shows a pushed-down projection listed before the reduce it hopped past."""
     text = ds.plan.mean("time")[["temperature"]].explain()

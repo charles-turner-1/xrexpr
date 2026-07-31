@@ -7,6 +7,35 @@ it names.
 
 ## 1. Merge adjacent `Project`s
 
+> **Closed (2026-07-30)** as `optimize.merge_adjacent_projects` (#102). The spec below is
+> what was implemented, plus two facts it did not carry:
+>
+> - **A `single` `p1` is a second, independent barrier**, and the subset test does not
+>   imply it. After a bare-name projection the object is a `DataArray`, on which
+>   `__getitem__` is *indexing*: `ds["temperature"]["temperature"]` raises `KeyError`
+>   where the collapsed `ds["temperature"]` returns data. Turning an error into a value is
+>   the one thing §8's contract forbids outright, so the pair is left.
+> - **The rule is deliberately schema-free**, deciding on the two key sets alone. That is
+>   what lets it fire past an `Opaque` and admit a `p1` that names a coordinate
+>   (`ds[["lat", "temperature"]][["lat"]]` composes correctly). The price is one skipped
+>   error: a name in `p1` that the dataset lacks makes eager raise `KeyError` where the
+>   merged plan succeeds — §8's middle clause, the same licence `pushdown_projections`
+>   runs on, since no value moves and the error comes from work the chain discards.
+>
+> Verified against xarray 2026.7.0 rather than assumed: `ds[["temperature",
+> "elevation"]][["temperature"]]` is `identical` to `ds[["temperature"]]` (a projection's
+> coord pruning composes, because `needed_dims(p2) ⊆ needed_dims(p1)`), and so is the
+> list-then-bare-name form. No generator change was needed — `_calls` already draws
+> list-form projections, so `p2 ⊆ p1` holds by construction on a run of two; measured, the
+> rule fires on **5.7%** of generated chains.
+>
+> **Follow-up, not folded in:** the failing-subset case leaves real work on the table.
+> `ds[["temperature"]]["lat"]` materialises `temperature` and throws it away to return a
+> coordinate. Eliminating `p1` there is a *different* rewrite — it must prove the coord's
+> values survive `p1` untouched, which is a schema question inside `_trusted_prefix`,
+> not a key-set one. Filed as #115 (likely wanting #109 first, since it must ask which
+> dims a coordinate carries).
+
 `ds[["tas", "pr"]][["tas"]]` records two `Project` nodes; one suffices. New rule (or
 a case folded into a future merge pass): an adjacent `(Project p1, Project p2)` pair
 collapses to `p2` alone **iff `set(p2.variables) <= set(p1.variables)`**. The subset
