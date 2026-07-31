@@ -109,15 +109,12 @@ class SchemaState:
     statically evident. The same contract ``var_dims`` states, and the same warning
     applies with one substitution: callers must treat it as "no rewrite", never as
     *size zero*. Under-reporting a size is the unsafe direction, because it is the one
-    a rewrite could act on. Exactly one optimiser rule reads a size, and only to
-    *withhold* a rewrite: ``pushdown_selects_past_rechunks`` refuses to hoist a select in
-    front of an auto-sizing chunk spec unless every extent survives the select, because
-    dask sizes those blocks by dividing by the array's own extent (issue #121). It reads
-    "don't know" and zero alike, exactly as the paragraph above requires, so no extent can
-    *license* a rewrite and a wrong one costs an optimisation rather than an answer. Every
-    other rule reasons about dim *names* only, which
-    ``test_rewrites_survive_unknown_dim_sizes`` pins by blanking every size and demanding
-    the same output.
+    a rewrite could act on. No optimiser rule reads a size at all — every rule reasons
+    about dim *names*, and ``test_rewrites_survive_unknown_dim_sizes`` pins that by
+    blanking every size and demanding the same output. The one rule that had to reason
+    about *emptiness* — ``pushdown_selects_past_rechunks``, whose #121 guard refuses to
+    hoist a select in front of an auto-sizing chunk spec — asks the **indexer** instead,
+    which answers exactly and without an extent.
     """
 
     variables: frozendict[Hashable, tuple[Hashable, ...]] = field(

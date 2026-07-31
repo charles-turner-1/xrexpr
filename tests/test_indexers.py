@@ -25,7 +25,7 @@ import numpy as np
 import pytest
 import xarray as xr
 from frozendict import frozendict
-from hypothesis import HealthCheck, assume, given, settings
+from hypothesis import HealthCheck, assume, event, given, settings
 from hypothesis import strategies as st
 from xarray.testing import assert_equal
 
@@ -41,7 +41,7 @@ from xrexpr.indexers import (
     classify,
 )
 from xrexpr.ir import Select
-from xrexpr.optimize import _compose_indexer
+from xrexpr.optimize import _compose_indexer, _may_empty
 
 # --- classify: each raw shape lands in exactly one variant --------------------------------
 
@@ -427,6 +427,53 @@ def test_size_predicts_the_real_isel_length(case):
         assert "x" not in result.dims
     else:
         assert indexer.size(n) == result.sizes["x"]
+
+
+@_SETTINGS
+@given(_sized_value())
+def test_may_empty_never_vouches_for_a_select_that_empties(case):
+    """When ``_may_empty`` says no, a dim that entered with data leaves with data.
+
+    Notes
+    -----
+    The predicate lives in ``optimize`` — whether an indexer may empty its dim is a policy
+    question the optimiser asks, the same stance this module takes on composition — but the
+    claim it rests on is a fact about the *values*, so it is checked here, against xarray,
+    like ``size`` and ``drops_dim`` above.
+
+    That claim is what lets the #121 guard read no extent at all: refusing to hoist a select
+    in front of an auto-sizing rechunk is sound only if "will not empty" is answerable from
+    the value. One direction is the whole test — a ``True`` may be over-cautious and costs
+    an optimisation, a wrong ``False`` costs a ``ZeroDivisionError`` at replay. So the
+    assertion is one-way, and :func:`test_may_empty_is_not_vacuous` keeps it honest.
+    """
+    n, value = case
+    indexer = classify(value)
+    if _may_empty("isel", indexer):
+        return
+    result = _da(n).isel(x=value)
+    assert "x" not in result.dims or result.sizes["x"] > 0
+
+
+@_SETTINGS
+@given(_sized_value())
+def test_may_empty_is_not_vacuous(case):
+    """``_may_empty`` vouches for something: every emptying value is caught, and some are not.
+
+    Notes
+    -----
+    A predicate that answered ``True`` unconditionally would pass the property above, so
+    both halves are pinned here: the ``event`` counts say the ``False`` branch is reached,
+    and the assertion says every value that *does* empty the dim is refused — which is the
+    direction that would be a bug.
+    """
+    n, value = case
+    indexer = classify(value)
+    result = _da(n).isel(x=value)
+    emptied = "x" in result.dims and result.sizes["x"] == 0
+    event(f"may_empty: {_may_empty('isel', indexer)}")
+    if emptied:
+        assert _may_empty("isel", indexer)
 
 
 @_SETTINGS

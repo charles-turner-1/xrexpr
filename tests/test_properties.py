@@ -55,7 +55,7 @@ from xrexpr.ir import ContextOpen, Opaque, Rechunk, Select
 from xrexpr.lower import Call as Lowered
 from xrexpr.lower import emit, to_lower_ir
 from xrexpr.operations import CONTEXT_METHODS, OP_TABLE, ReduceSpec
-from xrexpr.optimize import _auto_sizing, optimize
+from xrexpr.optimize import _auto_sizing, _may_empty, optimize
 from xrexpr.schema import SchemaState, apply_schema, to_opnode
 
 # Reductions spelled ``name(dim=...)``: every tabulated reduce except ``reduce``, whose
@@ -634,10 +634,13 @@ def _rechunks(draw, obj):
     ----------
     obj : xr.Dataset
         The dataset the call will be applied to, drawn against its *current* sizes. Every
-        dim is non-empty — the caller checks, because dask's auto-chunking divides by the
-        largest block and so raises ``ZeroDivisionError`` on an array with a zero-length
-        dim. Empty selections are generated on purpose here, so that combination has to be
-        avoided rather than assumed away.
+        dim is non-empty — the caller checks, because an auto-sizing spec divides by the
+        largest block and so raises ``ZeroDivisionError`` on an array that already has a
+        zero-length dim. Empty selections are generated on purpose here, so that
+        combination has to be avoided rather than assumed away. It is chunking an
+        *already*-empty dataset that is skipped, which eager xarray cannot do either;
+        emptying a dim in *front* of a chunk is exactly what issue #121 is about and is
+        drawn freely.
 
     Returns
     -------
@@ -703,7 +706,7 @@ def _calls(draw, ds, max_ops=4, builders=False):
 
         if kind == "chunk":
             if not all(current.sizes.values()):
-                continue  # an empty dim: dask cannot auto-chunk it -- see ``_rechunks``
+                continue  # already empty: eager xarray cannot chunk it -- see ``_rechunks``
             call = draw(_rechunks(current))
             current = _apply(current, [call])
             calls.append(call)
@@ -850,6 +853,58 @@ def test_optimised_plan_matches_eager_evaluation(case):
         if type(node).__name__.endswith("Reduce") and type(node).__name__ != "Reduce":
             event(f"fused: {type(node).__name__}")
     assert_equal(_apply(ds.plan, calls).collect(), _apply(ds, calls))
+
+
+@pytest.mark.skipif(not HAS_DASK, reason="a rechunk needs a chunk manager to replay")
+@SETTINGS
+@given(any_plans())
+def test_optimised_plan_matches_eager_under_a_tight_chunk_target(case):
+    """The headline property again, with dask's byte target small enough to make it bite.
+
+    The generated dims are 1–5 long, so against dask's 128 MB default every ``"auto"`` dim
+    is pinned by ``auto_chunks`` before it can divide and issue #121 cannot be reached: the
+    chains that empty a dim in front of an auto-sizing rechunk replay green whether the
+    guard is there or not. A 1 kB target puts those same tiny datasets *over* the limit,
+    which is what makes the hazard reachable — the crash was never about a dataset being
+    large in absolute terms, only about it exceeding ``limit ** (1 / ndim)``.
+
+    Cheaper than the alternative, which is a fixture of a few hundred megabytes, and more
+    honest: the setting names the condition the bug actually depends on.
+    """
+    import dask
+
+    ds, calls = case
+    with dask.config.set({"array.chunk-size": "1kB"}):
+        assert_equal(_apply(ds.plan, calls).collect(), _apply(ds, calls))
+
+
+@SETTINGS
+@given(any_plans())
+def test_no_rule_lands_an_emptying_select_before_an_auto_sizing_rechunk(case):
+    """The #121 adjacency is never *created*, by any rule — not merely declined by one.
+
+    ``pushdown_selects_past_rechunks`` refuses to build this pair, but refusing is only half
+    the claim: any rule that reorders nodes could land one there, and the plan would raise
+    where the eager chain runs. So the assertion is about the optimised plan as a whole,
+    and it is quantified over every generated chain rather than over the rule's own inputs.
+
+    A chain the *user* wrote that way is left alone — replaying it faithfully means raising
+    exactly as eager does — so those adjacencies are subtracted rather than forbidden.
+    """
+    ds, calls = case
+    lowered = to_lower_ir(_build_plan(ds, calls)[0], _dim_names(ds))
+
+    def hazards(nodes):
+        return sum(
+            isinstance(a, Select)
+            and isinstance(b, Rechunk)
+            and _auto_sizing(b)
+            and any(_may_empty(a.name, index) for index in a.indexer.values())
+            for a, b in zip(nodes, nodes[1:], strict=False)
+        )
+
+    event(f"hazardous adjacencies as written: {hazards(lowered)}")
+    assert hazards(optimize(lowered, SchemaState.from_dataset(ds))) <= hazards(lowered)
 
 
 @SETTINGS
@@ -1057,14 +1112,6 @@ def test_sel_label_slice_size_is_unknown_rather_than_wrong():
     assert schema.sizes["lat"] != 0  # the under-report this replaced
 
 
-def _reads_extents(nodes):
-    """Whether any rule would consult an extent to decide this plan (see #121)."""
-    return any(
-        isinstance(a, Rechunk) and _auto_sizing(a) and isinstance(b, Select)
-        for a, b in zip(nodes, nodes[1:], strict=False)
-    )
-
-
 @SETTINGS
 @given(any_plans())
 def test_rewrites_survive_unknown_dim_sizes(case):
@@ -1076,14 +1123,9 @@ def test_rewrites_survive_unknown_dim_sizes(case):
     routinely — builder chains are generated here, so this is not a hypothetical. Every
     rule reasons about dim *names*, so blanking every size must change nothing.
 
-    **One carve-out**, and it is the only one: ``pushdown_selects_past_rechunks`` reads an
-    extent to decide whether hoisting a select would empty a dim in front of an auto-sizing
-    chunk spec (#121). Blanking may legitimately *withhold* that hop — an unknown extent is
-    read as an empty one, which is the safe direction — so equality is asked of every plan
-    the guard cannot fire on, and the withholding itself is pinned deterministically by
-    ``test_unknown_extent_is_a_barrier_at_an_auto_sizing_rechunk``. The exclusion is by the
-    adjacency the rule looks for, not by "contains a chunk", so the widening keeps testing
-    every rechunk it can.
+    No carve-out, including for the rechunk chains this now generates: the #121 guard
+    reasons about *emptiness*, which it asks the indexer rather than the schema, so
+    blanking every extent leaves even that refusal unchanged.
     """
     ds, calls = case
     plan, _ = _build_plan(ds, calls)
@@ -1094,7 +1136,6 @@ def test_rewrites_survive_unknown_dim_sizes(case):
         sizes=frozendict(dict.fromkeys(base.sizes)),  # every size -> None
     )
     lowered = to_lower_ir(plan, _dim_names(ds))
-    assume(not _reads_extents(lowered))
     assert optimize(lowered, blanked) == optimize(lowered, base)
 
 

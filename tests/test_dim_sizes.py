@@ -1,13 +1,11 @@
 """What ``SchemaState.sizes`` means, and what it is for.
 
-``sizes`` is the one stored field a rewrite may read only to *decline*. Every rule in
-``optimize`` reasons about dim *names*, with a single exception —
-``pushdown_selects_past_rechunks`` refuses to hoist a select that would empty a dim in
-front of an auto-sizing chunk spec (issue #121) — and that one reads an extent to withhold
-a hop, never to license one, counting "don't know" as empty. So a wrong size still cannot
-produce a wrong answer: there is no code path from an extent to a *different result*, only
-to a missed optimisation. ``test_rewrites_survive_unknown_dim_sizes`` pins the rest by
-blanking every extent to ``None`` and demanding byte-identical output.
+``sizes`` is the one stored field that no rewrite may read. Every rule in ``optimize``
+reasons about dim *names*, and ``test_rewrites_survive_unknown_dim_sizes`` pins that by
+blanking every extent to ``None`` and demanding byte-identical output. So a wrong size
+cannot produce a wrong answer — there is no code path from an extent to a rewrite. Even
+the one rule that reasons about *emptiness* (``pushdown_selects_past_rechunks``, issue
+#121) reads the indexer rather than the extent.
 
 Which raises the obvious question this module exists to answer: **why store extents at
 all?** Because an extent is a *checksum on the arm that produced it*. An arm's real job is

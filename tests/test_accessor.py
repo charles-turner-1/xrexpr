@@ -549,9 +549,10 @@ def test_an_emptying_select_does_not_cross_an_auto_rechunk(chunky_ds):
 
     Both halves matter. Replaying equal to eager says the plan runs at all; the order
     assertion says it runs because the rule *refused the hop*, not because dask happened to
-    tolerate it. The refusal is specific to the **mapping form** with an auto-sizing spec: a
-    uniform ``chunk("auto")`` takes a different path in dask and survives an empty dim, as do
-    ``-1``, ``None`` and any explicit size — each of which still crosses.
+    tolerate it. The refusal covers every auto-sizing spec, uniform or named — see
+    :func:`test_an_emptying_select_does_not_cross_a_uniform_auto_rechunk`, which needs a
+    tightened byte target to show it — while ``-1``, ``None`` and any explicit size still
+    cross.
     """
     ds = chunky_ds
     chain = ds.plan.chunk({"time": "auto"}).isel(lat=[])
@@ -559,6 +560,36 @@ def test_an_emptying_select_does_not_cross_an_auto_rechunk(chunky_ds):
     assert_equal(chain.collect(), ds.chunk({"time": "auto"}).isel(lat=[]).compute())
     text = chain.explain()
     assert text.index("chunk") < text.index("isel")
+
+
+@requires_dask
+def test_an_emptying_select_does_not_cross_a_uniform_auto_rechunk(chunky_ds):
+    """The same refusal for ``chunk("auto")``, which names no dim — and the crash it prevents.
+
+    Notes
+    -----
+    ``chunk("auto")`` rides in ``args`` rather than ``chunks``, and this hop was allowed
+    until the crash was measured on an array bigger than dask's byte target. There is no
+    second path: ``auto_chunks`` pins every dim below ``limit ** (1 / ndim)`` and returns
+    before it can divide, so a small enough fixture survives the bug rather than avoiding it.
+
+    Hence ``array.chunk-size``, which is doing the work a multi-hundred-megabyte fixture
+    otherwise would: at 1 kB this 1000×4 dataset is over the target, so hoisting
+    ``isel(lat=[])`` in front raises ``ZeroDivisionError`` while the eager order — which
+    rechunks full data and empties the dim afterwards — returns. The setting is the load-
+    bearing part of this test, not incidental to it.
+    """
+    import dask
+
+    ds = chunky_ds
+    with dask.config.set({"array.chunk-size": "1kB"}):
+        with pytest.raises(ZeroDivisionError):  # the divergence, if the hop were made
+            ds.isel(lat=[]).chunk("auto")
+
+        chain = ds.plan.chunk("auto").isel(lat=[])
+        assert_equal(chain.collect(), ds.chunk("auto").isel(lat=[]).compute())
+        text = chain.explain()
+        assert text.index("chunk") < text.index("isel")
 
 
 @requires_dask

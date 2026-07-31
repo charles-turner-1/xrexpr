@@ -585,8 +585,9 @@ def test_emptying_select_is_a_barrier_at_an_auto_sizing_rechunk(schema):
     -----
     Issue #121. ``"auto"`` and a byte target are resolved by *dividing* by the array's own
     extent, so hoisting ``isel(time=[])`` in front of one hands dask a zero-size array and it
-    raises ``ZeroDivisionError`` — the optimised plan failing where the eager chain runs. The
-    guard is the only place the optimiser reads an extent, and it reads it only to refuse.
+    raises ``ZeroDivisionError`` — the optimised plan failing where the eager chain runs. An
+    empty enumeration says so itself, whatever ``time``'s length was, so the guard costs the
+    optimiser no extent at all.
     """
     for spec in ("auto", "1MB"):
         plan = [_node("chunk", {"lat": spec}), _node("isel", time=[])]
@@ -601,7 +602,9 @@ def test_emptying_select_still_crosses_a_sized_rechunk(schema):
     -----
     The narrowness of the #121 guard, pinned: a fixed size is that size either way, ``-1`` is
     one block and ``None`` keeps what is there, and all three were measured to survive an
-    empty dim (xarray 2026.7.0 / dask 2026.7.1). Only the auto-sizing pair barriers.
+    empty dim (xarray 2026.7.0 / dask 2026.7.1). Only the auto-sizing pair barriers — and
+    only because dask *divides* by the extent for those two, which is a fact about the spec
+    and not about the select.
     """
     for spec in (2, -1, None):
         plan = [_node("chunk", {"lat": spec}), _node("isel", time=[])]
@@ -609,19 +612,25 @@ def test_emptying_select_still_crosses_a_sized_rechunk(schema):
         assert [n.name for n in out] == ["isel", "chunk"]
 
 
-def test_uniform_auto_still_crosses_an_emptying_select(schema):
-    """A uniform ``chunk("auto")`` crosses an emptying select, because dask sizes it elsewhere.
+def test_uniform_auto_is_a_barrier_to_an_emptying_select(schema):
+    """A uniform ``chunk("auto")`` barriers an emptying select exactly as the mapping form does.
 
     Notes
     -----
-    The uniform form names no dim, so it never reaches the taxonomy — and it takes a
-    different path in dask, one that survives an empty dim. Measured, not assumed: this is
-    why the guard asks :func:`~xrexpr.optimize._auto_sizing` about ``chunks`` rather than
-    treating every ``"auto"`` alike.
+    ``chunk("auto")`` names no dim, so it rides in ``args`` rather than ``chunks`` — but it
+    is the same request and dask resolves it down the same path, so
+    :func:`~xrexpr.optimize._auto_sizing` classifies the uniform spec through the same
+    :func:`~xrexpr.chunks.classify_chunk`. This asserted the opposite until the crash was
+    measured on an array larger than dask's byte target: below it every dim is pinned before
+    ``auto_chunks`` can divide, which is what made the small fixtures look safe.
+
+    The sized uniform forms — ``chunk()``, ``chunk(4)``, ``chunk(-1)`` — still cross, and
+    :func:`test_uniform_rechunk_forms_push_and_are_kept` is where that is pinned.
     """
-    plan = [_node("chunk", "auto"), _node("isel", time=[])]
-    out = optimize(plan, schema)
-    assert [n.name for n in out] == ["isel", "chunk"]
+    for spec in ("auto", "1MB"):
+        plan = [_node("chunk", spec), _node("isel", time=[])]
+        out = optimize(plan, schema)
+        assert [n.name for n in out] == ["chunk", "isel"]
 
 
 def test_non_emptying_select_crosses_an_auto_sizing_rechunk(schema):
@@ -630,32 +639,44 @@ def test_non_emptying_select_crosses_an_auto_sizing_rechunk(schema):
     Notes
     -----
     The hop #121 was fixed *without* giving up. Barriering every auto-sizing spec would have
-    been five lines; over 400 generated chains it would have cost four of the seventeen
-    pushes this rule makes, so the guard tests the pair instead of the node.
+    been simpler still; the guard tests the *pair* instead of the node so that the hop this
+    rule exists for keeps being made. ``slice(0, 2)`` keeps position 0 whatever ``time``'s
+    length, which is why it can be vouched for without an extent.
     """
     plan = [_node("chunk", {"lat": "auto"}), _node("isel", time=slice(0, 2))]
     out = optimize(plan, schema)
     assert [n.name for n in out] == ["isel", "chunk"]
 
 
-def test_unknown_extent_is_a_barrier_at_an_auto_sizing_rechunk(schema):
-    """With every extent blanked, the same hop is refused: unknown is read as empty.
+def test_a_mid_slice_is_a_barrier_at_an_auto_sizing_rechunk(schema):
+    """A slice that does not start at the beginning cannot be vouched for, so it is refused.
 
     Notes
     -----
-    The contract ``SchemaState.sizes`` states — a caller must treat ``None`` as "no rewrite",
-    never as size zero — applied at the one site that reads an extent. This is also what
-    ``test_rewrites_survive_unknown_dim_sizes`` now excludes: blanking may *withhold* this
-    rewrite, which is the safe direction, so the property carves the adjacency out and this
-    test covers it deterministically.
+    The cost of asking the indexer rather than the schema, stated as a test: ``slice(3, 8)``
+    empties a dim shorter than 3, and which dims are that short is exactly what the guard
+    declines to look up. Conservative in the direction that costs an optimisation — contrast
+    :func:`test_non_emptying_select_crosses_an_auto_sizing_rechunk`, where ``slice(0, 2)``
+    keeps position 0 whatever the dim's length and so still crosses.
     """
-    blanked = SchemaState(
-        variables=schema.variables,
-        coord_names=schema.coord_names,
-        sizes=frozendict(dict.fromkeys(schema.sizes)),
-    )
-    plan = [_node("chunk", {"lat": "auto"}), _node("isel", time=slice(0, 2))]
-    assert [n.name for n in optimize(plan, blanked)] == ["chunk", "isel"]
+    plan = [_node("chunk", {"lat": "auto"}), _node("isel", time=slice(3, 8))]
+    assert [n.name for n in optimize(plan, schema)] == ["chunk", "isel"]
+
+
+def test_a_sel_slice_is_a_barrier_at_an_auto_sizing_rechunk(schema):
+    """A ``sel`` slice names labels, which no positional reading can vouch for.
+
+    Notes
+    -----
+    The same exclusion ``schema._selected_size`` makes, for the same reason: with integer
+    bounds ``classify`` cannot tell ``sel(time=slice(0, 2))`` from the positional slice of
+    the same spelling, and against labels ``[100, 200]`` it selects nothing at all. So the
+    ``isel`` form of this exact slice crosses and the ``sel`` form does not.
+    """
+    plan = [_node("chunk", {"lat": "auto"}), _node("sel", time=slice(0, 2))]
+    assert [n.name for n in optimize(plan, schema)] == ["chunk", "sel"]
+    isel = [_node("chunk", {"lat": "auto"}), _node("isel", time=slice(0, 2))]
+    assert [n.name for n in optimize(isel, schema)] == ["isel", "chunk"]
 
 
 def test_rechunk_never_raises_on_a_reduced_dim(schema):
