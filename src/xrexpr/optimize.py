@@ -1036,24 +1036,23 @@ def pushdown_selects_past_rechunks(nodes: Plan, schema: SchemaState) -> Plan | N
     **The emptiness guard.** ``"auto"`` and a byte target are the two specs dask resolves by
     *dividing* by the array's own extent, so a select that empties a dim turns their answer
     into a ``ZeroDivisionError``: eagerly the rechunk sees full data and only then is the dim
-    emptied, while hoisted it is handed a zero-size array. That made the optimised plan
-    **raise where the eager chain succeeds** (issue #121) — the one way this rewrite could be
-    worse than no rewrite. So when :func:`_auto_sizing` holds, a select that
-    :func:`_may_empty` can vouch for still crosses and every other one is refused.
+    emptied, while hoisted it is handed a zero-size array, and the optimised plan **raises
+    where the eager chain succeeds** (issue #121). So when :func:`_auto_sizing` holds, only a
+    select :func:`_may_empty` can vouch for still crosses.
 
-    The guard is a fact about the **pair**, and about the two nodes alone: emptiness is a
-    property of the *indexer* (``isel(lat=[])`` empties ``lat`` however long it was), so no
-    extent is read and nothing here consults the schema. Both halves are conservative in the
-    same direction — an indexer the taxonomy cannot vouch for costs an optimisation and can
-    never change an answer.
+    The guard is a fact about the two nodes alone: emptiness is a property of the *indexer*
+    — ``isel(lat=[])`` empties ``lat`` however long it was — so nothing here reads an extent
+    or consults the schema, and an indexer the taxonomy cannot vouch for costs an
+    optimisation rather than an answer.
 
-    Repairing the hop instead of refusing it does not work, and was measured rather than
-    reasoned about: injecting ``"auto"`` for the emptied dim — xarray's own fix in
-    `pydata/xarray#11486 <https://github.com/pydata/xarray/pull/11486>`_ — still raises,
-    because ``dask.array.core.auto_chunks`` pins the empty dim to ``(0,)`` and *recurses*,
-    and on the second pass it is no longer ``"auto"`` and so poisons ``largest_block``.
-    Promoting every dim to ``"auto"`` fails the same way above ``limit ** (1 / ndim)``: a
-    ``300x0x300`` dataset, zero bytes of data, raises on xarray 2026.7.0 / dask 2026.7.1.
+    The hop is refused rather than repaired because **no chunk spec repairs it**. Naming the
+    emptied dim ``"auto"`` — xarray's own fix in `pydata/xarray#11486
+    <https://github.com/pydata/xarray/pull/11486>`_ — does not help here: dask's
+    ``auto_chunks`` pins a zero-length auto dim to ``(0,)`` and *recurses*, and on the second
+    pass it is no longer ``"auto"``, so it lands in ``largest_block`` as a zero and the
+    division dies anyway. Promoting *every* dim to ``"auto"`` fails the same way once any dim
+    exceeds ``limit ** (1 / ndim)``: a ``300x0x300`` dataset, zero bytes of data, raises on
+    xarray 2026.7.0 / dask 2026.7.1.
 
     Unlike :func:`pushdown_selects` this never raises: a rechunk cannot make a select
     unreplayable, only slower. One hop per call.
@@ -1179,13 +1178,12 @@ def _auto_sizing(node: Rechunk) -> bool:
 
     A ``match`` closed with ``assert_never``, so a new variant fails mypy here until someone
     says whether dask sizes it from the array. The **uniform** form is asked the same
-    question through the same :func:`~xrexpr.chunks.classify_chunk`, since ``chunk("auto")``
-    is the identical request spelled without a dim name — it names none, so it lives in
-    ``args`` rather than ``chunks``, but dask resolves it down the same path and it raises on
-    an empty dim just as the mapping form does once the array is larger than the byte target.
-    (That the small fixtures this was first measured on survived it is a fact about their
-    size, not about a second path: ``auto_chunks`` pins every dim below
-    ``limit ** (1 / ndim)`` and returns before it can divide.)
+    question through the same :func:`~xrexpr.chunks.classify_chunk`: ``chunk("auto")`` is the
+    identical request spelled without a dim name, so it lives in ``args`` rather than
+    ``chunks``, and it raises on an empty dim exactly as the mapping form does. That it looks
+    safe on a small array is arithmetic, not a second code path — ``auto_chunks`` pins every
+    dim below ``limit ** (1 / ndim)`` and returns before it can divide — so a test for this
+    has to state a byte target the fixture exceeds.
     """
     if node.args and isinstance(classify_chunk(node.args[0]), Auto | ByteSize):
         return True
@@ -1219,11 +1217,10 @@ def _may_empty(name: Literal["isel", "sel"], index: Indexer) -> bool:
 
     Notes
     -----
-    The third policy site over a value sum type, and what lets the #121 guard be a fact
-    about the two nodes rather than about the schema: whether ``isel(lat=[])`` empties
-    ``lat`` is settled by the indexer itself, however long ``lat`` was. So the guard reads
-    no extent, and :class:`~xrexpr.schema.SchemaState`'s "no rewrite reads a size" holds
-    unqualified.
+    The third policy site over a value sum type, and what keeps the #121 guard off the
+    schema: whether ``isel(lat=[])`` empties ``lat`` is settled by the indexer itself,
+    however long ``lat`` was, so :class:`~xrexpr.schema.SchemaState`'s "no rewrite reads a
+    size" holds unqualified.
 
     The direction is the whole argument: this answers "may", so an indexer it cannot vouch
     for costs an optimisation and never an answer. Three variants can be vouched for

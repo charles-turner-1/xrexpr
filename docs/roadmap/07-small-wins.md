@@ -317,12 +317,10 @@ Only `pushdown_projections` exercises the middle clause today. A new rule may re
 first and third; it may not rely on failures being preserved.
 
 The third clause has been violated exactly once: issue #121, where hoisting an emptying
-select in front of an auto-sizing `chunk` handed dask a zero-size array to divide by. Note
-the shape of the fix — the hop is *refused*, not repaired, because no chunk spec makes
-dask's `auto_chunks` survive a zero-length dim — and the shape of the guard, which asks the
-**indexer** whether it may empty a dim rather than asking the schema how long that dim is.
-Introducing an error is the clause with no escape hatch, so a rule that cannot prove it
-avoids one must decline to fire.
+select in front of an auto-sizing `chunk` handed dask a zero-size array to divide by. The
+fix *refuses* the hop rather than repairing it, because no chunk spec makes dask's
+`auto_chunks` survive a zero-length dim. Introducing an error is the clause with no escape
+hatch, so a rule that cannot prove it avoids one must decline to fire.
 
 ### What triggers it
 

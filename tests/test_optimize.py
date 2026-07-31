@@ -586,8 +586,8 @@ def test_emptying_select_is_a_barrier_at_an_auto_sizing_rechunk(schema):
     Issue #121. ``"auto"`` and a byte target are resolved by *dividing* by the array's own
     extent, so hoisting ``isel(time=[])`` in front of one hands dask a zero-size array and it
     raises ``ZeroDivisionError`` — the optimised plan failing where the eager chain runs. An
-    empty enumeration says so itself, whatever ``time``'s length was, so the guard costs the
-    optimiser no extent at all.
+    empty enumeration says so itself, whatever ``time``'s length is, so the guard needs no
+    extent to refuse.
     """
     for spec in ("auto", "1MB"):
         plan = [_node("chunk", {"lat": spec}), _node("isel", time=[])]
@@ -602,9 +602,7 @@ def test_emptying_select_still_crosses_a_sized_rechunk(schema):
     -----
     The narrowness of the #121 guard, pinned: a fixed size is that size either way, ``-1`` is
     one block and ``None`` keeps what is there, and all three were measured to survive an
-    empty dim (xarray 2026.7.0 / dask 2026.7.1). Only the auto-sizing pair barriers — and
-    only because dask *divides* by the extent for those two, which is a fact about the spec
-    and not about the select.
+    empty dim (xarray 2026.7.0 / dask 2026.7.1). Only the auto-sizing pair barriers.
     """
     for spec in (2, -1, None):
         plan = [_node("chunk", {"lat": spec}), _node("isel", time=[])]
@@ -618,14 +616,10 @@ def test_uniform_auto_is_a_barrier_to_an_emptying_select(schema):
     Notes
     -----
     ``chunk("auto")`` names no dim, so it rides in ``args`` rather than ``chunks`` — but it
-    is the same request and dask resolves it down the same path, so
-    :func:`~xrexpr.optimize._auto_sizing` classifies the uniform spec through the same
-    :func:`~xrexpr.chunks.classify_chunk`. This asserted the opposite until the crash was
-    measured on an array larger than dask's byte target: below it every dim is pinned before
-    ``auto_chunks`` can divide, which is what made the small fixtures look safe.
-
-    The sized uniform forms — ``chunk()``, ``chunk(4)``, ``chunk(-1)`` — still cross, and
-    :func:`test_uniform_rechunk_forms_push_and_are_kept` is where that is pinned.
+    is the same request, so :func:`~xrexpr.optimize._auto_sizing` classifies it through the
+    same :func:`~xrexpr.chunks.classify_chunk`. The sized uniform forms — ``chunk()``,
+    ``chunk(4)``, ``chunk(-1)`` — still cross, pinned by
+    :func:`test_uniform_rechunk_forms_push_and_are_kept`.
     """
     for spec in ("auto", "1MB"):
         plan = [_node("chunk", spec), _node("isel", time=[])]
@@ -638,10 +632,9 @@ def test_non_emptying_select_crosses_an_auto_sizing_rechunk(schema):
 
     Notes
     -----
-    The hop #121 was fixed *without* giving up. Barriering every auto-sizing spec would have
-    been simpler still; the guard tests the *pair* instead of the node so that the hop this
-    rule exists for keeps being made. ``slice(0, 2)`` keeps position 0 whatever ``time``'s
-    length, which is why it can be vouched for without an extent.
+    Why the guard tests the *pair* rather than barriering every auto-sizing rechunk: the hop
+    this rule exists for keeps being made. ``slice(0, 2)`` keeps position 0 whatever
+    ``time``'s length, which is what lets it be vouched for without an extent.
     """
     plan = [_node("chunk", {"lat": "auto"}), _node("isel", time=slice(0, 2))]
     out = optimize(plan, schema)
@@ -653,9 +646,9 @@ def test_a_mid_slice_is_a_barrier_at_an_auto_sizing_rechunk(schema):
 
     Notes
     -----
-    The cost of asking the indexer rather than the schema, stated as a test: ``slice(3, 8)``
-    empties a dim shorter than 3, and which dims are that short is exactly what the guard
-    declines to look up. Conservative in the direction that costs an optimisation — contrast
+    The guard's cost, stated as a test: ``slice(3, 8)`` empties a dim shorter than 3, and
+    how long that dim is is exactly what the guard declines to look up. Conservative in the
+    direction that costs an optimisation — contrast
     :func:`test_non_emptying_select_crosses_an_auto_sizing_rechunk`, where ``slice(0, 2)``
     keeps position 0 whatever the dim's length and so still crosses.
     """

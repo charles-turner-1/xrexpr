@@ -572,8 +572,8 @@ def _weighted(consumes, weight_dims, weights):
         ),
         # weights carrying a dim *one* variable has and another lacks: ``temperature``
         # already spans ``time`` while ``elevation`` does not, and the broadcast reaches
-        # both. The mint is per variable, not per dataset -- issue #125, where testing the
-        # dim against the dataset skipped ``elevation`` because a sibling still carried it.
+        # both. The mint is per variable, not per dataset -- testing the dim against the
+        # dataset would skip ``elevation`` because a sibling still carries it (#125).
         (
             lambda ds: xr.DataArray(
                 [1.0, 2.0, 3.0, 4.0], dims="time", coords={"time": ds["time"]}

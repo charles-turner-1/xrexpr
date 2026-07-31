@@ -111,10 +111,10 @@ class SchemaState:
     *size zero*. Under-reporting a size is the unsafe direction, because it is the one
     a rewrite could act on. No optimiser rule reads a size at all — every rule reasons
     about dim *names*, and ``test_rewrites_survive_unknown_dim_sizes`` pins that by
-    blanking every size and demanding the same output. The one rule that had to reason
-    about *emptiness* — ``pushdown_selects_past_rechunks``, whose #121 guard refuses to
-    hoist a select in front of an auto-sizing chunk spec — asks the **indexer** instead,
-    which answers exactly and without an extent.
+    blanking every size and demanding the same output. The one rule that reasons about
+    *emptiness* — ``pushdown_selects_past_rechunks``, whose #121 guard refuses to hoist a
+    select in front of an auto-sizing chunk spec — asks the **indexer**, which answers
+    exactly and without an extent.
     """
 
     variables: frozendict[Hashable, tuple[Hashable, ...]] = field(
@@ -465,12 +465,11 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
                     # for.
                     #
                     # Minted per variable, not per dataset: the broadcast is ``dot``'s, so
-                    # it reaches each variable on its own terms. Skipping the mint when some
-                    # *other* variable already carried the dim under-reported ``elevation``
-                    # after ``weighted(w(time)).mean("lat")`` on a dataset that also held
-                    # ``temperature(time, lat)`` -- issue #125. ``_minted`` is per-variable
-                    # and idempotent, so handing it the whole set is both correct and the
-                    # simpler statement.
+                    # it reaches each variable on its own terms, and presence in *some*
+                    # variable is not presence in each -- skipping the mint on that test
+                    # leaves a variable short of a dim a sibling happens to carry (#125).
+                    # ``_minted`` is per-variable and idempotent, so handing it the whole
+                    # set is both correct and the simpler statement.
                     from_weights = frozenset(weighted.weight_dims) - named
                     variables = _minted(variables, coord_names, from_weights)
                     for dim in from_weights:

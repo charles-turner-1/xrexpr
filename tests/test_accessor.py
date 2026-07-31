@@ -544,15 +544,14 @@ def test_an_emptying_select_does_not_cross_an_auto_rechunk(chunky_ds):
     -----
     ``isel(lat=[])`` keeps ``lat`` at length 0. Eagerly the rechunk runs first, on data that
     is still full, and only then is the dim emptied; hoisted, it would be handed a zero-size
-    array and asked to size ``time``'s blocks against it — ``ZeroDivisionError``, the one
-    case where the optimised plan raised where the eager chain succeeds (issue #121).
+    array and asked to size ``time``'s blocks against it — ``ZeroDivisionError`` where the
+    eager chain succeeds (issue #121).
 
     Both halves matter. Replaying equal to eager says the plan runs at all; the order
     assertion says it runs because the rule *refused the hop*, not because dask happened to
     tolerate it. The refusal covers every auto-sizing spec, uniform or named — see
-    :func:`test_an_emptying_select_does_not_cross_a_uniform_auto_rechunk`, which needs a
-    tightened byte target to show it — while ``-1``, ``None`` and any explicit size still
-    cross.
+    :func:`test_an_emptying_select_does_not_cross_a_uniform_auto_rechunk` — while ``-1``,
+    ``None`` and any explicit size still cross.
     """
     ds = chunky_ds
     chain = ds.plan.chunk({"time": "auto"}).isel(lat=[])
@@ -568,16 +567,14 @@ def test_an_emptying_select_does_not_cross_a_uniform_auto_rechunk(chunky_ds):
 
     Notes
     -----
-    ``chunk("auto")`` rides in ``args`` rather than ``chunks``, and this hop was allowed
-    until the crash was measured on an array bigger than dask's byte target. There is no
-    second path: ``auto_chunks`` pins every dim below ``limit ** (1 / ndim)`` and returns
-    before it can divide, so a small enough fixture survives the bug rather than avoiding it.
+    ``chunk("auto")`` rides in ``args`` rather than ``chunks``, but it is the same request
+    and carries the same hazard. It only *looks* safe on a small array: ``auto_chunks`` pins
+    every dim below ``limit ** (1 / ndim)`` and returns before it can divide.
 
-    Hence ``array.chunk-size``, which is doing the work a multi-hundred-megabyte fixture
-    otherwise would: at 1 kB this 1000×4 dataset is over the target, so hoisting
-    ``isel(lat=[])`` in front raises ``ZeroDivisionError`` while the eager order — which
-    rechunks full data and empties the dim afterwards — returns. The setting is the load-
-    bearing part of this test, not incidental to it.
+    So ``array.chunk-size`` is doing the work a multi-hundred-megabyte fixture otherwise
+    would — at 1 kB this 1000×4 dataset is over the target, and hoisting ``isel(lat=[])``
+    in front raises where the eager order returns. The setting is load-bearing, not
+    incidental: without it this test passes against a rule that makes the hop.
     """
     import dask
 
@@ -598,9 +595,9 @@ def test_a_harmless_select_still_crosses_an_auto_rechunk(chunky_ds):
 
     Notes
     -----
-    The other side of :func:`test_an_emptying_select_does_not_cross_an_auto_rechunk`, and
-    the reason #121 was fixed with an emptiness guard rather than by barriering every
-    auto-sizing spec: the hop this rule exists for is still made.
+    The other side of :func:`test_an_emptying_select_does_not_cross_an_auto_rechunk`: the
+    guard tests the pair rather than barriering every auto-sizing spec, so the hop this rule
+    exists for is still made.
     """
     ds = chunky_ds
     chain = ds.plan.chunk({"time": "auto"}).isel(lat=slice(0, 2))

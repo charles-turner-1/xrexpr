@@ -637,10 +637,9 @@ def _rechunks(draw, obj):
         dim is non-empty — the caller checks, because an auto-sizing spec divides by the
         largest block and so raises ``ZeroDivisionError`` on an array that already has a
         zero-length dim. Empty selections are generated on purpose here, so that
-        combination has to be avoided rather than assumed away. It is chunking an
-        *already*-empty dataset that is skipped, which eager xarray cannot do either;
-        emptying a dim in *front* of a chunk is exactly what issue #121 is about and is
-        drawn freely.
+        combination has to be avoided rather than assumed away. Only chunking an
+        *already*-empty dataset is skipped, which eager xarray cannot do either; emptying a
+        dim in *front* of a chunk is drawn freely.
 
     Returns
     -------
@@ -862,14 +861,12 @@ def test_optimised_plan_matches_eager_under_a_tight_chunk_target(case):
     """The headline property again, with dask's byte target small enough to make it bite.
 
     The generated dims are 1–5 long, so against dask's 128 MB default every ``"auto"`` dim
-    is pinned by ``auto_chunks`` before it can divide and issue #121 cannot be reached: the
-    chains that empty a dim in front of an auto-sizing rechunk replay green whether the
-    guard is there or not. A 1 kB target puts those same tiny datasets *over* the limit,
-    which is what makes the hazard reachable — the crash was never about a dataset being
-    large in absolute terms, only about it exceeding ``limit ** (1 / ndim)``.
-
-    Cheaper than the alternative, which is a fixture of a few hundred megabytes, and more
-    honest: the setting names the condition the bug actually depends on.
+    is pinned by ``auto_chunks`` before it can divide, and the chains that empty a dim in
+    front of an auto-sizing rechunk replay green whether the guard is there or not. A 1 kB
+    target puts those same tiny datasets *over* the limit, which is what makes the hazard
+    reachable: the crash depends on a dim exceeding ``limit ** (1 / ndim)``, not on the
+    dataset being large. Cheaper than a fixture of a few hundred megabytes, and it names
+    the condition rather than burying it in a shape.
     """
     import dask
 
@@ -886,7 +883,7 @@ def test_no_rule_lands_an_emptying_select_before_an_auto_sizing_rechunk(case):
     ``pushdown_selects_past_rechunks`` refuses to build this pair, but refusing is only half
     the claim: any rule that reorders nodes could land one there, and the plan would raise
     where the eager chain runs. So the assertion is about the optimised plan as a whole,
-    and it is quantified over every generated chain rather than over the rule's own inputs.
+    quantified over every generated chain rather than over one rule's inputs.
 
     A chain the *user* wrote that way is left alone — replaying it faithfully means raising
     exactly as eager does — so those adjacencies are subtracted rather than forbidden.
@@ -1123,9 +1120,8 @@ def test_rewrites_survive_unknown_dim_sizes(case):
     routinely — builder chains are generated here, so this is not a hypothetical. Every
     rule reasons about dim *names*, so blanking every size must change nothing.
 
-    No carve-out, including for the rechunk chains this now generates: the #121 guard
-    reasons about *emptiness*, which it asks the indexer rather than the schema, so
-    blanking every extent leaves even that refusal unchanged.
+    Unqualified, rechunk chains included: the #121 guard reasons about *emptiness*, which
+    it asks the indexer, so blanking every extent leaves even that refusal unchanged.
     """
     ds, calls = case
     plan, _ = _build_plan(ds, calls)
