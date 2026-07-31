@@ -12,8 +12,8 @@ The union tracks structural **kinds**, not xarray methods: ``mean``/``std``/``su
 all one :class:`Reduce`, told apart by ``name`` (the method table lives in
 ``operations.py``). A new *variant* is earned only by genuinely new structural data.
 Kinds are usually settled by the method name, but not always: ``__getitem__`` is a
-:class:`Project` when its key names variables and an :class:`Opaque` otherwise, so the
-table can't decide it — the shape of the *key* does.
+:class:`Project` when its key names variables and an :class:`Opaque` otherwise, so its
+row in the table only *nominates* the kind — the shape of the *key* confirms it.
 
 ``to_opnode`` (in ``schema.py``) builds these at record time; ``lower.py`` translates
 that recording into what it *means*, the optimiser (``optimize.py``) rewrites the
@@ -253,9 +253,10 @@ class Project:
 
     Notes
     -----
-    The one op recognised by the *shape of its key* rather than by a method name:
-    ``__getitem__`` isn't in ``OP_TABLE`` because the same call is a projection only
-    when its key names variables (a boolean-mask key stays :class:`Opaque`).
+    The one op recognised by the *shape of its key* as well as by a method name:
+    ``__getitem__``'s ``OP_TABLE`` row is a :class:`~xrexpr.operations.ProjectSpec`, but
+    the same call is a projection only when its key names variables (a boolean-mask key
+    stays :class:`Opaque`), so ``to_opnode`` confirms the nomination with a guard.
 
     ``single`` — whether the call returns a ``DataArray`` (a bare name) rather than a
     ``Dataset`` (a list of them) — is *derived* from the verbatim key, never stored, so
@@ -389,9 +390,10 @@ class ContextOpen:
         object.__setattr__(self, "kwargs", frozendict(self.kwargs))
 
 
-#: The builder-returning methods, as a type. The runtime set lives in
-#: ``operations.CONTEXT_METHODS``; a test pins the two against each other, so neither can
-#: drift from the other or from ``xr.Dataset``.
+#: The builder-returning methods — **the** list of them, in the form mypy reads. The
+#: runtime rows live in ``operations`` as ``ContextSpec``s in ``OP_TABLE``, but they are
+#: built by ``get_args`` on this ``Literal`` rather than written out a second time, so the
+#: type and the dispatch cannot disagree. A test pins the names against ``xr.Dataset``.
 ContextOpenName = Literal[
     "groupby",
     "groupby_bins",

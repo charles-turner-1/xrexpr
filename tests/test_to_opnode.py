@@ -353,5 +353,5 @@ def test_to_opnode_then_apply_schema_threads(schema):
 
 
 def test_returns_the_matching_variant(schema):
-    """``to_opnode`` returns the ``Op`` variant its ``OP_TABLE`` kind selects."""
+    """``to_opnode`` returns the ``Op`` variant its ``OP_TABLE`` spec selects."""
     assert isinstance(to_opnode("mean", ("lat",), {}), Reduce)
