@@ -21,18 +21,38 @@ normalises a raw recorded call into that ``Op`` variant.
 
 from collections.abc import Hashable, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Final, Literal, cast
+from typing import Any, Literal
 
 import xarray as xr
 from frozendict import frozendict
 from typing_extensions import assert_never
 
 from xrexpr.indexers import Indexer
-from xrexpr.ir import (ALL_DIMS, AllDims, ContextOpen, DimSet, FluentOp,
-                       GroupedReduce, LoweredOp, Opaque, Project, Rechunk,
-                       Reduce, Scan, Select, WeightedReduce, WindowedReduce)
-from xrexpr.operations import (ContextSpec, ProjectSpec, RechunkSpec,
-                               ReduceSpec, ScanSpec, SelectSpec)
+from xrexpr.ir import (
+    ALL_DIMS,
+    AllDims,
+    ContextOpen,
+    DimSet,
+    FluentOp,
+    GroupedReduce,
+    LoweredOp,
+    Opaque,
+    Project,
+    Rechunk,
+    Reduce,
+    Scan,
+    Select,
+    WeightedReduce,
+    WindowedReduce,
+)
+from xrexpr.operations import (
+    ContextSpec,
+    ProjectSpec,
+    RechunkSpec,
+    ReduceSpec,
+    ScanSpec,
+    SelectSpec,
+)
 from xrexpr.operations import spec as op_spec
 
 __all__ = ["SchemaState", "apply_schema", "resolve_dims", "to_opnode"]
