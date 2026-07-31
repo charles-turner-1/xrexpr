@@ -52,7 +52,7 @@ import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
 from xrexpr.ir import ContextOpen, Opaque
 from xrexpr.lower import Call as Lowered
 from xrexpr.lower import emit, to_lower_ir
-from xrexpr.operations import CONTEXT_METHODS, OP_TABLE
+from xrexpr.operations import CONTEXT_METHODS, OP_TABLE, ReduceSpec
 from xrexpr.optimize import optimize
 from xrexpr.schema import SchemaState, apply_schema, to_opnode
 
@@ -61,7 +61,9 @@ from xrexpr.schema import SchemaState, apply_schema, to_opnode
 # because its node is untrustworthy — the builder closers below are generated as
 # ``name(**spec)`` and have nowhere to put a function.
 REDUCE_NAMES = tuple(
-    sorted(n for n, s in OP_TABLE.items() if s.kind == "reduce" and n != "reduce")
+    sorted(
+        n for n, s in OP_TABLE.items() if isinstance(s, ReduceSpec) and n != "reduce"
+    )
 )
 
 #: The function generated ``.reduce`` calls pass. ``np.mean`` deliberately: the

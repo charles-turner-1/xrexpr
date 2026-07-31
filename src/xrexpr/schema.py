@@ -28,25 +28,11 @@ from frozendict import frozendict
 from typing_extensions import assert_never
 
 from xrexpr.indexers import Indexer
-from xrexpr.ir import (
-    ALL_DIMS,
-    AllDims,
-    ContextOpen,
-    ContextOpenName,
-    DimSet,
-    FluentOp,
-    GroupedReduce,
-    LoweredOp,
-    Opaque,
-    Project,
-    Rechunk,
-    Reduce,
-    Scan,
-    Select,
-    WeightedReduce,
-    WindowedReduce,
-)
-from xrexpr.operations import CONTEXT_METHODS
+from xrexpr.ir import (ALL_DIMS, AllDims, ContextOpen, DimSet, FluentOp,
+                       GroupedReduce, LoweredOp, Opaque, Project, Rechunk,
+                       Reduce, Scan, Select, WeightedReduce, WindowedReduce)
+from xrexpr.operations import (ContextSpec, ProjectSpec, RechunkSpec,
+                               ReduceSpec, ScanSpec, SelectSpec)
 from xrexpr.operations import spec as op_spec
 
 __all__ = ["SchemaState", "apply_schema", "resolve_dims", "to_opnode"]
@@ -738,88 +724,92 @@ def to_opnode(
     :data:`~xrexpr.ir.ALL_DIMS` instead of an eagerly expanded dim set, leaving the
     expansion to a reader whose schema is exact.
 
+    One ``match`` over the :data:`~xrexpr.operations.OpSpec` the name is tabulated as,
+    closed with ``assert_never``: the spec *is* the kind, so a variant added to the table
+    without an arm here is a type error rather than a call quietly recorded as
+    :class:`~xrexpr.ir.Opaque`. Each spec carries its name already typed as the
+    ``Literal`` its ``Op`` counterpart demands, so no ``cast`` stands between the lookup
+    and the constructor.
+
     - **reduce** (``mean``/``sum``/...): the dim spec — positional (``mean("lat")``),
       keyword (``mean(dim="lat")``) or tuple (``mean(("lat", "lon"))``) — collapses to
       one ``consumes`` frozenset; a **no-dim ``mean()`` consumes** :data:`~xrexpr.ir.ALL_DIMS`,
       which is what fixes the empty-dim reorder bug (``ds.mean().isel(...)``). *Which*
-      positional argument holds the spec is read from :data:`_DIM_ARG_POSITION`, because
-      ``.reduce(func, dim)`` puts a **function** first; and ``keepdims=True`` records
-      :class:`~xrexpr.ir.Opaque`, since the "reduced" dims survive at size 1 and no
-      ``consumes`` would be true (see the guard in the code).
+      positional argument holds the spec is the spec's own
+      :attr:`~xrexpr.operations.ReduceSpec.dim_arg`, because ``.reduce(func, dim)`` puts
+      a **function** first; and ``keepdims=True`` records :class:`~xrexpr.ir.Opaque`,
+      since the "reduced" dims survive at size 1 and no ``consumes`` would be true (see
+      the guard in the code).
     - **select** (``isel``/``sel``): the indexer (a positional dict and/or kwargs,
       minus option kwargs like ``drop``) becomes ``indexer``; a dim given a *scalar*
       index is dropped and so also lands in ``consumes`` (a slice/list/array keeps it).
     - **project** (``ds["tas"]`` / ``ds[["tas", "pr"]]``): the key's variable names
-      become ``variables``. This is the one kind the ``OP_TABLE`` can't settle —
-      ``__getitem__`` is a projection only when its key *names variables*, so a
-      mask-style key (a boolean ``DataArray``, a dict) stays ``Opaque``.
+      become ``variables``. This is the one kind the table only *nominates* —
+      ``__getitem__`` is a projection only when its key *names variables* — so it is the
+      one **guarded** arm, and a mask-style key (a boolean ``DataArray``, a dict) falls
+      past the guard to ``Opaque``.
     - **rechunk** (``chunk``): the *mapping* form (a positional dict and/or dim kwargs,
       minus option kwargs like ``token``) becomes ``chunks``. The uniform forms
       (``chunk()``, ``chunk(100)``, ``chunk("auto")``) name no dim, so ``chunks`` is
       empty and the spec stays in ``args``.
     - **context opener** (``groupby``/``rolling``/``weighted``/...): a
-      :class:`~xrexpr.ir.ContextOpen`, which says only *a context opens here*. Checked
-      before the table, and the one kind whose meaning this function deliberately does
-      not settle — the call is half an operation, and the pair is
-      ``lower.to_lower_ir``'s to read.
+      :class:`~xrexpr.ir.ContextOpen`, which says only *a context opens here*. The one
+      kind whose meaning this function deliberately does not settle — the call is half an
+      operation, and the pair is ``lower.to_lower_ir``'s to read.
     - **scan** / untabulated ops: no dims resolved (name/args/kwargs only).
 
     ``args``/``kwargs`` are kept verbatim for faithful replay; ``consumes``/``indexer``
-    are the derived metadata the optimiser reasons about. The ``OP_TABLE`` kind selects
-    the variant; a ``Select``/``Scan`` name is ``cast`` to its ``Literal`` because the
-    table guarantees it is one of the closed set (the ``Literal`` still guards
-    hand-written construction elsewhere).
+    are the derived metadata the optimiser reasons about.
     """
-    op = op_spec(name)
-    kind = op.kind if op is not None else "opaque"
     kw = frozendict(kwargs)
 
-    if name in CONTEXT_METHODS:
-        # Decidable per-call even though what it *means* is not: a builder-returning
-        # method opens a context whatever follows it. Pairing is lowering's job.
-        return ContextOpen(
-            name=cast(ContextOpenName, name),
-            args=args,
-            kwargs=kw,
-        )
-    if kind == "reduce":
-        if kwargs.get("keepdims", False):
-            # ``keepdims=True`` *keeps* every reduced dim at size 1, so no ``Reduce`` this
-            # function could build would be honest: neither a named ``consumes`` nor
-            # ``ALL_DIMS`` describes it, and an empty one is worse than either (it empties
-            # ``blocks``, so a select hops in front and the replay raises). Refusing is the
-            # house posture for a call we don't model; ``07-small-wins.md`` §9 (#117) specs
-            # the modelling, whose shape is ``WindowedReduce``'s.
+    match op_spec(name):
+        case ReduceSpec(dim_arg=position):
+            if kwargs.get("keepdims", False):
+                # ``keepdims=True`` *keeps* every reduced dim at size 1, so no ``Reduce``
+                # this function could build would be honest: neither a named ``consumes``
+                # nor ``ALL_DIMS`` describes it, and an empty one is worse than either (it
+                # empties ``blocks``, so a select hops in front and the replay raises).
+                # Refusing is the house posture for a call we don't model;
+                # ``07-small-wins.md`` §9 (#117) specs the modelling, whose shape is
+                # ``WindowedReduce``'s.
+                return Opaque(name=name, args=args, kwargs=kw)
+            return Reduce(
+                name=name,
+                args=args,
+                kwargs=kw,
+                consumes=_reduce_dims(args, kwargs, position),
+            )
+        case SelectSpec(name=select):
+            return Select(
+                name=select,
+                args=args,
+                kwargs=kw,
+                indexer=_select_indexer(args, kwargs),
+            )
+        case ScanSpec(name=scan):
+            return Scan(name=scan, args=args, kwargs=kw)
+        case RechunkSpec(name=rechunk):
+            return Rechunk(
+                name=rechunk,
+                args=args,
+                kwargs=kw,
+                chunks=_chunk_spec(args, kwargs),
+            )
+        case ContextSpec(name=opener):
+            # Decidable per-call even though what it *means* is not: a builder-returning
+            # method opens a context whatever follows it. Pairing is lowering's job.
+            return ContextOpen(name=opener, args=args, kwargs=kw)
+        case ProjectSpec(name=getitem) if (
+            variables := _projected_names(args)
+        ) is not None:
+            return Project(name=getitem, args=args, kwargs=kw, variables=variables)
+        case ProjectSpec() | None:
+            # A ``__getitem__`` whose key names no variable (a mask, a dict), or a method
+            # with no row at all: both are replayed verbatim and never reordered.
             return Opaque(name=name, args=args, kwargs=kw)
-        return Reduce(
-            name=name,
-            args=args,
-            kwargs=kw,
-            consumes=_reduce_dims(name, args, kwargs),
-        )
-    if kind == "select":
-        return Select(
-            name=cast(Literal["isel", "sel"], name),
-            args=args,
-            kwargs=kw,
-            indexer=_select_indexer(args, kwargs),
-        )
-    if kind == "scan":
-        return Scan(
-            name=cast(Literal["cumsum", "cumprod", "diff"], name),
-            args=args,
-            kwargs=kw,
-        )
-    if kind == "rechunk":
-        return Rechunk(
-            name=cast(Literal["chunk"], name),
-            args=args,
-            kwargs=kw,
-            chunks=_chunk_spec(args, kwargs),
-        )
-    if name == "__getitem__" and (variables := _projected_names(args)) is not None:
-        return Project(name="__getitem__", args=args, kwargs=kw, variables=variables)
-    return Opaque(name=name, args=args, kwargs=kw)
+        case unreachable:
+            assert_never(unreachable)
 
 
 def _projected_names(args: tuple[Any, ...]) -> tuple[Hashable, ...] | None:
@@ -857,27 +847,21 @@ def _projected_names(args: tuple[Any, ...]) -> tuple[Hashable, ...] | None:
     return None
 
 
-#: Where each reduction's dim spec sits among its **positional** arguments. Reductions
-#: take ``dim`` first, so the default is 0; ``Dataset.reduce`` is
-#: ``reduce(func, dim, ...)``, whose first positional is the *function*. Reading that as a
-#: dim spec is what made ``ds.reduce(np.mean, "time")`` record a nonsense ``consumes``
-#: (#96). Keyed by method name rather than special-cased inline so a second such signature
-#: is a table entry.
-_DIM_ARG_POSITION: Final[frozendict[str, int]] = frozendict({"reduce": 1})
-
-
-def _reduce_dims(name: str, args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> DimSet:
+def _reduce_dims(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any], position: int
+) -> DimSet:
     """Parse the dims a reduction removes out of its call.
 
     Parameters
     ----------
-    name : str
-        The method name, which settles *where* the dim spec sits among ``args`` — see
-        :data:`_DIM_ARG_POSITION`.
     args : tuple
         The reduction's positional arguments.
     kwargs : Mapping
         The reduction's keyword arguments, where a ``dim=`` spec takes precedence.
+    position : int
+        Where the dim spec sits among ``args`` — the reduction's
+        :attr:`~xrexpr.operations.ReduceSpec.dim_arg`, which is 0 for every reduction but
+        ``.reduce``, whose first positional is a *function*.
 
     Returns
     -------
@@ -896,7 +880,6 @@ def _reduce_dims(name: str, args: tuple[Any, ...], kwargs: Mapping[str, Any]) ->
     could give: the dims survive at size 1, so neither a named ``consumes`` nor
     ``ALL_DIMS`` describes the call. :func:`to_opnode` refuses it outright instead.
     """
-    position = _DIM_ARG_POSITION.get(name, 0)
     if "dim" in kwargs:
         dim = kwargs["dim"]
     elif len(args) > position:
