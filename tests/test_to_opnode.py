@@ -105,6 +105,79 @@ def test_reduce_keeps_non_dim_kwargs_verbatim(schema):
     assert node.kwargs == frozendict({"skipna": True})
 
 
+# --- ``.reduce``, whose first positional is a function ----------------------------
+#
+# ``Dataset.reduce(func, dim, ...)`` is the one tabulated reduction that does not take its
+# dim spec first. Reading ``args[0]`` as one recorded the *function* as a dim (#96) -- a
+# node whose ``consumes`` was nonsense, and a written claim that was untrue.
+
+
+def test_reduce_method_reads_its_dim_from_the_second_positional(schema):
+    """``.reduce(func, "lat")`` consumes ``lat``: the dim spec is second, the function first."""
+    node = to_opnode("reduce", (sum, "lat"), {})
+    assert isinstance(node, Reduce)
+    assert node.consumes == frozenset({"lat"})
+    assert node.args == (sum, "lat")  # verbatim, function included, for replay
+
+
+def test_reduce_method_keyword_dim(schema):
+    """``.reduce(func, dim="lat")`` resolves the same way; the kwarg spelling was never affected."""
+    node = to_opnode("reduce", (sum,), {"dim": "lat"})
+    assert node.consumes == frozenset({"lat"})
+
+
+def test_reduce_method_tuple_dims(schema):
+    """``.reduce(func, ("lat", "lon"))`` collapses to both dims, as any other spelling does."""
+    node = to_opnode("reduce", (sum, ("lat", "lon")), {})
+    assert node.consumes == frozenset({"lat", "lon"})
+
+
+def test_bare_reduce_method_consumes_all_dims_symbolically(schema):
+    """``.reduce(func)`` names no dim, so it consumes ``ALL_DIMS`` like any other bare reduce.
+
+    Notes
+    -----
+    The regression this guards: with the dim read off ``args[0]``, the lone function
+    argument made the call look like a *named* reduce over ``frozenset({func})`` rather
+    than a bare one -- the empty-dim reorder bug, reintroduced through a side door.
+    """
+    node = to_opnode("reduce", (sum,), {})
+    assert node.consumes is ALL_DIMS
+
+
+# --- ``keepdims=True`` keeps the dims it "reduces" --------------------------------
+
+
+def test_keepdims_records_opaque(schema):
+    """``mean("lat", keepdims=True)`` records ``Opaque``: the dim survives, so no ``consumes`` is true.
+
+    Notes
+    -----
+    Verified against xarray 2026.7.0: ``ds.mean("time", keepdims=True)`` keeps ``time`` at
+    size 1. Recorded as a ``Reduce`` it claimed ``consumes={"time"}``, which made
+    ``dim_effect`` classify a following select as *invalid* and the optimiser **reject a
+    valid chain** -- see ``test_accessor.test_keepdims_reduce_then_select_matches_eager``.
+    ``consumes=frozenset()`` would be honest about the dims but leave the schema claiming
+    the dim's original *size*, so the conservative variant is the right answer.
+    """
+    node = to_opnode("mean", ("lat",), {"keepdims": True})
+    assert isinstance(node, Opaque)
+    assert node.kwargs == frozendict({"keepdims": True})  # verbatim, for replay
+
+
+def test_keepdims_false_is_an_ordinary_reduce(schema):
+    """An explicit ``keepdims=False`` is the default, so it records an ordinary ``Reduce``."""
+    node = to_opnode("mean", ("lat",), {"keepdims": False})
+    assert isinstance(node, Reduce)
+    assert node.consumes == frozenset({"lat"})
+
+
+def test_keepdims_guard_covers_the_reduce_method_too(schema):
+    """``.reduce(func, "lat", keepdims=True)`` is refused on the same grounds as any other reduction."""
+    node = to_opnode("reduce", (sum, "lat"), {"keepdims": True})
+    assert isinstance(node, Opaque)
+
+
 def test_isel_scalar_kwarg_drops_dim(schema):
     """``isel(time=0)`` records a ``Select`` whose scalar indexer drops ``time``."""
     node = to_opnode("isel", (), {"time": 0})
