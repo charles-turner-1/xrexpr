@@ -1,9 +1,9 @@
-"""The ``.plan`` accessor: a lazy recording proxy over an ``xr.Dataset``.
+"""The ``.plan`` accessor: a lazy recording proxy over an ``xr.Dataset`` or ``xr.DataArray``.
 
-``ds.plan`` returns a :class:`LazyDatasetProxy` that records the chained method
+``ds.plan`` returns a :class:`LazyProxy` that records the chained method
 calls made on it (``.mean``, ``.isel``, ``.sel``, ``__getitem__``, ...) instead
-of executing them. Calling :meth:`~LazyDatasetProxy.collect` optimises the
-recorded plan and replays it onto the real dataset (:meth:`~LazyDatasetProxy.explain`
+of executing them. Calling :meth:`~LazyProxy.collect` optimises the
+recorded plan and replays it onto the real dataset (:meth:`~LazyProxy.explain`
 returns the optimised plan as text without running it).
 
 The recorded plan is a list of :data:`~xrexpr.ir.FluentOp` variants: each call is
@@ -12,8 +12,15 @@ appended — recording holds no schema of its own. ``collect`` then runs the pla
 the pipeline in ``lower.py``: :func:`~xrexpr.lower.to_lower_ir` translates what was
 written into what it means, :func:`~xrexpr.optimize.optimize` rewrites that (a fixpoint
 of rules, folding the base schema forward itself), :func:`~xrexpr.lower.emit` turns the
-result back into calls, and :meth:`~LazyDatasetProxy._replay` performs them against the
+result back into calls, and :meth:`~LazyProxy._replay` performs them against the
 base dataset.
+
+One class serves both objects, because only two things differ and neither is worth a
+second implementation: a ``DataArray`` has no ``data_vars`` (so the projection rules
+have nothing to fire on) and its ``__getitem__`` is *indexing*, not projection (see
+:meth:`LazyProxy._getitem_is_projection`). Which behaviour applies is read off the base
+object rather than stored — the same derived-property discipline
+:class:`~xrexpr.schema.SchemaState` follows.
 """
 
 from functools import wraps
@@ -22,14 +29,14 @@ from typing import Any
 import xarray as xr
 
 from xrexpr.explain import format_plan
-from xrexpr.ir import ContextOpen, FluentOp, LoweredOp, Opaque, frozendict
+from xrexpr.ir import ContextOpen, FluentOp, LoweredOp, Opaque, Project, frozendict
 from xrexpr.lower import Call, emit, to_lower_ir
 from xrexpr.optimize import optimize
 from xrexpr.schema import SchemaState, to_opnode
 
 
 class Explanation(str):
-    """The text returned by :meth:`LazyDatasetProxy.explain`.
+    """The text returned by :meth:`LazyProxy.explain`.
 
     Notes
     -----
@@ -47,11 +54,13 @@ class Explanation(str):
 
 #: Attributes that consume the plan into a non-Dataset artifact (a figure, file,
 #: array or DataFrame) rather than another link in the chain. Accessing one
-#: materialises via :meth:`~LazyDatasetProxy.collect` and delegates to the realised
+#: materialises via :meth:`~LazyProxy.collect` and delegates to the realised
 #: object instead of recording a lazy op — otherwise the call would be silently
 #: recorded and never run (``collect`` is never reached, so the rewrite never fires).
 #: ``plot`` is xarray's plot *accessor*, so delegating the attribute (not calling it)
-#: also fixes ``plot.line()`` / ``plot.scatter()``.
+#: also fixes ``plot.line()`` / ``plot.scatter()``. The set is shared by both base types:
+#: a name absent from one of them (``to_array`` on a ``DataArray``, ``to_index`` on a
+#: ``Dataset``) simply raises off the realised object, as it would eagerly.
 _EAGER_ATTRS = frozenset(
     {
         "plot",
@@ -66,18 +75,22 @@ _EAGER_ATTRS = frozenset(
         "to_numpy",
         "to_dict",
         "to_stacked_array",
+        # DataArray-only artifacts, same rationale
+        "to_index",
+        "to_masked_array",
     }
 )
 
 
 @xr.register_dataset_accessor("plan")  # type: ignore[no-untyped-call]
-class LazyDatasetProxy:
-    """Record operations on an ``xr.Dataset`` and replay them on ``collect()``.
+@xr.register_dataarray_accessor("plan")  # type: ignore[no-untyped-call]
+class LazyProxy:
+    """Record operations on an ``xr.Dataset`` or ``xr.DataArray`` and replay them on ``collect()``.
 
     Parameters
     ----------
-    base_ds : xarray.Dataset
-        The dataset the plan runs against. xarray supplies it when the ``.plan``
+    base : xarray.Dataset or xarray.DataArray
+        The object the plan runs against. xarray supplies it when the ``.plan``
         accessor is first reached.
     ops : list of FluentOp, optional
         The plan recorded so far. Empty for a fresh proxy; each recorded call passes
@@ -85,10 +98,17 @@ class LazyDatasetProxy:
 
     Notes
     -----
-    Registered as the ``.plan`` accessor, so ``ds.plan`` yields an empty proxy
-    over ``ds``; each recorded call returns a fresh proxy (leaving the original
-    untouched) carrying the extended plan, and nothing else — recording is a pure
-    append, and the schema fold belongs to the optimiser.
+    Registered as the ``.plan`` accessor on both types, so ``ds.plan`` / ``da.plan``
+    yields an empty proxy over it; each recorded call returns a fresh proxy (leaving the
+    original untouched) carrying the extended plan, and nothing else — recording is a
+    pure append, and the schema fold belongs to the optimiser.
+
+    Nothing downstream of recording is ``Dataset``-specific:
+    :meth:`~xrexpr.schema.SchemaState.from_dataset` accepts either, lowering and the
+    rewrite rules reason about dim and variable *names*, and :meth:`_replay` is a
+    ``getattr`` loop. The two places the base type is legible are
+    :meth:`_getitem_is_projection` and — implicitly — the projection rules, which a
+    ``DataArray``'s empty ``data_vars`` makes unfireable rather than wrong.
 
     Examples
     --------
@@ -97,15 +117,16 @@ class LazyDatasetProxy:
     >>> import xrexpr  # registers the accessor
     >>> ds = xr.Dataset({"tas": (("time", "lat"), np.zeros((4, 3)))})
     >>> result = ds.plan.mean("lat").isel(time=0).collect()
+    >>> also = ds["tas"].plan.mean("lat").isel(time=0).collect()
     """
 
-    def __init__(self, base_ds: xr.Dataset, ops: list[FluentOp] | None = None):
-        self._base_ds = base_ds
+    def __init__(
+        self, base: xr.Dataset | xr.DataArray, ops: list[FluentOp] | None = None
+    ):
+        self._base = base
         self._ops: list[FluentOp] = list(ops) if ops else []
 
-    def _record(
-        self, method_name: str, *args: Any, **kwargs: Any
-    ) -> "LazyDatasetProxy":
+    def _record(self, method_name: str, *args: Any, **kwargs: Any) -> "LazyProxy":
         """Append one recorded call to the plan, returning a fresh proxy.
 
         Parameters
@@ -117,37 +138,90 @@ class LazyDatasetProxy:
 
         Returns
         -------
-        LazyDatasetProxy
-            A new proxy over the same base dataset, carrying the extended plan. The
+        LazyProxy
+            A new proxy over the same base object, carrying the extended plan. The
             receiver is left untouched.
         """
         node: FluentOp
-        if method_name == "__getitem__" and self._in_context():
-            # A builder ``__getitem__`` selects a *group* (``gb[1]`` is the matching
-            # subset), not a variable, so it must never classify as a ``Project``.
+        if method_name == "__getitem__" and not self._getitem_is_projection():
             node = Opaque(name=method_name, args=args, kwargs=frozendict(kwargs))
         else:
             node = to_opnode(method_name, args, kwargs)
-        return LazyDatasetProxy(self._base_ds, self._ops + [node])
+        return LazyProxy(self._base, self._ops + [node])
+
+    def _getitem_is_projection(self) -> bool:
+        """Report whether a ``__getitem__`` recorded here selects *variables*.
+
+        Returns
+        -------
+        bool
+            ``True`` only when the live object is known to be a ``Dataset``; ``False``
+            sends the call to :class:`~xrexpr.ir.Opaque`, replayed verbatim and never
+            reordered.
+
+        Notes
+        -----
+        :func:`~xrexpr.schema.to_opnode` is a pure function of one call, so it cannot tell
+        the three meanings of ``__getitem__`` apart — the *receiver* settles it, and the
+        receiver is the one thing recording knows that the call alone does not:
+
+        - on a **Dataset** it is a projection, which is what ``to_opnode`` assumes;
+        - on a **builder** (immediately after a :class:`~xrexpr.ir.ContextOpen`) it selects
+          a *group* — ``gb[1]`` is the matching subset, not a variable;
+        - on a **DataArray** it is *indexing*: a hashable key reads a coordinate
+          (``da["lat"]``) and a list key selects *positions along the first dim*
+          (``da[[1, 2]]``). Both would classify as a ``Project`` on the key alone, and the
+          second is the one that bites: ``merge_adjacent_projects`` is deliberately
+          schema-free (it decides on the two key sets), so ``da[[1, 2]][[1]]`` would
+          collapse to ``da[[1]]`` — row 1, where the eager chain indexes *within* the
+          selected pair and gives row 2.
+
+        The live object is a ``DataArray`` **either** because the base is one **or**
+        because the chain has already made it one, which a bare-name projection does
+        (``ds.plan["tas"][[1, 2]][[1]]`` is the same wrong-row collapse, one op later).
+        Nothing else recorded can: every modelled node maps a ``Dataset`` to a
+        ``Dataset``, and the two spellings are told apart by the key ``args`` hold, since
+        the node's ``variables`` reads ``("tas",)`` for both ``ds["tas"]`` and
+        ``ds[["tas"]]``. Once a ``DataArray``, assumed a ``DataArray`` for the rest of the
+        chain: an ``Opaque`` that converts back (``da.to_dataset()``) only costs the
+        projections after it their modelling, and ``Opaque`` is the answer that is always
+        *correct* — this classification is only ever allowed to give up optimisation, never
+        to admit a rewrite the eager chain would not permit.
+        """
+        if self._in_context() or isinstance(self._base, xr.DataArray):
+            return False
+        return not any(
+            isinstance(node, Project) and not isinstance(node.args[0], list)
+            for node in self._ops
+        )
 
     def _base_schema(self) -> SchemaState:
-        """Snapshot the *base* dataset's schema, which is what the optimiser plans against.
+        """Snapshot the *base* object's schema, which is what the optimiser plans against.
 
         Returns
         -------
         SchemaState
-            The base dataset's logical schema.
+            The base object's logical schema.
 
         Notes
         -----
         The proxy keeps no schema of its own: recording is a pure append, and the single
         fold over the plan belongs to the optimiser, which rewrites from the front and so
         needs the base rather than whatever recording ended on.
-        """
-        return SchemaState.from_dataset(self._base_ds)
 
-    def _is_method_callable_on_dataset(self, name: str) -> bool:
-        """Report whether ``name`` is a callable attribute of the base dataset.
+        A ``DataArray``'s snapshot holds its **coords only** — it has no ``data_vars`` for
+        ``from_dataset`` to read — which narrows the model in one direction and one
+        direction only: fewer facts, so a rule that needs one refuses. ``var_dims``
+        answers ``None`` for every name (the projection rules' no-rewrite answer), and a
+        dim carried by no coordinate is not in ``dim_names``, so a ``groupby`` over it
+        fails ``lower._grouper_dims``' check and lands on the opaque fallback — replayed
+        verbatim, correct, merely unfused. Teaching ``SchemaState`` to hold the array
+        itself would recover the fusion; it is a schema change, not an accessor one.
+        """
+        return SchemaState.from_dataset(self._base)
+
+    def _is_method_callable_on_base(self, name: str) -> bool:
+        """Report whether ``name`` is a callable attribute of the base object.
 
         Parameters
         ----------
@@ -160,10 +234,10 @@ class LazyDatasetProxy:
             ``True`` for a method to record, ``False`` for a property to evaluate
             eagerly.
         """
-        return callable(getattr(self._base_ds, name, None))
+        return callable(getattr(self._base, name, None))
 
     def _in_context(self) -> bool:
-        """Report whether the live object is a builder rather than a Dataset.
+        """Report whether the live object is a builder rather than a Dataset or DataArray.
 
         Returns
         -------
@@ -188,7 +262,7 @@ class LazyDatasetProxy:
         ops_preview = " -> ".join(
             f"{n.name}{n.args}{dict(n.kwargs)}" for n in self._ops
         )
-        return f"<LazyDatasetProxy base={type(self._base_ds).__name__} ops=[{ops_preview}]>"
+        return f"<LazyProxy base={type(self._base).__name__} ops=[{ops_preview}]>"
 
     def __getattr__(self, name: str) -> Any:
         """Route an attribute to one of three behaviours.
@@ -213,17 +287,19 @@ class LazyDatasetProxy:
         Notes
         -----
         - **Terminals** (:data:`_EAGER_ATTRS`: ``.plot``, ``.to_netcdf``, ...) consume
-          the plan into a non-Dataset artifact, so they force materialisation and are
-          read off the realised object — even though they are callable.
+          the plan into an artifact that is no longer an xarray object, so they force
+          materialisation and are read off the realised object — even though they are
+          callable.
         - **Callables** (``.mean``, ``.isel``, ...) return a wrapper that records the
           call and returns a new proxy.
         - **Non-callable attributes** (``.dims``, ``.coords``, ...) force
-          materialisation and are read off the realised dataset.
+          materialisation and are read off the realised object.
 
         Inside a context — immediately after a builder-returning call (``groupby``,
         ``resample``, ``rolling``, ``coarsen``, ``weighted``, ...) — the live object is a
-        builder, not a Dataset, so the callable test above (which asks the *base dataset*)
-        is meaningless: ``DatasetGroupBy.first`` does not exist on ``Dataset``. Such a
+        builder, not a Dataset or DataArray, so the callable test above (which asks the
+        *base object*) is meaningless: ``DatasetGroupBy.first`` does not exist on
+        ``Dataset``. Such a
         call is therefore always recorded, and the *meaning* of the resulting pair is
         settled later by :func:`~xrexpr.lower.to_lower_ir`, which can see both halves at
         once. A pair it fuses is modelled and optimisable; a pair it does not understand
@@ -246,16 +322,16 @@ class LazyDatasetProxy:
             return getattr(self.collect(), name)
 
         if self._in_context():
-            # no ``@wraps``: the name need not exist on the base dataset at all.
-            def _context_method(*args: Any, **kwargs: Any) -> "LazyDatasetProxy":
+            # no ``@wraps``: the name need not exist on the base object at all.
+            def _context_method(*args: Any, **kwargs: Any) -> "LazyProxy":
                 return self._record(name, *args, **kwargs)
 
             return _context_method
 
-        if self._is_method_callable_on_dataset(name):
+        if self._is_method_callable_on_base(name):
 
-            @wraps(getattr(self._base_ds, name))
-            def _method(*args: Any, **kwargs: Any) -> "LazyDatasetProxy":
+            @wraps(getattr(self._base, name))
+            def _method(*args: Any, **kwargs: Any) -> "LazyProxy":
                 return self._record(name, *args, **kwargs)
 
             return _method
@@ -263,7 +339,7 @@ class LazyDatasetProxy:
         # non-callable (properties): evaluate eagerly and return the attribute
         return getattr(self.collect(), name)
 
-    def __getitem__(self, key: Any) -> "LazyDatasetProxy":
+    def __getitem__(self, key: Any) -> "LazyProxy":
         return self._record("__getitem__", key)
 
     def collect(self) -> xr.Dataset | xr.DataArray:
@@ -273,7 +349,8 @@ class LazyDatasetProxy:
         -------
         xarray.Dataset or xarray.DataArray
             The result, computed. A ``DataArray`` rather than a ``Dataset`` when the chain
-            selects a single variable (e.g. ``ds.plan["temperature"]``).
+            selects a single variable (e.g. ``ds.plan["temperature"]``), and always one
+            when the base is a ``DataArray``.
 
         Raises
         ------
@@ -287,7 +364,7 @@ class LazyDatasetProxy:
         is visible: the recorded (fluent) ops are lowered into what they mean
         (:func:`~xrexpr.lower.to_lower_ir`), rewritten (:func:`~xrexpr.optimize.optimize`),
         turned back into calls (:func:`~xrexpr.lower.emit`) and replayed onto the base
-        dataset, then materialised via xarray's own ``.compute()`` so dask-backed data is
+        object, then materialised via xarray's own ``.compute()`` so dask-backed data is
         realised.
         """
         return self._replay(emit(self._optimized())).compute()
@@ -339,7 +416,7 @@ class LazyDatasetProxy:
         return Explanation(format_plan(self._optimized()))
 
     def _replay(self, calls: list[Call]) -> xr.Dataset | xr.DataArray:
-        """Perform each emitted :class:`~xrexpr.lower.Call` against the real dataset.
+        """Perform each emitted :class:`~xrexpr.lower.Call` against the real object.
 
         Parameters
         ----------
@@ -357,10 +434,10 @@ class LazyDatasetProxy:
         deciding that is :func:`~xrexpr.lower.emit`'s job, and this stays the short
         ``getattr`` loop it was when every node was exactly one call.
         """
-        ds: xr.Dataset | xr.DataArray = self._base_ds
+        obj: xr.Dataset | xr.DataArray = self._base
         for call in calls:
             if call.name == "__getitem__":
-                ds = ds[call.args[0]]
+                obj = obj[call.args[0]]
             else:
-                ds = getattr(ds, call.name)(*call.args, **call.kwargs)
-        return ds
+                obj = getattr(obj, call.name)(*call.args, **call.kwargs)
+        return obj

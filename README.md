@@ -45,7 +45,8 @@ assert_equal(
 ```
 
 That's where `xrexpr` comes in. Importing it registers a `.plan` accessor on every
-`Dataset`. Chain your operations off `ds.plan` exactly as you would off `ds` — but
+`Dataset` and every `DataArray`. Chain your operations off `ds.plan` exactly as you
+would off `ds` (and off `da.plan` exactly as you would off `da`) — but
 instead of running eagerly, each call is *recorded*. Calling `.collect()` optimises the
 recorded plan (reordering and merging where it's provably safe) and replays it:
 

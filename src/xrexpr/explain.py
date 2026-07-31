@@ -1,4 +1,4 @@
-"""Render a lowered plan as text — what :meth:`~xrexpr.accessor.LazyDatasetProxy.explain` returns.
+"""Render a lowered plan as text — what :meth:`~xrexpr.accessor.LazyProxy.explain` returns.
 
 Formats the **lowered nodes** rather than the emitted calls — the same choice Polars'
 ``explain`` makes: show the plan the optimiser actually reasoned about. Three things the

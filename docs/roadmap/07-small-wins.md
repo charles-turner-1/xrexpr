@@ -109,6 +109,41 @@ so both kinds convert together.
 
 ## 5. Register `.plan` for `DataArray`
 
+> **Closed (2026-07-31)** as `accessor.LazyProxy`, registered on both types (#105). The
+> spec below is what was implemented — the second option, "the accessor gets a flag the
+> record path consults" (`LazyProxy._getitem_is_projection`), since `to_opnode` stays a
+> pure function of one call and the *receiver* is what settles what `__getitem__` means.
+> One class serves both bases: only two things differ, and the base type is read rather
+> than stored. Four facts the section did not carry:
+>
+> - **The `__getitem__` trap is not hypothetical, and it was already reachable.** The
+>   dangerous key is not `da["lat"]` (a coordinate read, which replays fine either way) but
+>   the *positional* one: `da[[1, 2]]` selects positions along the first dim, so as a pair
+>   of `Project`s `da[[1, 2]][[1]]` passes `merge_adjacent_projects`' subset test and
+>   collapses to `da[[1]]` — row 1, where eager indexes *within* the pair and gives row 2.
+>   Measured on `main` before the fix: the optimised plan returns the wrong row.
+> - **And it did not need the new accessor to happen.** A `Dataset` chain *becomes* a
+>   `DataArray` at a bare-name projection, so `ds.plan["tas"][[1, 2]][[1]]` is the same
+>   wrong-row collapse one op later — a latent wrong-answer bug on the existing accessor,
+>   found by this work and fixed with it. §1's barrier on a single `p1` stops the *first*
+>   pair only. So the flag reads the recorded plan, not just the base: a bare-name
+>   projection (told from `ds[["tas"]]` by the *key*, since both record
+>   `variables=("tas",)`) puts the chain in DataArray-land for good. Giving up the
+>   classification only ever costs modelling — `Opaque` replays verbatim — so the
+>   conservative answer is always available.
+> - **A `DataArray`'s schema is coords-only, so a coordless one models no dims at all**
+>   (`from_dataset` has no `data_vars` to read). The narrowing is in the safe direction —
+>   `var_dims` answers `None`, the projection rules' no-rewrite answer, and a `groupby`
+>   over an unmodelled dim fails `lower._grouper_dims`' check and lands on the opaque
+>   fallback — but it costs the fusion. Teaching `SchemaState` to hold the array itself
+>   (under `.name`, or a sentinel when unnamed) would recover it; that is a schema change,
+>   not an accessor one, and is left.
+> - **§7's list-form narrowing is now retirable.** `_calls` draws list-form projections
+>   only, justified there partly by this section; a bare-name draw would put the generated
+>   chains into DataArray-land and exercise the classification above. Left as follow-up
+>   work rather than folded in, since it widens the property suite rather than this
+>   surface.
+
 Only `Dataset` has the accessor (`accessor.py:70`). Add
 `@xr.register_dataarray_accessor("plan")` — the proxy is already almost generic
 (`SchemaState.from_dataset` accepts a `DataArray`, `schema.py:89`; replay and
