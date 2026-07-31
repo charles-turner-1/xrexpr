@@ -32,7 +32,7 @@ the single source of truth that drives ``to_opnode``.
 """
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, get_args
 
 from xrexpr.ir import ContextOpenName
 
@@ -190,16 +190,11 @@ _REDUCTIONS = (
     "var",
     "median",
 )
-_CONTEXTS: tuple[ContextOpenName, ...] = (
-    "groupby",
-    "groupby_bins",
-    "resample",
-    "rolling",
-    "rolling_exp",
-    "coarsen",
-    "weighted",
-    "cumulative",
-)
+# Derived from the ``Literal`` that types them, so the openers are written once rather
+# than once for the dispatch and once for the type checker. Sound by construction — every
+# element of ``get_args`` on a ``Literal`` is one of its members — which is all mypy can
+# do with it either way, ``get_args`` being ``tuple[Any, ...]``.
+_CONTEXTS: tuple[ContextOpenName, ...] = get_args(ContextOpenName)
 
 _SPECS: tuple[OpSpec, ...] = (
     *(ReduceSpec(name) for name in _REDUCTIONS),
@@ -221,8 +216,9 @@ OP_TABLE: dict[str, OpSpec] = {op.name: op for op in _SPECS}
 
 #: The builder-returning methods, as a set. Derived from the table — they are rows in it
 #: like any other method, so this cannot drift from what ``to_opnode`` actually dispatches
-#: on. A test pins it against ``ir.ContextOpenName``, the ``Literal`` spelling the same
-#: names for mypy.
+#: on; and the rows are themselves derived from ``ir.ContextOpenName``, so it cannot drift
+#: from the type either. A test pins the names against ``xr.Dataset``, the one agreement
+#: no derivation can supply.
 CONTEXT_METHODS = frozenset(op.name for op in _SPECS if isinstance(op, ContextSpec))
 
 

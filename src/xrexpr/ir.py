@@ -390,10 +390,10 @@ class ContextOpen:
         object.__setattr__(self, "kwargs", frozendict(self.kwargs))
 
 
-#: The builder-returning methods, as a type. The runtime rows live in ``operations``, as
-#: ``ContextSpec``s in ``OP_TABLE`` (``CONTEXT_METHODS`` is derived from them); a test pins
-#: this ``Literal`` against those, so neither can drift from the other or from
-#: ``xr.Dataset``.
+#: The builder-returning methods — **the** list of them, in the form mypy reads. The
+#: runtime rows live in ``operations`` as ``ContextSpec``s in ``OP_TABLE``, but they are
+#: built by ``get_args`` on this ``Literal`` rather than written out a second time, so the
+#: type and the dispatch cannot disagree. A test pins the names against ``xr.Dataset``.
 ContextOpenName = Literal[
     "groupby",
     "groupby_bins",

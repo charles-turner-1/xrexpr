@@ -5,8 +5,9 @@ scans keep it — which a single flat "aggregations" set could not express. Each
 now a *variant* rather than a record with a ``kind`` string, so that split is a type
 distinction and ``to_opnode``'s dispatch is exhaustive under mypy.
 
-``CONTEXT_METHODS`` lives here too, and is pinned against the two things it must agree
-with: xarray itself, and the ``Literal`` that types the same names for mypy.
+``CONTEXT_METHODS`` lives here too, and is pinned against the one thing it must agree with
+that no derivation can settle: xarray itself. Agreement with the ``Literal`` that types
+the same names is not tested, because the rows are built from that ``Literal``.
 """
 
 from typing import get_args
@@ -14,7 +15,6 @@ from typing import get_args
 import pytest
 import xarray as xr
 
-from xrexpr.ir import ContextOpenName
 from xrexpr.operations import (
     CONTEXT_METHODS,
     OP_TABLE,
@@ -164,17 +164,6 @@ def test_context_methods_are_context_specs(name):
     derived from these rows rather than pinned against them.
     """
     assert isinstance(spec(name), ContextSpec)
-
-
-def test_context_method_names_match_the_type_that_spells_them():
-    """``CONTEXT_METHODS`` and the ``ContextOpenName`` literal name the same set.
-
-    Notes
-    -----
-    The rows in ``operations`` and the ``Literal`` in ``ir`` are one list written twice —
-    one for the dispatch, one for the type checker. Pin them so neither can drift.
-    """
-    assert set(get_args(ContextOpenName)) == set(CONTEXT_METHODS)
 
 
 def test_chunk_is_a_rechunk_spec():
