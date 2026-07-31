@@ -14,6 +14,7 @@ only where a node is then folded through ``apply_schema``.
 import pytest
 from frozendict import frozendict
 
+from xrexpr.chunks import SingleSize
 from xrexpr.indexers import ForwardSlice, Scalar
 from xrexpr.ir import ALL_DIMS, Opaque, Project, Rechunk, Reduce, Scan, Select
 from xrexpr.schema import apply_schema, to_opnode
@@ -251,13 +252,13 @@ def test_rechunk_positional_mapping(schema):
     """A positional chunk mapping records as ``Rechunk`` with that mapping in ``chunks``."""
     node = to_opnode("chunk", ({"time": 100},), {})
     assert isinstance(node, Rechunk)
-    assert node.chunks == frozendict({"time": 100})
+    assert node.chunks == frozendict({"time": SingleSize(100)})
 
 
 def test_rechunk_kwarg_mapping(schema):
     """Dim keywords on ``chunk`` collect into the same ``chunks`` mapping."""
     node = to_opnode("chunk", (), {"time": 100, "lat": 1})
-    assert node.chunks == frozendict({"time": 100, "lat": 1})
+    assert node.chunks == frozendict({"time": SingleSize(100), "lat": SingleSize(1)})
 
 
 @pytest.mark.parametrize("spec", [100, "auto", -1])
@@ -283,7 +284,7 @@ def test_bare_rechunk_names_no_dim(schema):
 def test_rechunk_option_kwarg_not_treated_as_a_dim(schema):
     """``token`` is an option, not a dim spec, so it stays out of ``chunks``."""
     node = to_opnode("chunk", ({"time": 100},), {"token": "t"})
-    assert node.chunks == frozendict({"time": 100})
+    assert node.chunks == frozendict({"time": SingleSize(100)})
     assert node.kwargs == frozendict({"token": "t"})  # verbatim for replay
 
 

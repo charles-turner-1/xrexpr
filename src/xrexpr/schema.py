@@ -981,6 +981,11 @@ def _chunk_spec(
     ``chunk("auto")``) names no dim, so it yields an empty mapping and is left to be
     replayed verbatim from ``args`` — which is exactly right, since a uniform spec has
     no dim key that a later select could invalidate.
+
+    The values stay **raw** here. Sorting them into
+    :data:`~xrexpr.chunks.ChunkSpec` variants is ``Rechunk.__post_init__``'s job, so a
+    hand-built node is normalised too and not only a recorded one — the same division
+    :func:`_indexer_spec` and ``Select.__post_init__`` keep.
     """
     chunks: dict[Hashable, Any] = {}
     if args and isinstance(args[0], dict):

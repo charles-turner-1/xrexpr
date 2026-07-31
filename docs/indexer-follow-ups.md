@@ -55,7 +55,19 @@ by reflex — note that this is a *deviation* from a literal reading of §3.1, s
 
 ---
 
-## 2. The chunk-spec half of §3 is not done — STILL OPEN
+## 2. The chunk-spec half of §3 is not done — DONE (#99)
+
+Resolved by `chunks.py` and the wiring behind it, built from
+[`roadmap/04-chunk-taxonomy.md`](./roadmap/04-chunk-taxonomy.md) rather than from the sketch
+below: `Rechunk.chunks` is `frozendict[Hashable, ChunkSpec]`, and `_pushable_rechunk`'s value
+test is a `match` closed with `assert_never`. That was the package's last `Any` in the
+optimiser's reasoning surface and its last `isinstance` ladder, so §6's ledger row is now
+fully cleared.
+
+The note's own open question — "probably its own think about what the variants are" — was
+settled by asking the pinned xarray/dask rather than by choosing: `None` and `-1` turned out to
+be **different behaviours** (the first keeps an already-chunked dim's blocks, the second
+collapses them), so `NoChange` and `FullDim` are separate variants. Original note follows.
 
 **Branch off main.** Verified clean: #68 does not touch `_pushable_rechunk` or `Rechunk.chunks`
 at all, so this will not conflict. Neither do #70 or #71.

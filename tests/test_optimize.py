@@ -21,6 +21,7 @@ import pytest
 import xarray as xr
 from frozendict import frozendict
 
+from xrexpr.chunks import SingleSize
 from xrexpr.exceptions import InvalidExpressionError
 from xrexpr.indexers import classify
 from xrexpr.ir import ALL_DIMS, GroupedReduce, WeightedReduce, WindowedReduce
@@ -498,7 +499,7 @@ def test_scalar_isel_past_rechunk_strips_only_the_dropped_dim(schema):
     ]
     out = optimize(plan, schema)
     assert [n.name for n in out] == ["isel", "chunk"]
-    assert out[1].chunks == frozendict({"lat": 50})
+    assert out[1].chunks == frozendict({"lat": SingleSize(50)})
     assert out[1].args == ({"lat": 50},)  # replayable: no stale ``time`` key
 
 
@@ -516,7 +517,7 @@ def test_slice_isel_pushes_with_the_spec_intact(schema):
     ]
     out = optimize(plan, schema)
     assert [n.name for n in out] == ["isel", "chunk"]
-    assert out[1].chunks == frozendict({"time": 100})
+    assert out[1].chunks == frozendict({"time": SingleSize(100)})
 
 
 def test_select_on_unchunked_dim_is_a_plain_swap(schema):
@@ -524,7 +525,7 @@ def test_select_on_unchunked_dim_is_a_plain_swap(schema):
     plan = [_node("chunk", {"lat": 2}), _node("isel", time=0)]
     out = optimize(plan, schema)
     assert [n.name for n in out] == ["isel", "chunk"]
-    assert out[1].chunks == frozendict({"lat": 2})
+    assert out[1].chunks == frozendict({"lat": SingleSize(2)})
 
 
 def test_rechunk_kwarg_form_pushes(schema):
@@ -532,7 +533,7 @@ def test_rechunk_kwarg_form_pushes(schema):
     plan = [_node("chunk", time=100), _node("isel", lat=0)]
     out = optimize(plan, schema)
     assert [n.name for n in out] == ["isel", "chunk"]
-    assert out[1].chunks == frozendict({"time": 100})
+    assert out[1].chunks == frozendict({"time": SingleSize(100)})
 
 
 def test_uniform_rechunk_forms_push_and_are_kept(schema):
