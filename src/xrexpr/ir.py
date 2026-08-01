@@ -53,7 +53,7 @@ a list to a tree — an additive, orthogonal change deferred until such an op is
 Keep that linearity assumption named *here*, not leaked into individual rules.
 """
 
-from collections.abc import Hashable
+from collections.abc import Hashable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal, final
 
@@ -303,20 +303,38 @@ class Rechunk:
         The call's keyword arguments, verbatim.
     chunks : frozendict
         The mapping-form ``{dim: spec}`` — see the notes.
+    uniform : ChunkSpec or None
+        The **uniform**-form spec, the one that applies to every dim — see the notes.
+        Derived from ``args``, never passed.
 
     Notes
     -----
-    ``chunks`` holds the **mapping-form** ``{dim: spec}`` only (a positional dict and/or
-    dim kwargs). It stays empty for the uniform forms — ``chunk()``, ``chunk(100)``,
-    ``chunk("auto")`` — whose spec names no dim and so lives verbatim in ``args``. That
-    split is what a rewrite needs: only *named* dims have to be stripped from the spec
-    when a select drops them, and only a named-dim spec can be emptied out entirely.
+    A ``chunk`` call writes its spec in one of two places, and the node holds one field per
+    place. ``chunks`` holds the **mapping form** ``{dim: spec}`` (a positional dict and/or
+    dim kwargs); ``uniform`` holds the **uniform form** — ``chunk(100)``, ``chunk("auto")``,
+    ``chunk((100, 400, 500))`` — whose spec names no dim. Exactly one of them is populated,
+    and ``chunk()`` populates neither.
 
-    Each value is a :data:`~xrexpr.chunks.ChunkSpec` — the closed value sum type the
-    optimiser reasons about — normalised from its raw ``chunk`` form by ``__post_init__``
+    That split is what a rewrite needs: only *named* dims have to be stripped from the spec
+    when a select drops them, and only a named-dim spec can be emptied out entirely. A
+    uniform spec has no key to strip and needs none — xarray reads it as
+    ``dict.fromkeys(self.dims, spec)``, so it already means "whatever dims there are", and a
+    select moving in front simply leaves fewer of them.
+
+    Both fields hold :data:`~xrexpr.chunks.ChunkSpec` values — the closed value sum type the
+    optimiser reasons about — normalised from their raw ``chunk`` forms by ``__post_init__``
     (via :func:`~xrexpr.chunks.classify_chunk`), so a value is *always* a modelled variant
     regardless of whether the node was recorded or hand-built. Exactly what
-    :class:`Select` does for its indexers, and for the same reason.
+    :class:`Select` does for its indexers, and for the same reason. One taxonomy answering
+    for both spellings is the point: ``chunk("auto")`` is the identical request to
+    ``chunk({dim: "auto"})`` for every dim, so a rule that reasons about one reasons about
+    the other without a second code path.
+
+    ``uniform`` is derived rather than passed (``init=False``) because it is a *reading* of
+    ``args`` rather than an independent fact, and one that disagreed with ``args`` would
+    make the node replay as something other than what it claims. ``chunks`` is passed, since
+    extracting it means knowing which kwargs are options rather than dims —
+    :func:`~xrexpr.schema._chunk_spec`'s job.
 
     Whether a given rechunk may be *crossed* is deliberately not decided here — that
     judgement lives with the rule (``_pushable_rechunk`` in ``optimize.py``), as it does
@@ -327,6 +345,7 @@ class Rechunk:
     args: tuple[Any, ...] = ()
     kwargs: frozendict[str, Any] = field(default_factory=frozendict)
     chunks: frozendict[Hashable, ChunkSpec] = field(default_factory=frozendict)
+    uniform: ChunkSpec | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "args", tuple(self.args))
@@ -339,6 +358,18 @@ class Rechunk:
                     dim: v if isinstance(v, ChunkSpec) else classify_chunk(v)
                     for dim, v in self.chunks.items()
                 }
+            ),
+        )
+        # A leading *non*-mapping positional is the uniform form; a leading mapping is the
+        # mapping form, already extracted into ``chunks``. The split xarray's own
+        # ``Dataset.chunk`` makes with ``isinstance(chunks, Mapping)``.
+        object.__setattr__(
+            self,
+            "uniform",
+            (
+                classify_chunk(self.args[0])
+                if self.args and not isinstance(self.args[0], Mapping)
+                else None
             ),
         )
 

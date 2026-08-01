@@ -18,6 +18,15 @@ import pytest
 import xarray as xr
 from frozendict import frozendict as _pkg_frozendict
 
+from xrexpr.chunks import (
+    Auto,
+    BlockSeq,
+    ByteSize,
+    FullDim,
+    NoChange,
+    OpaqueChunk,
+    SingleSize,
+)
 from xrexpr.ir import (
     ALL_DIMS,
     AllDims,
@@ -101,11 +110,12 @@ def test_scan_and_opaque_minimal_defaults():
 
 
 def test_rechunk_minimal_defaults():
-    """A ``Rechunk`` built from a name alone has an empty chunk spec."""
+    """A ``Rechunk`` built from a name alone has an empty chunk spec and no uniform one."""
     node = Rechunk(name="chunk")
     assert node.args == ()
     assert node.kwargs == frozendict()
     assert node.chunks == frozendict()
+    assert node.uniform is None
 
 
 def test_rechunk_coerces_containers():
@@ -113,6 +123,59 @@ def test_rechunk_coerces_containers():
     node = Rechunk(name="chunk", args=[{"time": 100}], chunks={"time": 100})
     assert node.args == ({"time": 100},)
     assert isinstance(node.chunks, frozendict)
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ((), None),
+        ((100,), SingleSize(100)),
+        ((-1,), FullDim()),
+        (("auto",), Auto()),
+        (("10MB",), ByteSize("10MB")),
+        (((100, 400, 500),), BlockSeq((100, 400, 500))),
+        ((100.0,), OpaqueChunk(100.0)),
+        (({"time": 100},), None),
+    ],
+    ids=[
+        "chunk()",
+        "chunk(100)",
+        "chunk(-1)",
+        'chunk("auto")',
+        'chunk("10MB")',
+        "chunk((100,400,500))",
+        "chunk(100.0)",
+        'chunk({"time": 100})',
+    ],
+)
+def test_rechunk_classifies_its_uniform_spec(args, expected):
+    """The uniform form is classified through the same taxonomy as the mapping form.
+
+    Notes
+    -----
+    A ``chunk`` call writes its spec in one of two places and ``Rechunk`` holds one field
+    per place, so a rule that reasons about ``chunk({"time": "auto"})`` reasons about
+    ``chunk("auto")`` without a second code path. The last case is the discriminant: a
+    leading *mapping* is the mapping form, already extracted into ``chunks``, so it leaves
+    ``uniform`` empty — the split xarray's own ``Dataset.chunk`` makes with
+    ``isinstance(chunks, Mapping)``.
+    """
+    assert Rechunk(name="chunk", args=args).uniform == expected
+
+
+def test_rechunk_uniform_is_derived_from_args_not_passed():
+    """``uniform`` cannot be set independently of ``args``, so the two can never disagree.
+
+    Notes
+    -----
+    Unlike ``chunks``, which needs :func:`~xrexpr.schema._chunk_spec` to know which kwargs
+    are dims rather than options, ``uniform`` is a plain *reading* of ``args[0]``. One that
+    disagreed with ``args`` would make the node replay as something other than what it
+    claims, so it is ``init=False`` and a hand-built node is normalised exactly as a
+    recorded one is.
+    """
+    with pytest.raises(TypeError):
+        Rechunk(name="chunk", args=("auto",), uniform=NoChange())  # type: ignore[call-arg]
 
 
 def test_reduce_coerces_containers():

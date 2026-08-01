@@ -13,7 +13,12 @@ re-decision:
 Whether a given spec may be *crossed* by a select is deliberately **not** modelled here:
 pushability is a policy the optimiser chooses (``optimize._pushable_rechunk``), not an
 intrinsic fact of a value — the same stance :mod:`xrexpr.indexers` takes on composition.
-What this module guarantees is the discriminant that policy matches on.
+What this module guarantees is the discriminant that policy matches on. The discriminant it
+happens to turn on is **extent-dependence**: :class:`Auto`, :class:`ByteSize` and
+:class:`BlockSeq` are the specs dask resolves by measuring the array it is handed, so what
+they mean changes when a select changes the data, while a size, ``-1`` and ``None`` mean the
+same thing on any array. Each variant's notes say which it is; no variant carries a flag
+saying what the optimiser should therefore do.
 
 The variants are one per *behaviour*, not one per spelling, and the split was checked
 against the pinned xarray/dask rather than reasoned about. Applying each to
@@ -109,9 +114,29 @@ class Auto:
 
     Notes
     -----
-    Carries no payload: the sizes are dask's to choose, against its configured byte
-    target. That it re-picks against whatever data survives is precisely why a select may
-    hop in front of one.
+    Carries no payload: the sizes are dask's to choose, against its configured byte target.
+    That it re-picks against whatever array it is handed is precisely why it is
+    *extent-dependent*, the property :class:`BlockSeq` shares — dask divides the byte budget
+    by the array's own extent, so what the spec means changes when the data does.
+
+    Measured against xarray 2026.7.0 / dask 2026.7.1, that is not merely a change of answer.
+    ``auto_chunks`` computes ``largest_block = prod(cs if Number else max(cs) for cs in
+    chunks if cs != "auto")``, so a dim with nothing in it makes the division a
+    ``ZeroDivisionError`` — and an emptied dim that *was* ``"auto"`` reaches it anyway, since
+    dask pins every dim below ``limit ** (1 / ndim)`` and *recurses*, and on the second pass
+    it is no longer ``"auto"``:
+
+    ==================================== ========= =========================
+    ``chunk`` then empty a dim, hoisted  at 1 kB   at 128 MiB
+    ==================================== ========= =========================
+    2-D ``{lat: auto, lon: auto}``, lat  raises    fine
+    3-D ``{lon: auto}``, lon             fine      fine
+    3-D ``{lon: auto}``, lat             raises    raises
+    ==================================== ========= =========================
+
+    Whether it raises therefore depends on the configured ``array.chunk-size`` and on the
+    rank — nothing a plan can read — which is why no narrower discriminant exists and the
+    whole variant is a barrier. Issue #121.
     """
 
     def to_raw(self) -> str:
@@ -137,8 +162,9 @@ class ByteSize:
     Notes
     -----
     :class:`Auto` with an explicit target rather than dask's configured one, so it is a
-    separate variant only because it has a payload to carry back to replay. Whether the
-    string parses is dask's judgement, made at replay: an unparseable one raises
+    separate variant only because it has a payload to carry back to replay — and it is
+    extent-dependent for the same reason, dividing that target by the array's own extent.
+    Whether the string parses is dask's judgement, made at replay: an unparseable one raises
     ``ValueError: Could not interpret ... as a byte unit`` there, which is a better error
     than anything this layer could invent.
     """
@@ -217,9 +243,12 @@ class BlockSeq:
 
     Notes
     -----
-    The one spec whose validity depends on the dim's *length*, which is what makes it a
-    barrier: a select moving in front would shrink the dim and leave blocks that no longer
-    add up. That judgement is the rule's, not this class's — see the module docstring.
+    Extent-dependent, as :class:`Auto` and :class:`ByteSize` are, and the most obviously so:
+    a select moving in front would shrink the dim and leave blocks that no longer add up.
+    The three differ only in how they fail — this one cannot replay at all, where the other
+    two replay to a different answer or to a ``ZeroDivisionError``. That the shared property
+    makes all three a barrier is the rule's judgement, not this class's — see the module
+    docstring.
     """
 
     sizes: tuple[int, ...]

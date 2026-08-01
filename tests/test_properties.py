@@ -51,7 +51,8 @@ import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
 
 # aliased: this module's own ``Call`` is a generated *recorded* call (name + args/kwargs),
 # a different thing from the emitted call header ``lower.Call`` denotes.
-from xrexpr.ir import ContextOpen, Opaque
+from xrexpr.chunks import Auto, BlockSeq, ByteSize
+from xrexpr.ir import ContextOpen, Opaque, Rechunk, Select
 from xrexpr.lower import Call as Lowered
 from xrexpr.lower import emit, to_lower_ir
 from xrexpr.operations import CONTEXT_METHODS, OP_TABLE, ReduceSpec
@@ -77,15 +78,6 @@ REDUCE_METHOD_FUNC = np.mean
 #: Whether ``chunk`` calls are generated at all. xrexpr never needs dask, but *replaying* a
 #: rechunk does, so without a chunk manager the drawn chain would raise rather than chunk.
 HAS_DASK = importlib.util.find_spec("dask") is not None
-
-#: The one *divergence* this widening found, and the reason a generated select may not empty
-#: a dim once a ``chunk`` is in the chain. Hoisting the select in front leaves the rechunk
-#: looking at a zero-length dim, and dask's auto-chunking divides by the largest block —
-#: ``ZeroDivisionError`` where the eager order succeeds. It predates the chunk taxonomy (the
-#: rule crossed ``"auto"`` before it too) and is issue #121; it is pinned by example in
-#: ``test_accessor.py`` and excluded here so this suite reports *new* breakage rather than
-#: that one, every run. **Removing this exclusion is the acceptance test for #121.**
-EMPTIED_DIM_BUG = "an empty dim in front of an auto-sizing rechunk raises in dask"
 
 #: What may follow a ``chunk`` in a generated chain. Dask-backed data is what narrows this,
 #: not the optimiser: several ops xarray accepts eagerly it refuses on a chunked array
@@ -781,8 +773,6 @@ def _calls(draw, ds, max_ops=4, builders=False):
                 break
             dim = draw(st.sampled_from(available))
             call = Call(kind, **{dim: draw(indexers(current, dim, kind))})
-            if chunked and not all(_apply(current, [call]).sizes.values()):
-                continue  # would empty a dim in front of a rechunk -- see EMPTIED_DIM_BUG
             selected_dims.add(dim)
 
         current = _apply(current, [call])
@@ -844,6 +834,24 @@ def select_runs(draw):
 # --------------------------------------------------------------------------- #
 
 
+def _extent_sized(node):
+    """Report whether ``node`` carries a spec dask resolves by measuring the array.
+
+    Notes
+    -----
+    Spelled out here rather than imported because the optimiser has no such predicate to
+    import: :func:`~xrexpr.optimize._pushable_rechunk` decides the whole node in one
+    ``match`` and never names this subset. Restating it keeps the property a statement about
+    *behaviour* — the adjacency the plan must not contain — rather than a re-run of the
+    implementation against itself.
+
+    :class:`~xrexpr.chunks.BlockSeq` is included with the two auto-sizing specs: all three
+    are resolved against the extent, which is what makes the adjacency hazardous.
+    """
+    specs = (*node.chunks.values(), *((node.uniform,) if node.uniform else ()))
+    return any(isinstance(spec, Auto | ByteSize | BlockSeq) for spec in specs)
+
+
 @SETTINGS
 @given(any_plans())
 def test_optimised_plan_matches_eager_evaluation(case):
@@ -861,6 +869,81 @@ def test_optimised_plan_matches_eager_evaluation(case):
         if type(node).__name__.endswith("Reduce") and type(node).__name__ != "Reduce":
             event(f"fused: {type(node).__name__}")
     assert_equal(_apply(ds.plan, calls).collect(), _apply(ds, calls))
+
+
+@pytest.mark.skipif(not HAS_DASK, reason="rechunk replay needs a chunk manager")
+@SETTINGS
+@given(any_plans())
+def test_optimised_plan_matches_eager_evaluation_under_a_tiny_chunk_target(case):
+    """The headline property again, with ``array.chunk-size`` small enough to make ``"auto"`` bite.
+
+    Notes
+    -----
+    This is what makes the generated chains a real test of issue #121 rather than a vacuous
+    one. Dask's ``auto_chunks`` pins every dim below ``limit ** (1 / ndim)`` and returns
+    *before* it can divide, so at the default 128 MiB target these 1-to-5-long dims survive
+    an emptied neighbour by arithmetic — a rule that made the hop would pass here all day.
+    At 1 kB they do not.
+
+    The setting stands in for a multi-hundred-megabyte fixture, and it names the condition
+    the crash actually depends on, which a fixture would only imply. It is also why
+    ``_calls`` no longer refuses to draw an emptying select once a ``chunk`` is in the
+    chain: that exclusion was #121's, and this is the property that would report it back.
+    """
+    import dask
+
+    ds, calls = case
+    with dask.config.set({"array.chunk-size": "1kB"}):
+        assert_equal(_apply(ds.plan, calls).collect(), _apply(ds, calls))
+
+
+@SETTINGS
+@given(any_plans())
+def test_no_rule_moves_a_select_in_front_of_an_extent_sized_rechunk(case):
+    """No rule moves a select from *after* an extent-dependent rechunk to *before* it.
+
+    Notes
+    -----
+    ``pushdown_selects_past_rechunks`` refuses to make this move, but refusing is only half
+    the claim: any rule that reorders nodes could make it, and the plan would then resolve an
+    extent-dependent spec against data the user never rechunked. So the assertion is about
+    the optimised plan as a whole, quantified over every generated chain rather than over one
+    rule's inputs.
+
+    The count is over **ordered pairs, not adjacent ones**, and that is the whole content of
+    the property. Adjacency is not an invariant of anything: ``pushdown_projections`` closing
+    the gap in ``isel(...) → project → chunk("auto")`` creates an adjacent pair without
+    moving the select, which was in front of the rechunk as the user wrote it. Counting
+    ``i < j`` instead asks the question that matters — did a select *cross* a rechunk — and
+    leaves a chain the user wrote that way alone, since replaying it faithfully means
+    chunking exactly what they asked to chunk.
+
+    ``<=`` rather than ``==`` because merging is free to shrink the count:
+    ``merge_adjacent_selects`` folds two selects into one, and a select spent entirely on a
+    dropped dim disappears.
+    """
+    ds, calls = case
+    lowered = to_lower_ir(_build_plan(ds, calls)[0], _dim_names(ds))
+
+    def crossings(nodes):
+        rechunks = [
+            i
+            for i, n in enumerate(nodes)
+            if isinstance(n, Rechunk) and _extent_sized(n)
+        ]
+        return sum(
+            i < j
+            for i, n in enumerate(nodes)
+            if isinstance(n, Select)
+            for j in rechunks
+        )
+
+    event(
+        f"selects in front of an extent-sized rechunk as written: {crossings(lowered)}"
+    )
+    assert crossings(optimize(lowered, SchemaState.from_dataset(ds))) <= crossings(
+        lowered
+    )
 
 
 @SETTINGS
