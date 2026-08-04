@@ -88,8 +88,8 @@ ds.plan.chunk({"time": 100}).isel(time=0).explain()
 ```
 
 Not every chunk spec may be crossed, though — an explicit block sequence pins blocks that
-must sum to the dimension's length, so nothing moves past one. The rechunking page covers
-that in full.
+must sum to the dimension's length, so nothing moves past one.
+[Rechunking](rechunking) covers where that line falls.
 
 ## What it deliberately won't touch
 
@@ -172,8 +172,8 @@ stations.plan.std("time")[["temperature"]].collect()
 ```
 
 `weighted` chains get the same treatment, and there the eager failure is even easier to
-hit: a weighted reduce *refuses* a variable lacking the reduced dim, where a plain
-`.mean("time")` merely wastes effort on it.
+hit — see
+[weighted reduces](grouped-windowed-weighted.md#weighted-reduces-take-projections-only).
 
 ## The invariant
 
@@ -188,3 +188,8 @@ change a value, nor introduce an error.
 The middle clause is exactly the licence the section above needs, and it is bounded:
 `xrexpr` may skip a computation whose result you discard, and it may not do anything
 else. It cannot turn a working chain into a failing one, and it cannot change a number.
+
+Two of the rewrites above deserve a page of their own, because what moves past them is
+less obvious than "do the dims overlap?":
+[grouped, windowed and weighted chains](grouped-windowed-weighted) and
+[rechunking](rechunking).

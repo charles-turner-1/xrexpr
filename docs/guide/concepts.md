@@ -90,3 +90,7 @@ internals section. This guide stays in user terms:
 
 - [Reading `explain()` output](reading-explain) — every annotation decoded.
 - [What it rewrites](rewrites) — and what it deliberately won't.
+- [Grouped, windowed and weighted chains](grouped-windowed-weighted) — why two calls
+  become one operation, and what moves past each kind.
+- [Rechunking](rechunking) — the one operation whose rewrite turns on how you spelled
+  its argument.
