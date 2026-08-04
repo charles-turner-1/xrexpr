@@ -85,8 +85,8 @@ That middle clause is not a loophole — it's a feature, and
 ## Where the work goes
 
 If you want the mechanism rather than the model — how the plan is represented, what
-lowering guarantees, which rules exist and why the loop terminates — that's the
-internals section. This guide stays in user terms:
+lowering guarantees, which rules exist and why the loop terminates — that's
+[the internals section](../internals/pipeline). This guide stays in user terms:
 
 - [Reading `explain()` output](reading-explain) — every annotation decoded.
 - [What it rewrites](rewrites) — and what it deliberately won't.

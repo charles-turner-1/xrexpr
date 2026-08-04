@@ -95,6 +95,14 @@ What a plan is, how to read `explain()` output, and exactly which rewrites you g
 and which you deliberately don't.
 :::
 
+:::{grid-item-card} {octicon}`tools` Internals
+:link: internals/pipeline
+:link-type: doc
+
+The mechanism: the five pipeline stages and their contracts, how the plan is
+represented, and what lowering guarantees.
+:::
+
 ::::
 
 ```{toctree}
@@ -116,4 +124,15 @@ guide/reading-explain
 guide/rewrites
 guide/grouped-windowed-weighted
 guide/rechunking
+```
+
+```{toctree}
+:hidden:
+:caption: Internals
+:maxdepth: 2
+
+internals/pipeline
+internals/ir
+internals/operations
+internals/lowering
 ```
