@@ -135,4 +135,7 @@ internals/pipeline
 internals/ir
 internals/operations
 internals/lowering
+internals/optimiser
+internals/schema
+internals/values
 ```
