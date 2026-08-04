@@ -20,12 +20,17 @@ in this module, never expected noise. Two narrowings are worth naming:
   manager, so :data:`HAS_DASK` gates the kind out rather than letting a drawn chain
   raise. Where it is installed, both call forms are generated — see :func:`_rechunks`.
 
-``.reduce`` **is** generated, as of #96. It used to be excluded because ``_reduce_dims``
+``.reduce`` **is** generated, as of #96. It used to be excluded because ``_dim_spec``
 read its first positional — a *function* — as a dim spec; now that the dim spec is read
 from the second, the node is honest and the chains are worth generating. It is drawn
 separately from :data:`REDUCE_NAMES` rather than added to it, because its call shape
 differs (the function comes first) and the builder closers are generated as
 ``name(**spec)``.
+
+**Scans** (``cumsum``/``cumprod``/``diff``, :data:`SCAN_NAMES`) are generated too, as of
+W6. They are order-significant but dim-keeping, so the equality-vs-eager property is what
+proves the optimiser hops a *disjoint* select or projection across a scan while leaving an
+intersecting one put — the leave-don't-raise leg the hand-written goldens pin by example.
 
 **Builder chains** (``groupby``/``resample``/``rolling``/``coarsen``/``weighted``) are
 generated too, by :func:`builder_plans`. They feed the *contract* properties below
@@ -55,7 +60,7 @@ from xrexpr.chunks import Auto, BlockSeq, ByteSize
 from xrexpr.ir import ContextOpen, Opaque, Rechunk, Select
 from xrexpr.lower import Call as Lowered
 from xrexpr.lower import emit, to_lower_ir
-from xrexpr.operations import CONTEXT_METHODS, OP_TABLE, ReduceSpec
+from xrexpr.operations import CONTEXT_METHODS, OP_TABLE, ReduceSpec, ScanSpec
 from xrexpr.optimize import optimize
 from xrexpr.schema import SchemaState, apply_schema, to_opnode
 
@@ -68,6 +73,11 @@ REDUCE_NAMES = tuple(
         n for n, s in OP_TABLE.items() if isinstance(s, ReduceSpec) and n != "reduce"
     )
 )
+
+#: Order-significant scans, spelled ``name(dim)`` positionally. ``diff`` shrinks its dim,
+#: ``cumsum``/``cumprod`` keep it; all three are drawn so the equality-vs-eager property
+#: proves a disjoint select or projection may hop while an intersecting one stays put.
+SCAN_NAMES = tuple(sorted(n for n, s in OP_TABLE.items() if isinstance(s, ScanSpec)))
 
 #: The function generated ``.reduce`` calls pass. ``np.mean`` deliberately: the
 #: drawability constraints of a ``.reduce`` call are those of the function it is given,
@@ -692,7 +702,9 @@ def _calls(draw, ds, max_ops=4, builders=False):
 
     # "builder" twice, so the ``assume`` in ``builder_plans`` discards fewer examples —
     # a chain with no builder pair in it is just a plain chain, already covered.
-    kinds = ["isel", "sel", "reduce", "project"] + (["builder"] * 2 if builders else [])
+    kinds = ["isel", "sel", "reduce", "scan", "project"] + (
+        ["builder"] * 2 if builders else []
+    )
     if HAS_DASK:
         kinds.append("chunk")
 
@@ -736,6 +748,27 @@ def _calls(draw, ds, max_ops=4, builders=False):
                     )
                 ),
             )
+            current = _apply(current, [call])
+            calls.append(call)
+            continue
+
+        if kind == "scan":
+            scans = SCAN_NAMES
+            if any(v.dtype == bool for v in current.data_vars.values()):
+                # ``diff`` subtracts, which numpy refuses on booleans (an upstream
+                # ``all``/``any`` produces them); ``cumsum``/``cumprod`` cast and are fine.
+                scans = tuple(n for n in scans if n != "diff")
+            name = draw(st.sampled_from(scans))
+            if name == "diff":
+                # ``diff`` shrinks its dim by one, so draw a dim long enough to stay
+                # non-empty -- an empty dim is legal but noise here, not the point.
+                candidates = sorted(d for d, s in current.sizes.items() if s >= 2)
+                if not candidates:
+                    continue
+                dim = draw(st.sampled_from(candidates))
+            else:
+                dim = draw(st.sampled_from(sorted(current.sizes)))
+            call = Call(name, dim)
             current = _apply(current, [call])
             calls.append(call)
             continue

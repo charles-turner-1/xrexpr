@@ -263,9 +263,34 @@ def test_bare_mean_then_select_raises(ds):
 
 
 def test_cumsum_then_select_computes(ds):
-    """A ``cumsum`` followed by a select computes to the eager result, left in place since a scan's order matters."""
+    """A ``cumsum`` followed by a select on its own dim computes to the eager result, left in place since a scan's order matters."""
     got = ds.plan.cumsum("time").isel(time=2).collect()
     assert_equal(got, ds.cumsum("time").isel(time=2))
+
+
+def test_cumsum_then_disjoint_select_matches_eager(ds):
+    """A ``cumsum`` then a select on a disjoint dim reorders, and still collects to the eager result.
+
+    Notes
+    -----
+    The optimiser hops ``isel(lat=0)`` in front of ``cumsum("time")``; the two commute
+    because the scan runs independently at each ``lat``, and ``assert_equal`` is what proves
+    the reorder changed no value.
+    """
+    got = ds.plan.cumsum("time").isel(lat=0).collect()
+    assert_equal(got, ds.cumsum("time").isel(lat=0))
+
+
+def test_diff_then_disjoint_select_matches_eager(ds):
+    """A ``diff`` then a disjoint select reorders and collects to the eager result, the shrunk dim included."""
+    got = ds.plan.diff("time").isel(lat=0).collect()
+    assert_equal(got, ds.diff("time").isel(lat=0))
+
+
+def test_projection_past_scan_matches_eager(ds):
+    """A projection hopped in front of a scan collects to the same result as eager, coords included."""
+    got = ds.plan.cumsum("time")[["temperature"]].collect()
+    assert_equal(got, ds.cumsum("time")[["temperature"]])
 
 
 def test_projection_pushdown_equal(ds):
