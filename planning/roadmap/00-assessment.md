@@ -5,6 +5,18 @@
 [`indexer-follow-ups.md`](../indexer-follow-ups.md); supersedes none of them — this is
 the plan for what comes after them.)*
 
+## Status at a glance
+
+- [x] W1 — grouped-op barrier
+- [x] W2 — lowering stage + fused GroupedReduce/WindowedReduce/WeightedReduce
+- [x] W3 — SchemaState sizes → int | None
+- [x] W4 — chunk-spec taxonomy (closes the W8 Rust gate)
+- [ ] W5 — Elementwise + its cross rules
+- [ ] W6 — Scan gains its dims
+- [~] W7 — small wins (§1, §5 done; §2 unblocked; §3 part-blocked on W6)
+- [ ] W8 — PyO3 spike (now ungated; unscheduled)
+- [x] W10 — documentation site
+
 ## Where the codebase stands
 
 The structural programme both memos argued for has landed on `main`:
@@ -89,18 +101,18 @@ The numbering is the reading order: workstreams are numbered by phase (below), s
 files read linearly — the keystone right after the safety fix, the superseded memo last
 as an appendix.
 
-| # | spec | what | size |
-|---|---|---|---|
-| W1 | [`01-grouped-barrier.md`](./01-grouped-barrier.md) | opaque-context barrier for accessor-returning ops (correctness) | ~50 LOC, 1 PR |
-| W2 | [`02-lowering.md`](./02-lowering.md) | the lowering stage + the three fused builder nodes (design memo) | memo + 8 PRs |
-| W3 | [`03-schema-sizes.md`](./03-schema-sizes.md) | `SchemaState` sizes → `int \| None` (salvaged from W9 §4) | 1 PR |
-| W4 | [`04-chunk-taxonomy.md`](./04-chunk-taxonomy.md) | the chunk-spec value sum type — closes doc 2 §3 | 1–2 PRs |
-| W5 | [`05-elementwise.md`](./05-elementwise.md) | reintroduce `Elementwise` + selects/projections cross it | 2–3 PRs |
-| W6 | [`06-scan-dims.md`](./06-scan-dims.md) | `Scan` gains its dims + scan-aware select pushdown | 1 PR |
-| W7 | [`07-small-wins.md`](./07-small-wins.md) | independent small rules & cleanups, pick up between workstreams | ~1 PR each |
-| W8 | [`08-rust-gate.md`](./08-rust-gate.md) | the Rust gate conditions and the PyO3 spike spec | timeboxed spike |
-| ~~W9~~ | [`09-grouped-contexts.md`](./09-grouped-contexts.md) | **superseded by W2**; kept for the record, §4 moved to W3 | — |
-| W10 | [`10-documentation.md`](./10-documentation.md) | the docs site (Sphinx + MyST, RTD-hosted, executed examples), essay migration, docstring slimming | 8 PRs |
+| ✓ | # | spec | what | size |
+|---|---|---|---|---|
+| [x] | W1 | [`01-grouped-barrier.md`](./01-grouped-barrier.md) | opaque-context barrier for accessor-returning ops (correctness) | ~50 LOC, 1 PR |
+| [x] | W2 | [`02-lowering.md`](./02-lowering.md) | the lowering stage + the three fused builder nodes (design memo) | memo + 8 PRs |
+| [x] | W3 | [`03-schema-sizes.md`](./03-schema-sizes.md) | `SchemaState` sizes → `int \| None` (salvaged from W9 §4) | 1 PR |
+| [x] | W4 | [`04-chunk-taxonomy.md`](./04-chunk-taxonomy.md) | the chunk-spec value sum type — closes doc 2 §3 | 1–2 PRs |
+| [ ] | W5 | [`05-elementwise.md`](./05-elementwise.md) | reintroduce `Elementwise` + selects/projections cross it | 2–3 PRs |
+| [ ] | W6 | [`06-scan-dims.md`](./06-scan-dims.md) | `Scan` gains its dims + scan-aware select pushdown | 1 PR |
+| [~] | W7 | [`07-small-wins.md`](./07-small-wins.md) | independent small rules & cleanups, pick up between workstreams | ~1 PR each |
+| [ ] | W8 | [`08-rust-gate.md`](./08-rust-gate.md) | the Rust gate conditions and the PyO3 spike spec | timeboxed spike |
+| — | ~~W9~~ | [`09-grouped-contexts.md`](./09-grouped-contexts.md) | **superseded by W2**; kept for the record, §4 moved to W3 | — |
+| [x] | W10 | [`10-documentation.md`](./10-documentation.md) | the docs site (Sphinx + MyST, RTD-hosted, executed examples), essay migration, docstring slimming | 8 PRs |
 
 ## Sequencing
 
@@ -310,3 +322,22 @@ while it and the tracker agree.
   otherwise sit in a leading `#` comment into a `Notes` section instead; leave trailing,
   line-level comments where they are. `ruff`'s `D` rules run on `tests/**` too (only
   `D401` is exempted there, for the declarative-summary point above).
+
+## Checkpoint — status refresh (2026-08-04)
+
+A status entry, not a revision: no decision above changes. This reconciles the doc with
+`main` and adds the checkboxes in §"Status at a glance".
+
+Landed since the 2026-07-29 handover:
+
+- **W4** — chunk taxonomy (#122/#123) and the extent-dependent-spec barrier (#121/#129);
+  this closed the **W8 Rust gate's last condition** — the gate is now fully open.
+- **W10** — the documentation site, in full: Sphinx skeleton + executed quickstart, CI/RTD
+  build, user guide, internals essays, generated API reference, docstring/README slimming
+  (#134–#144, PRs 1–9).
+- Planning docs moved to `planning/` (#138) — hence this file's new path.
+
+Everything still open: **W5** (Elementwise, #101), **W6** (Scan dims, #100), **W7 §2/§3**
+(#103/#104), **W8** (the Rust spike, #106 — ungated, unscheduled), and the "schema lies"
+family (#60, #109, #115, #117). Deferred by design: #91 (GroupedMap), #107 (the
+weighted-select rule).
