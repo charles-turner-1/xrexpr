@@ -181,11 +181,19 @@ docs/
 │   │                             optimiser, an escape hatch per layer (Label /
 │   │                             OpaqueChunk / Opaque); extent-dependence; D4, D5.
 │   │                             Sources: indexers.py:1-29, chunks.py:1-52.
-│   └── design-history.md         an annotated reading list: the origin memo, the
-│                                 structural-dispatch series, the IR discussions, this
-│                                 roadmap. **GitHub URLs, not relative links** — these
-│                                 files are outside include_patterns, and a relative
-│                                 link to an unbuilt file is a -W failure.
+│   └── (design-history.md)       **cut during PR 6.** It was specced as an annotated
+│                                 reading list linking the memos by GitHub URL. Three
+│                                 reasons against, agreed with the maintainer: it
+│                                 duplicates `planning/README.md`, which is the same
+│                                 index sitting next to the files it describes; its
+│                                 links would be the only ones in the site `-W` cannot
+│                                 check, and #138 moved every one of those files, so
+│                                 they demonstrably rot; and it lends a published
+│                                 standing to material whose own README says it is
+│                                 uneven and sometimes superseded. Replaced by a short
+│                                 pointer at the foot of `internals/pipeline.md` — one
+│                                 URL, to the directory rather than to nine files.
+│                                 The acceptance criteria never named this page.
 └── api/
     └── index.md                  autosummary tables in {eval-rst} blocks, grouped:
                                   top-level (LazyProxy, Explanation,
@@ -333,9 +341,11 @@ workstream's stated policy, not an oversight.
 ### PR 6 — internals, second half
 
 `internals/optimiser.md`, `internals/schema.md`, `internals/values.md`,
-`internals/design-history.md`; D3, D4. Sources: `optimize.py:1-51`, `schema.py:1-20`,
-`indexers.py:1-29`, `chunks.py:1-52`. `design-history.md` links the memos by GitHub URL
-only.
+D3, D4. Sources: `optimize.py:1-51`, `schema.py:1-20`, `indexers.py:1-29`,
+`chunks.py:1-52`. `design-history.md` was **cut** — see the note in the tree above; the
+memos get one pointer from `internals/pipeline.md` instead. D5 is drawn a second time on
+`internals/values.md`, grouped as the optimiser matches on it, since the guide's copy is
+pitched at a user deciding how to spell a `chunk()` call.
 
 **Proof:** as PR 5.
 

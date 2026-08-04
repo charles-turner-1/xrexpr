@@ -98,3 +98,14 @@ about kinds, rules or schemas — it invokes calls.
 - [The IR](ir) — why a list, why kinds rather than methods, and what the two levels are for.
 - [The operation table](operations) — how a method name becomes a kind.
 - [Lowering](lowering) — why fusion is a stage, and what happens to a pair nothing claims.
+- [The optimiser](optimiser) — the rule catalogue, the fixpoint, and where the schema
+  stops being trustworthy.
+- [The logical schema](schema) — what is tracked, and why dims are derived rather than stored.
+- [The value taxonomies](values) — indexers and chunk specs as closed sum types.
+
+Further back than that, the arguments themselves are on record. The
+[`planning/`](https://github.com/charles-turner-1/xrexpr/tree/main/planning) directory
+holds the design memos and the roadmap, indexed by its own README. Expect them to be
+uneven — some are settled rationale, some are transcripts of arguments, and some are
+superseded by the code they were arguing about. Where a memo and the code disagree, the
+code wins, and these pages follow the code.
