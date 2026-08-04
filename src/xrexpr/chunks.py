@@ -1,54 +1,23 @@
-"""The *chunk* value sum type: a closed taxonomy over what one dim's chunk spec is.
+"""The *chunk* value sum type — a closed taxonomy over what one dim's chunk spec is.
 
-``Rechunk.chunks`` maps each named dim to one chunk *spec*. Like an indexer value, a raw
-chunk spec is a sum type in disguise — a size, a symbolic request, or an explicit block
-sequence — and holding it as ``Any`` forces every call site to re-derive the shapes by
-hand. This module makes the taxonomy a *type*, so the classification lives in one place
-(:func:`classify_chunk`) and what follows from it becomes a method rather than a
-re-decision:
+``Rechunk.chunks`` maps each named dim to one spec. A raw chunk spec is a sum type in
+disguise (a size, a symbolic request, an explicit block sequence), so this module makes
+the taxonomy a *type*: :func:`classify_chunk` is the sole constructor and is **total**,
+and what follows from a variant is a method (:meth:`to_raw`) rather than a re-decision at
+every call site. The variants are one per *behaviour*, not one per spelling, which is why
+``None`` (keep the existing blocks) and ``-1`` (fuse them into one) are two of them.
 
-- :meth:`to_raw` — the exact xarray-facing value to hand back to replay when a rewrite
-  rebuilds a rechunk's ``args`` from its ``chunks``.
-
-Whether a given spec may be *crossed* by a select is deliberately **not** modelled here:
+Whether a spec may be *crossed* by a select is deliberately **not** modelled here:
 pushability is a policy the optimiser chooses (``optimize._pushable_rechunk``), not an
-intrinsic fact of a value — the same stance ``xrexpr.indexers`` takes on composition.
-What this module guarantees is the discriminant that policy matches on. The discriminant it
-happens to turn on is **extent-dependence**: :class:`Auto`, :class:`ByteSize` and
-:class:`BlockSeq` are the specs dask resolves by measuring the array it is handed, so what
-they mean changes when a select changes the data, while a size, ``-1`` and ``None`` mean the
-same thing on any array. Each variant's notes say which it is; no variant carries a flag
-saying what the optimiser should therefore do.
+intrinsic fact of a value. What this module owns is the discriminant that policy matches
+on, which happens to be **extent-dependence** — :class:`Auto`, :class:`ByteSize` and
+:class:`BlockSeq` are the specs dask resolves by measuring the array it is handed. Each
+variant's notes say which it is; none carries a flag saying what the optimiser should
+therefore do.
 
-The variants are one per *behaviour*, not one per spelling, and the split was checked
-against the pinned xarray/dask rather than reasoned about. Applying each to
-``ds.chunk({"time": 100})`` on a 1000-long dim:
-
-============ ================================ ================================
-raw          result                           variant
-============ ================================ ================================
-``None``     keeps the existing 100-blocks    :class:`NoChange`
-``-1``       collapses to one 1000-block      :class:`FullDim`
-``"auto"``   dask re-picks by its byte target :class:`Auto`
-``"100MB"``  dask re-picks to that target     :class:`ByteSize`
-``100``      uniform 100-blocks               :class:`SingleSize`
-``(100, 9)`` those blocks exactly             :class:`BlockSeq`
-============ ================================ ================================
-
-So ``None`` and ``-1`` are **not** two spellings of one behaviour, which is why both
-:class:`NoChange` and :class:`FullDim` exist.
-
-:class:`OpaqueChunk` is this layer's escape hatch, the role :class:`~xrexpr.indexers.Label`
-plays for indexers and :class:`~xrexpr.ir.Opaque` plays for op kinds. It exists because
-:func:`classify_chunk` must be **total** — ``Rechunk.__post_init__`` classifies hand-built
-nodes too, and the accessor records whatever it is handed. Some of what lands there xarray
-accepts (a whole float coerces; ``True`` means blocks of 1) and most of it xarray rejects
-(``0`` divides by zero, ``-2`` raises). Neither case is modelled: the first is a spelling
-xarray's own API does not offer, the second is an error that stays the caller's to see —
-recording it opaquely leaves the rechunk a barrier and lets the failure surface at replay,
-in xarray's words, exactly as it would have eagerly. A byte-target string is never opaque
-even when it is nonsense: it is a :class:`ByteSize`, whose parse is dask's judgement at
-replay for the same reason.
+See ``docs/internals/values.md`` for the classification tree, and
+``docs/guide/rechunking.md`` for the raw-to-variant table, measured against the pinned
+xarray/dask rather than reasoned about.
 """
 
 import numbers

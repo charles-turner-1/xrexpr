@@ -1,34 +1,23 @@
 """Static metadata about the xarray operations the optimiser reasons about.
 
-Every method the recorder can see is one row in :data:`OP_TABLE`, and each row is an
-:data:`OpSpec` — a **sum type over dispatch kinds**, one variant per
-:data:`~xrexpr.ir.Op` variant ``to_opnode`` can build. The key distinctions:
+Every method the recorder can classify is one row in :data:`OP_TABLE`, and each row is an
+:data:`OpSpec` — a sum type over *dispatch kinds*, one variant per :data:`~xrexpr.ir.Op`
+variant ``to_opnode`` can build. The distinction the table exists to draw is
+:class:`ReduceSpec` (``mean``/``sum``/``std``), which **destroys** its dim, against
+:class:`ScanSpec` (``cumsum``/``cumprod``/``diff``), which **keeps** it: lumping the two
+together is what lets a scan be reordered as though it were a reduction.
 
-- :class:`ReduceSpec` (``mean``/``sum``/``std``/...), which **destroys** its dim, from
-- :class:`ScanSpec` (``cumsum``/``cumprod``/``diff``), which **keeps** it.
+A spec *is* the kind rather than carrying a ``kind: str`` field, which is what makes
+``to_opnode``'s dispatch a single ``match`` closed by ``assert_never`` — a variant added
+here without an arm there is a type error, not a call silently recorded as
+:class:`~xrexpr.ir.Opaque`. Each variant carries its own ``name``, typed as the ``Literal``
+its ``Op`` counterpart demands, and :data:`OP_TABLE` is **derived** from those names, so a
+row cannot be filed under a key that disagrees with it.
 
-Lumping those two together is the root of the ``cumsum`` reordering bug called out in
-the report (a scan must not be treated like a reduction). :class:`RechunkSpec`
-(``chunk``) is a third case again: it touches no dim at all, only chunk topology, which
-is what lets a selection cross it. :class:`SelectSpec` resolves its dim effect per call,
-from the indexer. :class:`ContextSpec` is *half* an operation — a builder-returning call
-whose meaning ``lower.to_lower_ir`` settles once it can see the closer. And
-:class:`ProjectSpec` is the one row the table can only **nominate**: see its docstring.
+:class:`ProjectSpec` is the one row the table can only *nominate*: ``__getitem__`` is a
+projection when its key names variables and an :class:`~xrexpr.ir.Opaque` otherwise.
 
-A spec *is* the kind, rather than carrying a ``kind: str`` field: that is what makes
-``to_opnode``'s dispatch a single ``match`` closed by ``assert_never``, so a variant
-added here without an arm there is a type error rather than a call silently recorded as
-:class:`~xrexpr.ir.Opaque`. It is the same move ``ir.Op`` and ``indexers.Indexer``
-already made — see ``planning/structural-dispatch.md`` §1 on why a ``kind`` string is a sum
-type whose variants live only in the designer's head. Kind-specific metadata then has
-somewhere to live: :attr:`ReduceSpec.dim_arg` is a field rather than a second table
-keyed by name all over again.
-
-Each variant carries its own ``name``, typed as the ``Literal`` its
-:data:`~xrexpr.ir.Op` counterpart demands, and :data:`OP_TABLE` is *derived* from those
-names. So a row cannot be filed under a key that disagrees with it, and a lookup's name
-arrives at the ``Op`` constructor already typed — no ``cast`` in between. This table is
-the single source of truth that drives ``to_opnode``.
+See ``docs/internals/operations.md``.
 """
 
 from dataclasses import dataclass

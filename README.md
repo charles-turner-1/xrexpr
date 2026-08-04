@@ -1,5 +1,7 @@
 # xrexpr
 
+[![Documentation Status](https://readthedocs.org/projects/xrexpr/badge/?version=latest)](https://xrexpr.readthedocs.io/en/latest/)
+
 > [!WARNING]
 > This is a **work in progress**, and I've had Claude (mostly Opus, some Fable) write the code for me. Because of that, it might look good (IDK),
 > but it is certainly not complete or and has not been drive-tested in any meaningful sense of the word. Claims about functionality
@@ -189,96 +191,28 @@ This isn't the optimiser playing fast and loose. The invariant, stated precisely
 
 ## Under the hood
 
-<details>
-<summary><b>How the optimiser actually works</b></summary>
+The full documentation is at
+**[xrexpr.readthedocs.io](https://xrexpr.readthedocs.io/en/latest/)**. The
+[user guide](https://xrexpr.readthedocs.io/en/latest/guide/concepts.html) covers what a
+plan is, [how to read `explain()` output](https://xrexpr.readthedocs.io/en/latest/guide/reading-explain.html),
+[exactly which rewrites you get](https://xrexpr.readthedocs.io/en/latest/guide/rewrites.html)
+and which you deliberately don't, plus the two chains that need their own page —
+[grouped, windowed and weighted reduces](https://xrexpr.readthedocs.io/en/latest/guide/grouped-windowed-weighted.html)
+and [rechunking](https://xrexpr.readthedocs.io/en/latest/guide/rechunking.html). Every
+plan printed on those pages is produced by running the code at build time, so none of it
+can drift from what the package actually does.
 
-`xrexpr` records each call as a normalised operation against a cheap *logical schema*
-(dims, sizes and which variables carry which dims — never the array data), then rewrites
-the plan to a fixpoint with a few local, result-preserving rules:
+If you want the mechanism rather than the behaviour, the
+[internals](https://xrexpr.readthedocs.io/en/latest/internals/pipeline.html) section has
+the five pipeline stages and their contracts, the IR, the rule catalogue and why the
+fixpoint terminates. The
+[API reference](https://xrexpr.readthedocs.io/en/latest/api/index.html) is generated from
+the source.
 
-- **merge** consecutive `isel`/`sel` selections into a single indexer;
-- **push** a selection left past any reduction (`mean`, `sum`, `std`, ...) whose dims it
-  doesn't touch, so the reduction scans a smaller array;
-- **push** a variable projection (`ds[["tas"]]`, `ds["tas"]`) left past reductions and
-  selections, so only the variables you asked for flow through the plan;
-- **push** a selection left past a `chunk()`, so the rechunk moves less data.
-
-A projection only moves while the variables it keeps still carry the dimensions the
-operations it crosses name. If `elevation` has no `time` dimension, then
-`ds.plan.mean(dim="time")[["elevation"]]` is left exactly as written — reordering it
-would leave `mean(dim="time")` with no `time` to reduce.
-
-Scans (`cumsum`, `cumprod`, `diff`) are order-sensitive, so a selection on the scanned
-dimension is left exactly where you put it.
-
-</details>
-
-<details>
-<summary><b>Rechunking</b></summary>
-
-A `chunk()` changes no value — only chunk topology — so a selection can always move in
-front of one, leaving less data to shuffle. When the selection drops the only dimension
-the rechunk named, the rechunk has nothing left to do and disappears:
-
-```python
->>> print(ds.plan.chunk({"time": 100}).isel(time=0).explain())
-plan (1 ops):
-  1. Select  isel(time=0)
-```
-
-Selecting a *range* keeps the rechunk, and lands on better blocks than the eager order
-does: `ds.chunk({"time": 100}).isel(time=slice(50, 250))` cuts across block boundaries
-for ragged `(50, 100, 50)` chunks, where the rewritten plan rechunks the selected data
-into regular `(100, 100)` ones.
-
-One case is left alone: an *explicit block sequence* like `chunk({"time": (100, 400, 500)})`
-pins blocks that must sum to the dimension's length, so nothing crosses it — if you're
-spelling out block sizes, you're already planning your chunking deliberately.
-
-</details>
-
-<details>
-<summary><b>Grouped, rolling and weighted chains</b></summary>
-
-xarray spells some single operations as *two* calls via a builder object —
-`ds.groupby("time.month").mean()`, `ds.rolling(time=5).mean()`,
-`ds.weighted(w).mean("time")`. A recorder that sees one call at a time can't know what
-`groupby(...)` means until `.mean()` shows up, which is exactly the sort of thing that
-makes an optimiser reorder something it shouldn't.
-
-`xrexpr` handles this with a *lowering* pass that runs over the finished plan, where it
-can see both halves at once, and fuses each pair into a single node that knows which
-dimensions the operation really consumes and mints — which is why `explain()` prints one
-line, not two:
-
-```python
->>> print(ds.plan.rolling(time=5).mean().isel(lon=0).explain())
-plan (2 ops):
-  1. Select  isel(lon=0)
-  2. WindowedReduce  rolling(time=5).mean()
-```
-
-Selections and projections hop in front of grouped and windowed reduces whenever their
-dimensions are disjoint from the ones the operation touches. Weighted reduces take
-projections only: hoisting a *selection* past one would mean subsetting the weights array
-to match, which would be the first rewrite in the package to touch data rather than
-metadata, so it's deliberately left for later. Pairs `xrexpr` can't make sense of are
-demoted to opaque and replayed verbatim.
-
-</details>
-
-<details>
-<summary><b>Design notes and roadmap</b></summary>
-
-The design is written down at some length in [`planning/`](planning/), and the plan for what
-comes next lives in [`planning/roadmap/`](planning/roadmap/) — start with
+The arguments behind the design are in [`planning/`](planning/), and what comes next is in
+[`planning/roadmap/`](planning/roadmap/) — start with
 [`00-assessment.md`](planning/roadmap/00-assessment.md), which states where the codebase
-stands and what's still missing. In short: the intermediate representation and the
-lowering stage are in place; what's left is a proper type for chunk specs, letting
-selections cross elementwise ops instead of stopping at them, giving scans their
-dimensions, and widening the property-based test suite as each of those lands.
-
-</details>
+stands and what is still missing.
 
 ## Status
 

@@ -1,40 +1,23 @@
-"""Lowering: what the user *wrote* → what it *means* → the calls that reproduce it.
+"""Lowering — what the user *wrote* → what it *means* → the calls that reproduce it.
 
-Two pure stages either side of the optimiser, so the pipeline reads:
+The two pure translation stages either side of the optimiser. :func:`to_lower_ir` fuses
+the builder pairs xarray spells as two calls (``ds.groupby("time.month").mean()``) into
+the three fused kinds, and :func:`emit` maps one lowered node back to the call sequence
+that reproduces it — which is what makes a node standing for *two* calls ordinary rather
+than a special case the replay loop has to know about.
 
-.. code-block:: text
+Fusion is a stage rather than a rewrite rule for two reasons, and both matter when editing
+here. :func:`~xrexpr.schema.to_opnode` is a *per-call* function and cannot see a pair;
+``optimize``'s rules run to a shared fixpoint under a strictly-decreasing measure, whereas
+fusion runs **once** and is a *precondition* of those rules rather than one of them. The
+contract is that :func:`to_lower_ir` is **semantics-preserving** — ``emit(to_lower_ir(p))``
+replays as ``p`` does — and **idempotent**, which is what lets it run without first asking
+whether it has.
 
-    xarray calls → to_opnode → fluent IR → to_lower_ir → lowered IR
-                → optimize → lowered IR → emit → [Call] → _replay → xr.Dataset
+A builder pair no rule claims (``rolling_exp``, ``cumulative``) demotes to
+:class:`~xrexpr.ir.Opaque`, taking *both* halves with it.
 
-**Why a stage and not a rewrite rule.** :func:`~xrexpr.schema.to_opnode` is a *per-call*
-function: handed one recorded call, it must return one node with no knowledge of what
-follows. That is right for almost every xarray method — ``ds.mean("lat")`` is a
-:class:`~xrexpr.ir.Reduce` and nothing later can change that — but xarray spells some
-single semantic operations as **two** calls via builder objects
-(``ds.groupby("time.month").mean()``), and no per-call function can see the pair.
-:func:`to_lower_ir` runs over the *finished* plan, so it has the lookahead none of the
-earlier workarounds had.
-
-It cannot be one of ``optimize``'s rules either. Those run to a shared fixpoint under a
-strictly-decreasing measure; fusion runs **once**, and is a *precondition* of the rules
-rather than one of them — a rule matching a fused node cannot be correct on a plan where
-that node is still two. So :func:`to_lower_ir` is sequenced before ``optimize``, with its
-own contract:
-
-    :func:`to_lower_ir` is **semantics-preserving** — ``emit(to_lower_ir(p))`` replays to
-    the same result as ``p`` — and **idempotent**: applied to an already-lowered plan it
-    returns it unchanged.
-
-:func:`emit` is what makes a fused node expressible at all: it maps one lowered node to
-the call sequence that reproduces it, so a node standing for *two* calls is ordinary
-rather than a special case the replay loop has to know about.
-
-Three fused kinds — :class:`~xrexpr.ir.GroupedReduce`,
-:class:`~xrexpr.ir.WindowedReduce` and :class:`~xrexpr.ir.WeightedReduce`, one per builder
-kind. The openers no node describes take the opaque fallback below (``rolling_exp`` is a
-weighting rather than a fixed window, ``cumulative`` a scan in a builder's clothes), so
-those behave exactly as they did under the accessor's barrier.
+See ``docs/internals/lowering.md``.
 """
 
 from collections.abc import Hashable
