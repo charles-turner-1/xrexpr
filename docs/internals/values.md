@@ -2,9 +2,9 @@
 
 Two of the package's operations carry an argument that is a sum type in disguise:
 
-- `Select.indexer` maps each dim to one **indexer** value — a position, a slice, a
+- `Select.indexer` maps each dim to one **indexer** value: a position, a slice, a
   sequence, an array, a coordinate label.
-- `Rechunk.chunks` maps each dim to one **chunk spec** — a size, a symbolic request, an
+- `Rechunk.chunks` maps each dim to one **chunk spec**: a size, a symbolic request, an
   explicit block sequence.
 
 Held as `Any`, either one forces every call site in `ir.py`, `optimize.py` and
@@ -12,7 +12,7 @@ Held as `Any`, either one forces every call site in `ir.py`, `optimize.py` and
 taxonomy a *type* instead. They were written months apart and ended up with the same four
 design moves, which is the interesting part.
 
-## Move 1 — `classify` is the sole constructor
+## Move 1: `classify` is the sole constructor
 
 One function per taxonomy decides which variant a raw value is, and every raw value goes
 through it. There is no second place where a value is sorted, and no call site guesses.
@@ -22,35 +22,35 @@ rather than an error. That matters because classification happens at record time
 whatever the user handed the accessor, and refusing there would turn a chain xarray would
 have accepted into a chain `xrexpr` rejects.
 
-## Move 2 — what follows becomes a method, not a re-decision
+## Move 2: what follows becomes a method, not a re-decision
 
 Each variant answers the questions its consumers ask:
 
 | | indexers | chunk specs |
 |---|---|---|
-| does it drop the dim? | `drops_dim` | — |
-| how long is the dim afterwards? | `size()` | — |
+| does it drop the dim? | `drops_dim` | n/a |
+| how long is the dim afterwards? | `size()` | n/a |
 | what does replay get handed? | `to_raw()` | `to_raw()` |
 
 `to_raw` is the one both need, and it exists because a rewrite may *rebuild* a node's
-`args` from its normalised field — a select that merged with another, a rechunk that lost
+`args` from its normalised field: a select that merged with another, a rechunk that lost
 a dim to a hoisted select. Replay must then be handed the exact xarray-facing value, and
 the variant is what knows it.
 
-## Move 3 — policy stays with the optimiser
+## Move 3: policy stays with the optimiser
 
 Neither module models what the optimiser should *do*.
 
 Whether two indexers **compose** is not on `Indexer`; whether a chunk spec may be
 **crossed** is not on `ChunkSpec`. Both are policies the optimiser chooses to prove, not
-intrinsic facts about a value — so both stay a `match` in `optimize.py`, closed with
+intrinsic facts about a value, so both stay a `match` in `optimize.py`, closed with
 `assert_never` so that a new variant fails type-checking until someone decides which side
 of the line it falls on.
 
 What the value modules guarantee is the *discriminant* that policy matches on. No variant
 carries a flag saying what should therefore happen to it.
 
-## Move 4 — one escape hatch per layer
+## Move 4: one escape hatch per layer
 
 `Label` for indexers, `OpaqueChunk` for chunk specs, and `Opaque` for op kinds one level
 up. The same idea at three depths: a variant meaning "this is real, it will replay
@@ -99,13 +99,13 @@ a 0-d array is a `Scalar` rather than a one-element enumeration, so the rank che
 before the dtype dispatch.
 
 **`ForwardSlice` earns its own variant** so that the "forward, non-negative bounds"
-carve-out the composer needs is a *constructor invariant* — a `ForwardSlice` cannot be
-built with a negative bound — rather than a guard re-run at every call site. `GeneralSlice`
+carve-out the composer needs is a *constructor invariant* (a `ForwardSlice` cannot be
+built with a negative bound) rather than a guard re-run at every call site. `GeneralSlice`
 takes every other integer slice, and a slice with a non-integer bound is a label slice,
 which is not positional at all.
 
-**`Label` is the escape hatch.** A `sel` coordinate label — a string, a timestamp, a tuple
-key, a label slice, a label sequence — is genuinely open and cannot be reasoned about
+**`Label` is the escape hatch.** A `sel` coordinate label (a string, a timestamp, a tuple
+key, a label slice, a label sequence) is genuinely open and cannot be reasoned about
 positionally.
 
 `size()` has a boundary worth noting: sizing a dim whose current length is unknown, or a
@@ -114,7 +114,7 @@ guard that wraps every call to it.
 
 ## The chunk taxonomy
 
-Seven variants, and the same tree shape — but grouped by a discriminant that has no
+Seven variants, and the same tree shape, but grouped by a discriminant that has no
 counterpart on the indexer side.
 
 ```{mermaid}
@@ -173,13 +173,13 @@ they share an arm despite looking unalike:
 
 | variant | what a select in front would cause |
 |---|---|
-| `BlockSeq` | cannot replay at all — the blocks no longer sum to the dim |
-| `ByteSize` | replays to a different answer — the byte target divides a different extent |
+| `BlockSeq` | cannot replay at all: the blocks no longer sum to the dim |
+| `ByteSize` | replays to a different answer: the byte target divides a different extent |
 | `Auto` | either of the above, or a `ZeroDivisionError` if the select empties a dim |
 
 The `Auto` case is the one that forced the whole variant to be a barrier rather than some
 narrower condition. Whether it raises depends on dask's configured chunk size and on the
-array's rank — nothing a plan can read — so no narrower discriminant exists.
+array's rank (nothing a plan can read), so no narrower discriminant exists.
 
 `OpaqueChunk` is reached by a spelling xarray tolerates but does not document (a whole
 float; `True`, which asks for blocks of 1) and by one it rejects outright (`0`, `-2`, a
@@ -188,7 +188,7 @@ the second is an error that stays the caller's to see. Recording it opaquely lea
 rechunk a barrier and lets the failure surface at replay in xarray's words, exactly as it
 would have eagerly.
 
-A byte-target string is never opaque even when it is nonsense — it is a `ByteSize`, and
+A byte-target string is never opaque even when it is nonsense. It is a `ByteSize`, and
 whether it parses is dask's judgement at replay, for the same reason.
 
 ## Where the user-facing version lives

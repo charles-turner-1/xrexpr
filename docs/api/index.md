@@ -2,7 +2,7 @@
 
 Everything on this page is generated from the source: the signatures are the real ones
 and the prose is the docstring, so nothing here can drift from the code. The short notes
-under each heading are orientation only — the pages that *explain* the design are under
+under each heading are orientation only. The pages that *explain* the design are under
 [Internals](../internals/pipeline.md).
 
 The grouping follows the modules, and within a module it follows `__all__`. Names not
@@ -40,7 +40,7 @@ yourself.
 
 The intermediate representation: a flat list of frozen dataclasses. The six shared
 variants appear at both levels, `ContextOpen` only before lowering, and the three fused
-kinds only after it — see [the IR](../internals/ir.md) for why the levels differ and why the
+kinds only after it. See [the IR](../internals/ir.md) for why the levels differ and why the
 list is a list.
 
 ```{eval-rst}
@@ -85,7 +85,7 @@ dim*, deliberately distinct from `None`, which means *unknown*.
 ## Recognising a call
 
 The table that turns a method name into a node kind. Each spec carries the dispatch
-behaviour for its kind, so adding a method is a table entry rather than a branch — see
+behaviour for its kind, so adding a method is a table entry rather than a branch. See
 [the operation table](../internals/operations.md).
 
 ```{eval-rst}

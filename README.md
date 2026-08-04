@@ -12,7 +12,7 @@
 
 > [!NOTE]
 > **This is not an xarray project.** It isn't affiliated with, endorsed by, or supported by xarray or its
-> maintainers — it just happens to plug into xarray via the accessor API. It also isn't really a *package* yet,
+> maintainers. It just happens to plug into xarray via the accessor API. It also isn't really a *package* yet,
 > despite looking like one: it's closer to an LLM-assisted, unusually deep proof of concept that I'm using to
 > find out whether the idea holds up.
 
@@ -48,7 +48,7 @@ assert_equal(
 
 That's where `xrexpr` comes in. Importing it registers a `.plan` accessor on every
 `Dataset` and every `DataArray`. Chain your operations off `ds.plan` exactly as you
-would off `ds` (and off `da.plan` exactly as you would off `da`) — but
+would off `ds` (and off `da.plan` exactly as you would off `da`), but
 instead of running eagerly, each call is *recorded*. Calling `.collect()` optimises the
 recorded plan (reordering and merging where it's provably safe) and replays it:
 
@@ -80,11 +80,11 @@ plan (3 ops):
   3. Reduce  mean(dim='lon')  [consumes={lon}]
 ```
 
-The `isel` has been hoisted to the front — that's the reorder that buys the speed-up.
+The `isel` has been hoisted to the front. That's the reorder that buys the speed-up.
 
 Each line is one operation as `xrexpr` understands it: **what kind** it is, **the calls it
-will replay as**, and in brackets **what the calls don't say** — here, which dimensions
-each reduction removes. A bare `.mean()` shows `consumes=every dim`, and anything `xrexpr`
+will replay as**, and in brackets **what the calls don't say**. Here that's which
+dimensions each reduction removes. A bare `.mean()` shows `consumes=every dim`, and anything `xrexpr`
 does not model shows as `Opaque  ...  [not modelled -- nothing crosses it]`, which is where
 to look when a rewrite you expected didn't happen.
 
@@ -99,8 +99,8 @@ plan (2 ops):
 ```
 
 Builder pairs like `groupby(...).mean()` are *one* operation, and selections move in front
-of them as well — the climatology case, where the grouping runs over one latitude instead
-of over all of them and then discarding the rest:
+of them as well. This is the climatology case, where the grouping runs over one latitude
+instead of over all of them and then discarding the rest:
 
 ```python
 >>> print(ds.plan.groupby("time.month").mean().isel(lat=0).explain())
@@ -111,7 +111,7 @@ plan (2 ops):
 
 `time -> month` is the fact worth knowing about a grouped reduce: the result is indexed by
 a *new* `month` dimension and the original `time` is gone, so a selection on `time` after
-it means something quite different from one before it — and `xrexpr` leaves those where you
+it means something quite different from one before it, and `xrexpr` leaves those where you
 put them.
 
 ## Installing
@@ -127,7 +127,7 @@ The only hard dependencies are `xarray`, `frozendict` and `typing_extensions`. P
 1. **Nothing runs until you ask.** `ds.plan.<...>` records calls instead of executing
    them; `.collect()` (or `.compute()`) is the only thing that touches data.
 2. **Rewrites are structural, not statistical.** Between recording and replaying,
-   `xrexpr` looks at *dimensions and variable names only* — never at the arrays — and
+   `xrexpr` looks at *dimensions and variable names only*, never at the arrays. It
    applies rewrites that provably can't change the answer. There's no cost model and no
    guesswork.
 3. **When in doubt, it does nothing.** Anything it can't prove safe is left exactly
@@ -149,7 +149,7 @@ And what it deliberately *won't* touch:
 - **Order-sensitive ops.** A selection never hops over `cumsum`/`cumprod`/`diff` on the
   scanned dimension.
 - **Selections on a dimension an operation created.** `isel(month=0)` after a
-  `groupby("time.month")` is perfectly valid — it just can't move.
+  `groupby("time.month")` is perfectly valid. It just can't move.
 - **Anything it doesn't recognise.** An untabulated call (`fillna`, `astype`, ...) is a
   barrier: it replays verbatim, and rewrites don't cross it. `explain()` labels these
   `Opaque`.
@@ -169,14 +169,14 @@ InvalidExpressionError: isel() indexes ['lon'], which mean() has already reduced
 *not* walking into an error eager evaluation walks straight into:
 
 ```python
-ds  # temperature(time, lat, lon) float, and station(lat, lon) -- strings, no time
+ds  # temperature(time, lat, lon) float, and station(lat, lon): strings, no time
 
 ds.std("time")[["temperature"]]                  # TypeError, raised by `station`
 ds.plan.std("time")[["temperature"]].collect()   # succeeds
 ```
 
 The projection says outright that `station` isn't wanted. Eager computes its standard
-deviation anyway — purely because it happens to be in the Dataset — and falls over doing
+deviation anyway, purely because it happens to be in the Dataset, then falls over doing
 it, because numpy has no standard deviation for strings. The plan drops `station` before
 the reduction runs, so the failure never happens. `weighted` chains get the same
 treatment, and there the eager failure is even easier to hit: a weighted reduce *refuses*
@@ -196,7 +196,7 @@ The full documentation is at
 [user guide](https://xrexpr.readthedocs.io/en/latest/guide/concepts.html) covers what a
 plan is, [how to read `explain()` output](https://xrexpr.readthedocs.io/en/latest/guide/reading-explain.html),
 [exactly which rewrites you get](https://xrexpr.readthedocs.io/en/latest/guide/rewrites.html)
-and which you deliberately don't, plus the two chains that need their own page —
+and which you deliberately don't, plus the two chains that need their own page:
 [grouped, windowed and weighted reduces](https://xrexpr.readthedocs.io/en/latest/guide/grouped-windowed-weighted.html)
 and [rechunking](https://xrexpr.readthedocs.io/en/latest/guide/rechunking.html). Every
 plan printed on those pages is produced by running the code at build time, so none of it
@@ -210,17 +210,17 @@ fixpoint terminates. The
 the source.
 
 The arguments behind the design are in [`planning/`](planning/), and what comes next is in
-[`planning/roadmap/`](planning/roadmap/) — start with
+[`planning/roadmap/`](planning/roadmap/). Start with
 [`00-assessment.md`](planning/roadmap/00-assessment.md), which states where the codebase
 stands and what is still missing.
 
 ## Status
 
-Early. The core invariant — `ds.plan.<chain>.collect()` equals the eager chain — is
+Early. The core invariant, `ds.plan.<chain>.collect()` equals the eager chain, is
 checked by a property-based test suite over generated datasets and generated chains, but
 the set of xarray operations it understands is small, and everything outside that set
 falls back to running your chain as written.
 
 If it doesn't do anything for you, or does something surprising, please
-[open an issue](https://github.com/charles-turner-1/xrexpr/issues) — the interesting bug
+[open an issue](https://github.com/charles-turner-1/xrexpr/issues). The interesting bug
 reports are the chains where it *should* have found a rewrite and didn't.

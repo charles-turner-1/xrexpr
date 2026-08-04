@@ -9,7 +9,7 @@ Python 3.10 or newer. The only hard dependencies are
 
 ## Optional: dask
 
-`xrexpr` itself is dask-free, and stays that way — nothing in the package imports it.
+`xrexpr` itself is dask-free, and stays that way. Nothing in the package imports it.
 You only need [dask](https://docs.dask.org/en/stable/) if your own chains call
 `.chunk()`, because replaying a rechunk needs a chunk manager to replay it *with*:
 
