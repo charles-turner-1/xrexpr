@@ -40,13 +40,13 @@ one — and instead rewrites the spec it crosses.
 **The schema, and how far it can be trusted.** Dim-level rules read almost everything they
 need off the nodes themselves, but a *variable*-level rule can't: whether a projection may
 cross an op depends on which dims the projected variables carry at that point in the plan.
-So :func:`optimize` takes the **base** schema and :func:`_schemas` folds it forward to give
+So :func:`optimize` takes the **base** schema and ``_schemas`` folds it forward to give
 the schema each node sees — the plan's single fold, and also where a symbolic
 :data:`~xrexpr.ir.ALL_DIMS` is resolved (:func:`~xrexpr.schema.resolve_dims`).
 :func:`~xrexpr.schema.apply_schema` models
 :class:`~xrexpr.ir.Opaque` as variable-preserving, which is not true of ``rename`` or
 ``drop_vars``, so those folded schemas are exact only up to the first opaque node —
-:func:`_trusted_prefix` marks that boundary and rules that consult ``data_vars`` stay
+``_trusted_prefix`` marks that boundary and rules that consult ``data_vars`` stay
 inside it.
 """
 
@@ -96,7 +96,7 @@ from xrexpr.schema import SchemaState, apply_schema, resolve_dims
 
 __all__ = ["optimize"]
 
-#: What the rules rewrite: a **lowered** plan. Spelled with
+#: What the rules rewrite — a **lowered** plan. Spelled with
 #: :data:`~xrexpr.ir.LoweredOp` rather than :data:`~xrexpr.ir.Op` because that is the
 #: level ``optimize`` is contracted to run at — a node that should have been fused away
 #: by ``lower.to_lower_ir`` becomes a type error here rather than a convention.
@@ -351,7 +351,7 @@ def merge_adjacent_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
     -----
     Consecutive ``isel``s (or ``sel``s) compose, so ``ds.isel(time=0).isel(lat=1)``
     becomes a single ``isel({time: 0, lat: 1})``. Selects on *different* dims simply
-    union; selects on the **same** dim are composed by :func:`_compose_into`, because
+    union; selects on the **same** dim are composed by ``_compose_into``, because
     the later indexer addresses positions within the earlier one's result rather than
     the original dim.
 
@@ -453,7 +453,7 @@ def _compose_into(
     the plain ``dict.update`` got wrong: ``isel(time=slice(100,1000)).isel(time=slice(10,20))``
     is *not* ``isel(time=slice(10,20))`` — the second indexer addresses positions
     **within the first's result**, so the two must compose (here to ``slice(110,120)``).
-    :func:`_compose_indexer` does that for the cases it can prove; ``None`` from either
+    ``_compose_indexer`` does that for the cases it can prove; ``None`` from either
     function means "don't merge these two selects at all" (the caller ends the run), so
     an uncomposable collision degrades to a correct two-node plan rather than a wrong
     one-node plan.
@@ -775,12 +775,12 @@ def merge_adjacent_projects(nodes: Plan, schema: SchemaState) -> Plan | None:
     result it discards. No value moves, because the surviving key is unchanged. Taking
     the schema-free reading is also what lets the rule admit a ``p1`` that names a
     coordinate (``ds[["lat", "temperature"]][["lat"]]``, which composes correctly), which
-    a ``data_vars`` guard confined to :func:`_trusted_prefix` could not do.
+    a ``data_vars`` guard confined to ``_trusted_prefix`` could not do.
 
     It also lets the rule fire past an :class:`~xrexpr.ir.Opaque` — but nothing recorded
     supplies such a pair any more. An ``Opaque`` may *return a DataArray*
     (``ds.plan.pipe(lambda d: d["tas"])``), on which a list key indexes rather than
-    projects, so :meth:`~xrexpr.accessor.LazyProxy._getitem_is_projection` demotes every
+    projects, so ``_getitem_is_projection`` demotes every
     ``__getitem__`` after one; without that, ``[[1, 2]][[1]]`` would satisfy the subset
     test and collapse to the wrong row. The behaviour stays for plans built by hand or by
     a future producer that *can* prove the receiver — the rule's contract is unchanged,
@@ -832,7 +832,7 @@ def pushdown_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
       runs the climatology over one latitude — the pattern this project exists for.
     - **overlapping dims, ``on_conflict="invalid"``** — a plain reduce *removed* those
       dims, so the chain can never replay (``mean("lon").isel(lon=0)``, and the all-dims
-      ``mean().isel(time=0)``): raise :class:`InvalidExpressionError` rather than emit a
+      ``mean().isel(time=0)``): raise :class:`~xrexpr.InvalidExpressionError` rather than emit a
       silently-wrong reorder.
     - **overlapping dims, ``on_conflict="immovable"``** — the dims survive in some form, so
       the chain is very likely *valid* and merely un-reorderable. ``.mean().isel(month=0)``
@@ -912,7 +912,7 @@ def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
       :func:`pushdown_selects` this rule never raises: that plan is perfectly valid
       eagerly, it simply can't be reordered.
 
-    The dims come from ``data_vars`` in the schema entering the crossed op (:func:`_schemas`),
+    The dims come from ``data_vars`` in the schema entering the crossed op (``_schemas``),
     i.e. the variables' dims *before* it — the post-op dims would report ``tas`` as lacking
     ``time`` and block the very case this rule exists for. Two conservative edges:
     a name that isn't a known data variable (a coordinate, or something an unmodelled op
@@ -1042,7 +1042,7 @@ def pushdown_selects_past_rechunks(nodes: Plan, schema: SchemaState) -> Plan | N
 
     What the rule does **not** do is repair a spec it moved past. The specs that would need
     repairing — ``"auto"`` and a byte target, whose meaning changes with the extent — are
-    refused by :func:`_pushable_rechunk` instead, because measurement says no repair exists:
+    refused by ``_pushable_rechunk`` instead, because measurement says no repair exists:
     naming the emptied dim ``"auto"``, xarray's own fix in `pydata/xarray#11486
     <https://github.com/pydata/xarray/pull/11486>`_, does not help, since dask's
     ``auto_chunks`` pins a zero-length auto dim to ``(0,)`` and *recurses*, and on the second
@@ -1095,7 +1095,7 @@ def _pushable_rechunk(node: Rechunk) -> bool:
     -----
     **One check about the call header**, which no taxonomy can answer: **option kwargs**
     (``token``, ``chunked_array_type``, ...) barrier, because a rebuilt spec couldn't carry
-    the option faithfully — the same reason :func:`_mergeable_select` bails. It is a fact
+    the option faithfully — the same reason ``_mergeable_select`` bails. It is a fact
     about how the call was written, not about what any spec is.
 
     **Then the specs**, both spellings through one ``match`` over

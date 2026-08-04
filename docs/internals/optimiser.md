@@ -105,7 +105,7 @@ fields. What is no longer available is taking it *by accident*.
 `pushdown_selects_past_rechunks` deliberately stays outside `dim_effect`: it has no
 disjointness test at all, because a rechunk changes no dimension and a select therefore
 *always* commutes with one. What it does instead is rewrite the spec it crosses — and
-which specs may be crossed is [a value-level question](values).
+which specs may be crossed is [a value-level question](values.md).
 
 ## The schema fold and how far it can be trusted
 

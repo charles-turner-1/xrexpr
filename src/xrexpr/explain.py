@@ -206,7 +206,7 @@ def _format_arg(arg: object) -> str:
     One line per node is the whole shape of this listing, and an argument is allowed to be
     an array: ``ds.weighted(w)`` holds a ``DataArray`` whose ``repr`` is a five-line block
     of dims, values and coords, which would swallow the plan around it. Its *dims* are the
-    part worth seeing and :func:`_annotate` shows them, so the payload itself elides to
+    part worth seeing and ``_annotate`` shows them, so the payload itself elides to
     ``<DataArray>``. Taking the ``repr`` to test it computes nothing: xarray reprs a
     dask-backed variable as its graph summary, never its values — pinned by
     ``tests/test_explain.py::test_a_dask_backed_argument_elides_without_computing``.

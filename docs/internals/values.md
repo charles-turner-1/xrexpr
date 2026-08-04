@@ -193,5 +193,5 @@ whether it parses is dask's judgement at replay, for the same reason.
 
 ## Where the user-facing version lives
 
-[Rechunking](../guide/rechunking) walks the chunk taxonomy with an executed plan per
+[Rechunking](../guide/rechunking.md) walks the chunk taxonomy with an executed plan per
 variant.

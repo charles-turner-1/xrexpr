@@ -183,4 +183,4 @@ assert_equal(
 
 That cell raises if the two ever disagree, which would fail this page's build.
 
-Next: [what it rewrites](rewrites), and what it deliberately won't.
+Next: [what it rewrites](rewrites.md), and what it deliberately won't.

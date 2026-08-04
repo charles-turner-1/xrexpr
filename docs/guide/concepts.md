@@ -23,7 +23,7 @@ Two things end a plan:
 - **`.explain()`** optimises the plan and renders it as text. Nothing runs.
 
 Because `explain()` stops one step short of `collect()`, it shows you exactly the plan
-that would have run — see [reading `explain()` output](reading-explain).
+that would have run — see [reading `explain()` output](reading-explain.md).
 
 ## What happens between recording and running
 
@@ -86,11 +86,11 @@ That middle clause is not a loophole — it's a feature, and
 
 If you want the mechanism rather than the model — how the plan is represented, what
 lowering guarantees, which rules exist and why the loop terminates — that's
-[the internals section](../internals/pipeline). This guide stays in user terms:
+[the internals section](../internals/pipeline.md). This guide stays in user terms:
 
-- [Reading `explain()` output](reading-explain) — every annotation decoded.
-- [What it rewrites](rewrites) — and what it deliberately won't.
-- [Grouped, windowed and weighted chains](grouped-windowed-weighted) — why two calls
+- [Reading `explain()` output](reading-explain.md) — every annotation decoded.
+- [What it rewrites](rewrites.md) — and what it deliberately won't.
+- [Grouped, windowed and weighted chains](grouped-windowed-weighted.md) — why two calls
   become one operation, and what moves past each kind.
-- [Rechunking](rechunking) — the one operation whose rewrite turns on how you spelled
+- [Rechunking](rechunking.md) — the one operation whose rewrite turns on how you spelled
   its argument.

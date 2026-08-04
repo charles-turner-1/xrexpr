@@ -106,7 +106,7 @@ class AllDims:
 #: The singleton :class:`AllDims`.
 ALL_DIMS: Final = AllDims()
 
-#: The dims an op removes: a concrete set, or :data:`ALL_DIMS` for a call that named
+#: The dims an op removes — a concrete set, or :data:`ALL_DIMS` for a call that named
 #: none. Readers must handle both — see this module's docstring.
 DimSet = frozenset[Hashable] | AllDims
 
@@ -198,7 +198,7 @@ class Select:
 
     @property
     def consumes(self) -> frozenset[Hashable]:
-        """Dims this select drops: the scalar-indexed ones (slices/sequences keep theirs).
+        """Dims this select drops — the scalar-indexed ones (slices/sequences keep theirs).
 
         Returns
         -------
@@ -334,7 +334,7 @@ class Rechunk:
     ``args`` rather than an independent fact, and one that disagreed with ``args`` would
     make the node replay as something other than what it claims. ``chunks`` is passed, since
     extracting it means knowing which kwargs are options rather than dims —
-    :func:`~xrexpr.schema._chunk_spec`'s job.
+    ``_chunk_spec``'s job.
 
     Whether a given rechunk may be *crossed* is deliberately not decided here — that
     judgement lives with the rule (``_pushable_rechunk`` in ``optimize.py``), as it does
@@ -663,16 +663,16 @@ class WeightedReduce:
             object.__setattr__(self, "consumes", frozenset(self.consumes))
 
 
-#: The optimiser's IR node: a sum over the structural op *kinds*. ``match`` over this
+#: The optimiser's IR node — a sum over the structural op *kinds*. ``match`` over this
 #: binds different fields per arm; ``typing.assert_never`` on the ``case _`` arm makes
 #: the union exhaustive (adding a variant fails type-check at every unhandled site).
 Op = Reduce | Select | Scan | Project | Rechunk | Opaque
 
-#: What the recorder produces: one node per call, as the fluent API spelled it —
+#: What the recorder produces — one node per call, as the fluent API spelled it —
 #: including the half-operations (:class:`ContextOpen`) that only mean something paired.
 FluentOp = Op | ContextOpen
 
-#: What the optimiser rewrites: the same vocabulary, plus the nodes the fluent API cannot
+#: What the optimiser rewrites — the same vocabulary, plus the nodes the fluent API cannot
 #: express in a single call, and *minus* the opener, which lowering must have consumed.
 #: The asymmetry is the point — a :class:`ContextOpen` that outlived ``to_lower_ir``
 #: fails type-check at every site downstream of it.

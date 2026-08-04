@@ -2,8 +2,8 @@
 
 Importing the package registers the ``.plan`` accessor on ``Dataset`` and ``DataArray``
 alike, so ``ds.plan.mean("lat").isel(time=0).collect()`` records the chain, optimises it
-and replays the cheaper plan onto the object. See :mod:`xrexpr.accessor` for the entry
-point and :mod:`xrexpr.optimize` for the rewrite rules.
+and replays the cheaper plan onto the object. See ``xrexpr.accessor`` for the entry
+point and ``xrexpr.optimize`` for the rewrite rules.
 """
 
 from . import _version

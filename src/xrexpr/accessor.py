@@ -12,13 +12,13 @@ appended — recording holds no schema of its own. ``collect`` then runs the pla
 the pipeline in ``lower.py``: :func:`~xrexpr.lower.to_lower_ir` translates what was
 written into what it means, :func:`~xrexpr.optimize.optimize` rewrites that (a fixpoint
 of rules, folding the base schema forward itself), :func:`~xrexpr.lower.emit` turns the
-result back into calls, and :meth:`~LazyProxy._replay` performs them against the
+result back into calls, and ``_replay`` performs them against the
 base dataset.
 
 One class serves both objects, because only two things differ and neither is worth a
 second implementation: a ``DataArray`` has no ``data_vars`` (so the projection rules
 have nothing to fire on) and its ``__getitem__`` is *indexing*, not projection (see
-:meth:`LazyProxy._getitem_is_projection`). Which behaviour applies is read off the base
+``LazyProxy._getitem_is_projection``). Which behaviour applies is read off the base
 object rather than stored — the same derived-property discipline
 :class:`~xrexpr.schema.SchemaState` follows.
 """
@@ -105,9 +105,9 @@ class LazyProxy:
 
     Nothing downstream of recording is ``Dataset``-specific:
     :meth:`~xrexpr.schema.SchemaState.from_dataset` accepts either, lowering and the
-    rewrite rules reason about dim and variable *names*, and :meth:`_replay` is a
+    rewrite rules reason about dim and variable *names*, and ``_replay`` is a
     ``getattr`` loop. The two places the base type is legible are
-    :meth:`_getitem_is_projection` and — implicitly — the projection rules, which a
+    ``_getitem_is_projection`` and — implicitly — the projection rules, which a
     ``DataArray``'s empty ``data_vars`` makes unfireable rather than wrong.
 
     Examples
@@ -193,7 +193,7 @@ class LazyProxy:
 
         The cost is one rewrite and it is confined to ``merge_adjacent_projects``: past an
         ``Opaque`` the folded ``data_vars`` is a guess, so
-        :func:`~xrexpr.optimize._trusted_prefix` already keeps
+        ``_trusted_prefix`` already keeps
         :func:`~xrexpr.optimize.pushdown_projections` out. Two list-form projections behind
         a genuinely ``Dataset``-valued opaque (``ds.plan.rename(...)[["a", "b"]][["a"]]``)
         therefore stop merging — the case that cannot be told from the unsafe one without
@@ -303,7 +303,7 @@ class LazyProxy:
 
         Notes
         -----
-        - **Terminals** (:data:`_EAGER_ATTRS`: ``.plot``, ``.to_netcdf``, ...) consume
+        - **Terminals** (``_EAGER_ATTRS``: ``.plot``, ``.to_netcdf``, ...) consume
           the plan into an artifact that is no longer an xarray object, so they force
           materialisation and are read off the realised object — even though they are
           callable.
@@ -428,7 +428,7 @@ class LazyProxy:
         One line per lowered node, each still rendered as the calls that node emits, so
         the listing gains the optimiser's own view of the plan — fused nodes, opaque
         barriers, minted dims — without ceasing to answer "what will run". See
-        :mod:`xrexpr.explain` for the format and why each annotation is there.
+        ``xrexpr.explain`` for the format and why each annotation is there.
         """
         return Explanation(format_plan(self._optimized()))
 

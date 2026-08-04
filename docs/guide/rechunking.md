@@ -227,4 +227,4 @@ answer, which is why `explain()` is where you look for it.
 
 That is the whole of the user guide. If you want the mechanism rather than the model —
 how the plan is represented, what lowering guarantees, and why the rewrite loop
-terminates — start with [the pipeline](../internals/pipeline).
+terminates — start with [the pipeline](../internals/pipeline.md).

@@ -89,7 +89,7 @@ ds.plan.chunk({"time": 100}).isel(time=0).explain()
 
 Not every chunk spec may be crossed, though — an explicit block sequence pins blocks that
 must sum to the dimension's length, so nothing moves past one.
-[Rechunking](rechunking) covers where that line falls.
+[Rechunking](rechunking.md) covers where that line falls.
 
 ## What it deliberately won't touch
 
@@ -191,5 +191,5 @@ else. It cannot turn a working chain into a failing one, and it cannot change a 
 
 Two of the rewrites above deserve a page of their own, because what moves past them is
 less obvious than "do the dims overlap?":
-[grouped, windowed and weighted chains](grouped-windowed-weighted) and
-[rechunking](rechunking).
+[grouped, windowed and weighted chains](grouped-windowed-weighted.md) and
+[rechunking](rechunking.md).

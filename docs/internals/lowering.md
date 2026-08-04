@@ -39,7 +39,7 @@ at all, so a second pass has nothing left to match.
 which dimensions the operation really consumes and which it mints, which is the whole
 reason the optimiser can reason about a `groupby` at all — and why `explain()` prints one
 line where you made two calls. What the three mean for a user, and what moves past each,
-is [the guide's version](../guide/grouped-windowed-weighted).
+is [the guide's version](../guide/grouped-windowed-weighted.md).
 
 ## Emit is what makes a fused node expressible
 

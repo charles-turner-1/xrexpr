@@ -170,7 +170,7 @@ class ContextSpec:
     name: ContextOpenName
 
 
-#: What :data:`OP_TABLE` records about one tabulated xarray method: which
+#: What :data:`OP_TABLE` records about one tabulated xarray method — which
 #: :data:`~xrexpr.ir.Op` variant the call is, plus whatever that kind needs to know.
 #: ``to_opnode`` matches over this union and closes it with ``assert_never``; a name with
 #: no row at all is :class:`~xrexpr.ir.Opaque`.
@@ -209,7 +209,7 @@ _SPECS: tuple[OpSpec, ...] = (
     *(ContextSpec(name) for name in _CONTEXTS),
 )
 
-#: Every method the recorder can classify, keyed by name. **Derived** from :data:`_SPECS`
+#: Every method the recorder can classify, keyed by name. **Derived** from ``_SPECS``
 #: rather than written out as a mapping, so a row cannot be filed under a key that
 #: disagrees with the name it carries.
 OP_TABLE: dict[str, OpSpec] = {op.name: op for op in _SPECS}
