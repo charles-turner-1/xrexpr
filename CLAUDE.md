@@ -17,9 +17,6 @@ locked by `pixi.lock`), and it is what CI runs — `.github/workflows/ci.yml` us
 | Types | `pixi run mypy` |
 | Hooks | `pixi run pre-commit` |
 
-`uv.lock` and `.venv` are present but are **not** the environment to test against — `uv run`
-resolves a different dependency set from the one CI pins, so a pass there proves less.
-
 The default environment matches `test-py313` plus dev tooling and numbagg. The other
 `[tool.pixi.environments]` entries exist to pin the matrix CI runs; reach for them
 (`pixi run -e test-py310 test`, `pixi run -e test-nonumbagg test`) only when the change is
