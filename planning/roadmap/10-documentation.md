@@ -362,6 +362,37 @@ docstring-side is **in scope for this PR**, not deferred to PR 8.
 module-level publics renders a stub page; `viewcode` links resolve; build still `-W`
 clean.
 
+**As built**, four things this section did not anticipate:
+
+1. **`-W` cannot see a dangling role at all.** Sphinx reports unresolved `py` xrefs only
+   under `nitpicky`, so the build stayed green with ~200 of them present. The audit was a
+   separate `sphinx-build -n` to a throwaway directory, and that is the command to re-run
+   when docstrings change — `pixi run -e docs docs` will not tell you. Not wired into CI:
+   nitpicky also flags every numpydoc `{"isel", "sel"}` type field and every bare
+   `optional`, which render correctly, so it has no clean zero to assert against.
+2. **The stock autosummary class template documents no members.** It emits a bare
+   `autoclass` plus a table of member *names* — so `LazyProxy.collect`, the most-read
+   docstring in the package, appeared as a word with no signature and no prose. Overridden
+   by `docs/_templates/autosummary/class.rst` (`:members:`, plus `__getattr__` and
+   `__getitem__`, and deliberately not `:inherited-members:` — `Explanation` is a `str`).
+   That override is most of the fix; it also cleared ~120 of the dangling refs, which were
+   the stub tables pointing at pages the stock template never generated.
+3. **The listed groups go beyond the minimum above.** `optimize` contributes its five
+   rules, `DimEffect`, `dim_effect` and `Plan`, not just `optimize.optimize` — the
+   internals pages name all of them, and `Plan` is in six public signatures, where it
+   accounted for 12 dangling refs on its own.
+4. **Napoleon reads a leading `Prose: more prose` as a type field.** Six `#:` module-data
+   comments and two property summaries rendered a fabricated *Type:* line — `DimSet`
+   claimed `Type: The dims an op removes`. Fixed by an em dash at each site. Worth knowing
+   before writing the slimmed summaries in PR 8: **a module-data comment or a one-line
+   summary must not have a colon in its first sentence.**
+
+One site-wide fix landed here too. Every internal link was extensionless
+(`[lowering](lowering)`), which MyST resolves by *name* — so as soon as the API domain
+existed, `[…](values)` became ambiguous against `xrexpr.indexers.Mask.values` and failed
+the build. All 34 now carry `.md`, which makes them path lookups and immune to whatever
+the API reference adds next.
+
 ### PR 8 — slim the module docstrings and the README (last)
 
 Only after PRs 5–6 are live on RTD. For each module in `src/xrexpr/`: diff the essay

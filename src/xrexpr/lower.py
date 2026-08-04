@@ -136,9 +136,9 @@ def to_lower_ir(
     ``dim_names`` is the **base dataset's dim names**, and it is the one thing this pass cannot
     read off the calls: whether ``groupby("region")`` groups along a dim or along a
     coordinate defined on one is a fact about the data, not the call (see
-    :func:`_grouper_dims`). Dim names rather than a ``SchemaState`` because that is the
+    ``_grouper_dims``). Dim names rather than a ``SchemaState`` because that is the
     whole of what lowering needs to know — a set keeps this module's dependencies at
-    :mod:`xrexpr.ir` alone, and makes the requirement legible in the signature.
+    ``xrexpr.ir`` alone, and makes the requirement legible in the signature.
 
     Base dims rather than the dims *at* each opener, which would mean folding the schema
     forward through lowering. The gap is one-sided and pessimising: a dim minted mid-plan
@@ -214,7 +214,7 @@ def _fuse_grouped(
     closer : FluentOp
         The node recorded immediately after it.
     dim_names : frozenset of Hashable
-        The base dataset's dim names, passed through to :func:`_grouper_dims` — a grouper
+        The base dataset's dim names, passed through to ``_grouper_dims`` — a grouper
         that does not name one refuses (issue #90).
 
     Returns
@@ -234,7 +234,7 @@ def _fuse_grouped(
       component of a dim coordinate (``groupby("time.month")``), from which ``group_dim``
       reads off directly. A ``DataArray`` grouper or a ``Grouper`` object has no single
       ``group_dim``, so it refuses; so does a *non-dim coordinate* name, which is what
-      ``dim_names`` is threaded here to establish (:func:`_grouper_dims`).
+      ``dim_names`` is threaded here to establish (``_grouper_dims``).
     - **The closer must be an aggregating reduce.** This is the subtle one, and it is a
       correction to the obvious reading: a grouped reduce over dims that *exclude* the
       group dim is not an aggregation at all. ``ds.groupby("time.month").mean("lat")``
@@ -384,7 +384,7 @@ def _fuse_weighted(opener: ContextOpen, closer: FluentOp) -> WeightedReduce | No
 
     Notes
     -----
-    Unlike :func:`_fuse_windowed`, a closer that named dims is **fused, not refused**, and
+    Unlike ``_fuse_windowed``, a closer that named dims is **fused, not refused**, and
     the asymmetry is a fact about the two signatures rather than a judgement:
     ``DatasetWeighted.mean`` is ``(dim=None, *, skipna=None, keep_attrs=None)`` — it really
     does take a dim — whereas ``DatasetRolling.mean`` takes none, which is what makes
@@ -534,13 +534,13 @@ def emit(nodes: list[LoweredOp]) -> list[Call]:
     -------
     list of Call
         The calls to perform, in order — what
-        :meth:`~xrexpr.accessor.LazyProxy._replay` invokes against the dataset.
+        ``_replay`` invokes against the dataset.
 
     Notes
     -----
     The inverse direction of :func:`to_lower_ir`: a node that stands for two calls emits
     two. A pure function of the plan — no dataset in sight — so codegen is unit-testable
-    on its own, and :meth:`~xrexpr.accessor.LazyProxy._replay` stays the short
+    on its own, and ``_replay`` stays the short
     ``getattr`` loop it has always been instead of growing an arm per variant. That is
     what keeps per-call verbatim-ness a property of the whole pipeline rather than
     something each node kind has to be trusted with.

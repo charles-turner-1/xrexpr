@@ -103,6 +103,13 @@ The mechanism: the five pipeline stages and their contracts, how the plan is
 represented, and what lowering guarantees.
 :::
 
+:::{grid-item-card} {octicon}`code` API reference
+:link: api/index
+:link-type: doc
+
+Every public name, generated from the signatures and docstrings.
+:::
+
 ::::
 
 ```{toctree}
@@ -138,4 +145,12 @@ internals/lowering
 internals/optimiser
 internals/schema
 internals/values
+```
+
+```{toctree}
+:hidden:
+:caption: Reference
+:maxdepth: 2
+
+api/index
 ```

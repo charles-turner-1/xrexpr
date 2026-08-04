@@ -496,7 +496,7 @@ def classify(value: Any) -> Indexer:
     all-boolean test runs before the all-integer one; and a 0-d array is a :class:`Scalar`
     rather than an enumeration, so the rank check runs before the dtype dispatch.
 
-    Integer-ness is decided by :func:`_is_int` throughout, so numpy-typed positions and bounds
+    Integer-ness is decided by ``_is_int`` throughout, so numpy-typed positions and bounds
     classify the same way their Python equivalents do.
     """
     if isinstance(value, slice):

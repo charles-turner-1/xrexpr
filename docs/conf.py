@@ -81,7 +81,10 @@ nb_execution_timeout = 120
 
 # API rendering
 # -------------
+# ``_templates/autosummary/class.rst`` overrides the stock class stub; the reasoning is
+# in the template itself.
 
+templates_path = ["_templates"]
 autosummary_generate = True
 autodoc_member_order = "bysource"
 autodoc_typehints = "description"

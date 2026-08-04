@@ -34,4 +34,4 @@ print(ds.plan.mean("time").explain())
 ```
 
 If that prints a two-line plan rather than raising `AttributeError`, you're set. The
-[quickstart](quickstart) does the same thing on a dataset worth optimising.
+[quickstart](quickstart.md) does the same thing on a dataset worth optimising.

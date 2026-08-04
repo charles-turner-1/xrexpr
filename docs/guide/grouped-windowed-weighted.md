@@ -235,5 +235,5 @@ print("both match")
 Those cells run when the docs are built, so this page cannot claim a rewrite the code
 doesn't actually make.
 
-Next: [rechunking](rechunking), the one operation whose rewrite depends on *how* you
+Next: [rechunking](rechunking.md), the one operation whose rewrite depends on *how* you
 spelled its argument.

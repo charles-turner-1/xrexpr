@@ -66,7 +66,7 @@ already means **don't know** elsewhere in the codebase (`SchemaState.var_dims`),
 than an `assert`, so both cases are handled at the point the field is used.
 
 This is the annotation that surfaces as `consumes=every dim` when
-[reading `explain()` output](../guide/reading-explain).
+[reading `explain()` output](../guide/reading-explain.md).
 
 ## Immutability is unconditional; hashability is not
 

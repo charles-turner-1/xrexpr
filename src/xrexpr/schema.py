@@ -205,7 +205,7 @@ class SchemaState:
 
     @property
     def dim_names(self) -> frozenset[Hashable]:
-        """The dims that exist: every dim some variable spans. Derived, never stored.
+        """The dims that exist — every dim some variable spans. Derived, never stored.
 
         Returns
         -------
@@ -341,11 +341,11 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
     Two variable rules do the work, and which one an op takes is *the* distinction between
     the op families (both verified against xarray 2026.7.0 — see each helper's docstring):
 
-    - :func:`_aggregated` — data variables lose the dims, coordinates spanning them are
+    - ``_aggregated`` — data variables lose the dims, coordinates spanning them are
       **dropped**. Taken by :class:`~xrexpr.ir.Reduce`,
       :class:`~xrexpr.ir.GroupedReduce`, :class:`~xrexpr.ir.WeightedReduce`, and by a
       ``Select`` carrying ``drop=True``.
-    - :func:`_indexed` — every variable loses the dims and **nothing is dropped**, so a
+    - ``_indexed`` — every variable loses the dims and **nothing is dropped**, so a
       coordinate left dimensionless is a 0-d coordinate. Taken by an ordinary
       :class:`~xrexpr.ir.Select`.
 
@@ -517,7 +517,7 @@ def _aggregated(
     The asymmetry is xarray's, not a modelling choice (verified against xarray 2026.7.0):
     ``ds.mean("lat")`` reduces ``tas(time, lat)`` to ``tas(time)`` but *removes* a
     ``region(lat)`` coordinate rather than aggregating it, because there is no meaningful
-    average of a coordinate's labels. Compare :func:`_indexed`, where nothing is dropped.
+    average of a coordinate's labels. Compare ``_indexed``, where nothing is dropped.
 
     A coordinate that spans none of ``over`` is untouched, which is what keeps ``time``
     alive through ``groupby("lat").mean()`` while ``region(lat)`` goes.
@@ -949,7 +949,7 @@ def _select_indexer(
         The select's positional arguments; a leading dict is the mapping form.
     kwargs : Mapping
         The select's keyword arguments, minus the options in
-        :data:`_SELECT_OPTION_KWARGS` (``drop``, ``method``, ...).
+        ``_SELECT_OPTION_KWARGS`` (``drop``, ``method``, ...).
 
     Returns
     -------
@@ -976,7 +976,7 @@ def _chunk_spec(
         The rechunk's positional arguments; a leading dict is the mapping form.
     kwargs : Mapping
         The rechunk's keyword arguments, minus the options in
-        :data:`_CHUNK_OPTION_KWARGS` (``token``, ``lock``, ...).
+        ``_CHUNK_OPTION_KWARGS`` (``token``, ``lock``, ...).
 
     Returns
     -------
@@ -1000,7 +1000,7 @@ def _chunk_spec(
     The values stay **raw** here. Sorting them into
     :data:`~xrexpr.chunks.ChunkSpec` variants is ``Rechunk.__post_init__``'s job, so a
     hand-built node is normalised too and not only a recorded one — the same division
-    :func:`_indexer_spec` and ``Select.__post_init__`` keep.
+    ``_indexer_spec`` and ``Select.__post_init__`` keep.
     """
     if args and not isinstance(args[0], Mapping):
         return frozendict()

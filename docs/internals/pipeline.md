@@ -24,7 +24,7 @@ guarantee provable rather than empirical.
 
 Note the shape of the middle: `optimize` takes a lowered plan and returns a lowered plan.
 Lowering and emission are the translation boundaries either side of it, so the optimiser
-works in exactly one vocabulary — see [lowering](lowering) for why that boundary is a
+works in exactly one vocabulary — see [lowering](lowering.md) for why that boundary is a
 stage rather than one more rewrite rule.
 
 ## The stages and their contracts
@@ -95,13 +95,13 @@ about kinds, rules or schemas — it invokes calls.
 
 ## Where each stage's design is written down
 
-- [The IR](ir) — why a list, why kinds rather than methods, and what the two levels are for.
-- [The operation table](operations) — how a method name becomes a kind.
-- [Lowering](lowering) — why fusion is a stage, and what happens to a pair nothing claims.
-- [The optimiser](optimiser) — the rule catalogue, the fixpoint, and where the schema
+- [The IR](ir.md) — why a list, why kinds rather than methods, and what the two levels are for.
+- [The operation table](operations.md) — how a method name becomes a kind.
+- [Lowering](lowering.md) — why fusion is a stage, and what happens to a pair nothing claims.
+- [The optimiser](optimiser.md) — the rule catalogue, the fixpoint, and where the schema
   stops being trustworthy.
-- [The logical schema](schema) — what is tracked, and why dims are derived rather than stored.
-- [The value taxonomies](values) — indexers and chunk specs as closed sum types.
+- [The logical schema](schema.md) — what is tracked, and why dims are derived rather than stored.
+- [The value taxonomies](values.md) — indexers and chunk specs as closed sum types.
 
 Further back than that, the arguments themselves are on record. The
 [`planning/`](https://github.com/charles-turner-1/xrexpr/tree/main/planning) directory

@@ -12,7 +12,7 @@ re-decision:
 
 Whether a given spec may be *crossed* by a select is deliberately **not** modelled here:
 pushability is a policy the optimiser chooses (``optimize._pushable_rechunk``), not an
-intrinsic fact of a value — the same stance :mod:`xrexpr.indexers` takes on composition.
+intrinsic fact of a value — the same stance ``xrexpr.indexers`` takes on composition.
 What this module guarantees is the discriminant that policy matches on. The discriminant it
 happens to turn on is **extent-dependence**: :class:`Auto`, :class:`ByteSize` and
 :class:`BlockSeq` are the specs dask resolves by measuring the array it is handed, so what
@@ -264,7 +264,7 @@ class BlockSeq:
         -------
         tuple of int
             :attr:`sizes`, unchanged — xarray accepts a tuple of block lengths here,
-            unlike the sequence indexers of :mod:`xrexpr.indexers`, which must be lists.
+            unlike the sequence indexers of ``xrexpr.indexers``, which must be lists.
         """
         return self.sizes
 
@@ -321,7 +321,7 @@ def _is_int(x: Any) -> bool:
 
     Notes
     -----
-    The rule :func:`xrexpr.indexers._is_int` applies to positions, for the same two
+    The rule ``indexers._is_int`` applies to positions, for the same two
     reasons: ``numbers.Integral`` covers every numpy width, so an ``np.int64`` block length
     classifies like the ``int`` spelling of the same request; and ``bool`` is excluded
     despite subclassing ``int``, because ``chunk({"time": True})`` asking for blocks of 1
@@ -353,7 +353,7 @@ def classify_chunk(value: Any) -> ChunkSpec:
     the size is, and every remaining non-positive integer falls through to
     :class:`OpaqueChunk` rather than violating :class:`SingleSize`'s invariant.
 
-    Integer-ness is decided by :func:`_is_int` throughout, so numpy-typed lengths classify
+    Integer-ness is decided by ``_is_int`` throughout, so numpy-typed lengths classify
     the same way their Python equivalents do — and a block sequence normalises to
     ``tuple[int, ...]`` for the hashability reason :class:`~xrexpr.indexers.Mask`
     documents.

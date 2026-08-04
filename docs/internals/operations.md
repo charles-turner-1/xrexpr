@@ -33,14 +33,14 @@ that may safely hop a reduction may not hop a scan on the scanned dimension.
 
 **`RechunkSpec` touches no dim at all** — only chunk topology, which is what lets a
 selection cross it. Which selections may cross which chunk specs is a separate question,
-and a subtler one: see [rechunking](../guide/rechunking).
+and a subtler one: see [rechunking](../guide/rechunking.md).
 
 **`SelectSpec` resolves its dim effect per call**, from the indexer. `isel(time=0)` drops
 `time`; `isel(time=slice(0, 10))` keeps it. The spec cannot say which, because the answer
 is in the argument rather than in the method.
 
 **`ContextSpec` is half an operation** — a builder-returning call whose meaning
-[lowering](lowering) settles once it can see the closer.
+[lowering](lowering.md) settles once it can see the closer.
 
 **`ProjectSpec` is the one row the table can only nominate.** Next section.
 
