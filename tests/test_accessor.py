@@ -17,7 +17,7 @@ from frozendict import frozendict
 from xarray.testing import assert_equal
 
 import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
-from xrexpr.accessor import _EAGER_ATTRS, Explanation, LazyDatasetProxy
+from xrexpr.accessor import _EAGER_ATTRS, Explanation, LazyProxy
 from xrexpr.exceptions import InvalidExpressionError
 from xrexpr.ir import (
     ALL_DIMS,
@@ -32,6 +32,7 @@ from xrexpr.ir import (
 )
 from xrexpr.lower import emit
 from xrexpr.optimize import _schemas
+from xrexpr.schema import SchemaState
 
 #: xrexpr itself never needs dask, but replaying a ``chunk()`` call does -- without a
 #: chunk manager xarray raises ``ImportError``. Only the rechunk tests below need it.
@@ -87,17 +88,17 @@ def ds() -> xr.Dataset:
 
 
 def test_plan_accessor_returns_proxy(ds):
-    """The ``.plan`` accessor returns a ``LazyDatasetProxy`` wrapping the base dataset with an empty op list."""
-    assert isinstance(ds.plan, LazyDatasetProxy)
+    """The ``.plan`` accessor returns a ``LazyProxy`` wrapping the base dataset with an empty op list."""
+    assert isinstance(ds.plan, LazyProxy)
     assert ds.plan._ops == []
-    assert ds.plan._base_ds is ds
+    assert ds.plan._base is ds
 
 
 def test_repr_shows_recorded_ops(ds):
     """``repr()`` of a proxy names the class and lists the recorded op names."""
     proxy = ds.plan.mean("lat").isel(time=0)
     text = repr(proxy)
-    assert "LazyDatasetProxy" in text
+    assert "LazyProxy" in text
     assert "mean" in text and "isel" in text
 
 
@@ -585,7 +586,7 @@ def test_every_terminal_is_routed_not_recorded(ds, term):
     attr = getattr(chain, term)
     # A recorded terminal would come back as the recording wrapper (a plain function) or
     # a proxy; a routed one is the *materialised* object's own attribute.
-    assert not isinstance(attr, LazyDatasetProxy)
+    assert not isinstance(attr, LazyProxy)
     assert type(attr) is type(getattr(chain.collect(), term))
 
 
@@ -611,7 +612,7 @@ def test_unregistered_terminal_is_not_routed(ds):
     assert term not in _EAGER_ATTRS
     chain = ds.plan["temperature"].mean("lat")
     attr = getattr(chain, term)
-    assert not isinstance(attr, LazyDatasetProxy)
+    assert not isinstance(attr, LazyProxy)
     assert type(attr) is type(getattr(chain.collect(), term))
 
 
@@ -1019,7 +1020,7 @@ def test_builder_only_method_records_and_replays(ds):
     with no ``.compute()``. In context the callable check is skipped and it records.
     """
     chain = ds.plan.groupby("lat").first()
-    assert isinstance(chain, LazyDatasetProxy)
+    assert isinstance(chain, LazyProxy)
     assert_equal(chain.collect(), ds.groupby("lat").first())
 
 
@@ -1200,7 +1201,7 @@ def test_terminal_after_context_matches_eager(ds):
     """
     result = ds.plan.groupby("time").mean().to_dataframe()
 
-    assert not isinstance(result, LazyDatasetProxy)
+    assert not isinstance(result, LazyProxy)
     assert result.equals(ds.groupby("time").mean().to_dataframe())
 
 
@@ -1221,7 +1222,7 @@ def test_terminal_to_dataframe_triggers_collect_and_delegates(ds):
     chain = ds.plan["temperature"].isel(time=0)
     result = chain.to_dataframe()
 
-    assert not isinstance(result, LazyDatasetProxy)
+    assert not isinstance(result, LazyProxy)
     eager = ds["temperature"].isel(time=0).to_dataframe()
     assert result.equals(eager)
 
@@ -1249,10 +1250,230 @@ def test_plot_triggers_collect_and_delegates(ds):
 
     chain = ds.plan["temperature"].isel(time=0)
 
-    assert not isinstance(chain.plot, LazyDatasetProxy)
+    assert not isinstance(chain.plot, LazyProxy)
     artist = chain.plot()
-    assert not isinstance(artist, LazyDatasetProxy)
+    assert not isinstance(artist, LazyProxy)
     assert type(artist) is type(ds["temperature"].isel(time=0).plot())
 
     line = ds.plan["temperature"].isel(time=0, lat=0).plot.line()
-    assert not isinstance(line, LazyDatasetProxy)
+    assert not isinstance(line, LazyProxy)
+
+
+# --- the DataArray accessor ----------------------------------------------------
+#
+# ``.plan`` is registered on both types and one class serves both, so what follows is
+# not a second suite: it pins the two places a ``DataArray`` differs (``__getitem__``
+# means indexing, and there are no ``data_vars`` to project) and checks that everything
+# else -- recording, lowering, the rewrite rules, replay -- carries over unchanged.
+
+
+@pytest.fixture
+def da(ds) -> xr.DataArray:
+    """The shared fixture's ``temperature`` variable, as a standalone DataArray.
+
+    Returns
+    -------
+    xarray.DataArray
+        ``temperature(time, lat, lon)`` with its coords, the ``area`` aux coord included.
+    """
+    return ds["temperature"]
+
+
+def test_plan_accessor_on_a_dataarray_returns_proxy(da):
+    """``da.plan`` returns a ``LazyProxy`` over the array itself, with an empty op list."""
+    assert isinstance(da.plan, LazyProxy)
+    assert da.plan._ops == []
+    assert da.plan._base is da
+
+
+@pytest.mark.parametrize(
+    "chain",
+    [
+        # the README pipeline, positional and keyword spellings
+        lambda o: o.mean("lat").mean("lon").isel(time=0),
+        lambda o: o.mean(dim="lat").mean(dim="lon").isel(time=0),
+        lambda o: o.mean(dim=("lat", "lon")).isel(time=0),
+        # a select the rewrite hoists in front of a disjoint reduce
+        lambda o: o.sum("lat").isel(time=0),
+        lambda o: o.mean("lat").sel(time=slice(0, 2)),
+        # adjacent selects, which merge
+        lambda o: o.isel(time=slice(0, 3)).isel(lat=0),
+        # immovable: the select indexes the dim the reduce consumed's neighbour survives
+        lambda o: o.mean("time").isel(lat=0),
+        # a bare reduce, whose ``ALL_DIMS`` resolves against a coords-only schema
+        lambda o: o.mean(),
+        # a fused grouping, and a select around it
+        lambda o: o.groupby("time").mean(),
+        lambda o: o.rolling(time=3).mean().isel(lat=0),
+        lambda o: o.weighted(xr.DataArray([1.0, 2.0, 3.0], dims="lat")).mean("lat"),
+        # an unmodelled op, which barriers rather than misleads
+        lambda o: o.rename({"time": "t"}).mean("t"),
+    ],
+)
+def test_dataarray_chains_match_eager(da, chain):
+    """Every README-style chain on a ``DataArray`` collects to the eager result."""
+    assert_equal(chain(da.plan).collect(), chain(da))
+
+
+def test_dataarray_rewrites_still_fire(da):
+    """The optimiser rewrites a ``DataArray`` plan; it is not a verbatim passthrough.
+
+    Notes
+    -----
+    The narrowing a ``DataArray`` brings is confined to the *projection* rules (there are
+    no ``data_vars`` for them to reason about). Select pushdown reasons about dims, which
+    a ``DataArray`` has, so it fires exactly as it does on a ``Dataset``.
+    """
+    chain = da.plan.mean("lat").isel(time=0)
+    assert [n.name for n in chain._optimized()] == ["isel", "mean"]
+
+
+def test_dataarray_getitem_records_opaque_not_a_projection(da):
+    """``da.plan["lat"]`` records an ``Opaque``: ``__getitem__`` on a ``DataArray`` is indexing.
+
+    Notes
+    -----
+    The key *looks* like a projection to :func:`~xrexpr.schema.to_opnode`, which sees only
+    the call -- the receiver is what settles it, exactly as it does for a builder's
+    ``__getitem__``.
+    """
+    node = da.plan["lat"]._ops[0]
+    assert isinstance(node, Opaque) and node.name == "__getitem__"
+    assert_equal(da.plan["lat"].collect(), da["lat"])
+
+
+def test_positional_getitem_pairs_on_a_dataarray_are_not_merged(da):
+    """Two positional ``__getitem__``s stay two ops, so the rows selected are the eager ones.
+
+    Notes
+    -----
+    The bug the ``Opaque`` classification exists to prevent, and the keys are the ones that
+    trigger it rather than an arbitrary pair. ``da[[1, 2]]`` selects *positions along the
+    first dim*, so as a pair of ``Project`` nodes ``da[[1, 2]][[1]]`` satisfies
+    ``merge_adjacent_projects``' subset test -- the rule is deliberately schema-free,
+    deciding on the two key sets alone -- and collapses to ``da[[1]]``: row 1, where the
+    eager chain indexes *within* the selected pair and gives row 2. Verified by classifying
+    the pair as projections on purpose: the merged plan returns the wrong row.
+    """
+    chain = da.plan[[1, 2]][[1]]
+
+    assert [type(n) for n in chain._optimized()] == [Opaque, Opaque]
+    assert_equal(chain.collect(), da[[1, 2]][[1]])
+
+
+def test_a_coordless_dataarray_still_replays_equal_to_eager(da):
+    """A ``DataArray`` with no coords models no dims at all, and every chain still matches eager.
+
+    Notes
+    -----
+    ``SchemaState.from_dataset`` reads a ``DataArray``'s *coords*, so an array without them
+    yields an empty schema -- the model knows of no dims. That narrows in the safe
+    direction: a rule that needs a fact it hasn't got refuses. ``groupby("time")`` here
+    fails ``lower._grouper_dims``' dim check and lands on the opaque fallback rather than
+    being fused, which costs a rewrite and no correctness.
+    """
+    bare = xr.DataArray(da.values, dims=da.dims)
+    assert not SchemaState.from_dataset(bare).dim_names
+
+    assert_equal(
+        bare.plan.mean("lat").isel(time=0).collect(), bare.mean("lat").isel(time=0)
+    )
+    assert_equal(
+        bare.plan.groupby("time").mean().collect(), bare.groupby("time").mean()
+    )
+
+
+def test_dataarray_terminal_materialises(da):
+    """A ``DataArray``-only terminal (``.to_index``) materialises the plan instead of recording it."""
+    chain = da.plan.mean(("lat", "lon"))
+
+    assert not isinstance(chain.to_index(), LazyProxy)
+    assert chain.to_index().equals(da.mean(("lat", "lon")).to_index())
+
+
+def test_dataarray_explain_reads_the_plan(da):
+    """``explain()`` works off a ``DataArray`` base, showing the hoisted select."""
+    text = da.plan.mean("lat").isel(time=0).explain()
+    assert text.index("isel") < text.index("mean")
+
+
+def test_getitem_after_a_bare_name_projection_is_indexing_too(ds):
+    """A chain that *becomes* a DataArray records its later ``__getitem__``s as indexing, not projection.
+
+    Notes
+    -----
+    The base is a ``Dataset`` here, so the classification cannot be read off the base
+    alone: after a bare-name projection the live object is a ``DataArray``, and
+    ``ds["temperature"][[1, 2]][[1]]`` is the same wrong-row collapse as on a
+    ``DataArray`` base -- one op later, and reachable before this accessor existed.
+    ``merge_adjacent_projects``' barrier on a single ``p1`` stops the *first* pair, not
+    this one.
+    """
+    chain = ds.plan["temperature"][[1, 2]][[1]]
+
+    assert [type(n) for n in chain._ops] == [Project, Opaque, Opaque]
+    assert_equal(chain.collect(), ds["temperature"][[1, 2]][[1]])
+
+
+@pytest.mark.parametrize(
+    "escape",
+    [
+        # the two doors a recorded ``Opaque`` hands back a DataArray through
+        lambda o: o.pipe(lambda d: d["temperature"]),
+        lambda o: o.get("temperature"),
+    ],
+    ids=["pipe", "get"],
+)
+def test_getitem_after_an_opaque_is_not_a_projection(ds, escape):
+    """An ``Opaque`` may return a ``DataArray``, so the ``__getitem__``s after it index too.
+
+    Notes
+    -----
+    ``Opaque`` is the node the IR does not model, and that covers its *result type*: both
+    ``pipe`` and ``get`` take a ``Dataset`` to a ``DataArray`` without a modelled node in
+    sight. Classified on the key alone the pair would be two ``Project``s, and
+    ``merge_adjacent_projects`` -- which is licensed to fire past an ``Opaque`` -- would
+    collapse ``[[1, 2]][[1]]`` to ``[[1]]``. That returns a valid array of the *wrong rows*
+    rather than raising, so the equality assertion is the one that matters here.
+    """
+    chain = escape(ds.plan)[[1, 2]][[1]]
+
+    assert [type(n) for n in chain._ops] == [Opaque, Opaque, Opaque]
+    assert_equal(chain.collect(), escape(ds)[[1, 2]][[1]])
+
+
+def test_getitem_after_a_dataset_valued_opaque_is_demoted_too(ds):
+    """An opaque that *does* return a Dataset demotes what follows it anyway, losing one merge.
+
+    Notes
+    -----
+    The acknowledged cost of reading ``Opaque`` as receiver-unknown, pinned as intended
+    rather than left to surprise. ``rename`` returns a ``Dataset``, so these two list-form
+    projections would merge safely -- but that is only knowable from the opaque's *name*,
+    and a table of Dataset-preserving names would rot as xarray grows. Projection pushdown
+    loses nothing, since :func:`~xrexpr.optimize._trusted_prefix` already stops it at the
+    first ``Opaque``; ``merge_adjacent_projects`` is the whole of what is forfeited.
+    """
+    chain = ds.plan.rename({"temperature": "t2m"})[["t2m", "elevation"]][["t2m"]]
+
+    assert [type(n) for n in chain._ops] == [Opaque, Opaque, Opaque]
+    assert_equal(
+        chain.collect(),
+        ds.rename({"temperature": "t2m"})[["t2m", "elevation"]][["t2m"]],
+    )
+
+
+def test_a_list_form_projection_keeps_the_chain_in_dataset_land(ds):
+    """A list-form projection yields a Dataset, so later ``__getitem__``s still record projections.
+
+    Notes
+    -----
+    The two spellings are told apart by the *key*, not by the node's ``variables``, which
+    reads ``("temperature",)`` for both -- so this is the case that would be lost by
+    demoting on the node alone, and the projection rules would stop firing on ordinary
+    ``ds[[...]][[...]]`` chains.
+    """
+    chain = ds.plan[["temperature", "elevation"]][["temperature"]]
+
+    assert [type(n) for n in chain._ops] == [Project, Project]
+    assert_equal(chain.collect(), ds[["temperature", "elevation"]][["temperature"]])

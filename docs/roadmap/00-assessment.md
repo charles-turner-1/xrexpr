@@ -174,13 +174,14 @@ point where **W2's PR sequence is complete** and the untouched work is all in ph
 
 ### W7, section by section
 
-Paid: §1 (merge adjacent `Project`s, #102), §4 (`AllDims`, promoted to W2 PR 1), §6
-(hashability, narrowed not fixed), §7 (property widening), §8 (written 2026-07, settled,
-implemented by #88).
+Paid: §1 (merge adjacent `Project`s, #102), §4 (`AllDims`, promoted to W2 PR 1), §5
+(`.plan` for `DataArray`, #105 — and the wrong-row `__getitem__` collapse it turned out to
+have been reachable on a `Dataset` chain all along), §6 (hashability, narrowed not fixed),
+§7 (property widening), §8 (written 2026-07, settled, implemented by #88).
 
 Open: §2 (merge adjacent `Rechunk`s — its own note defers it
 behind W4), §3 (`pushdown_projections` across `Scan`/`Rechunk` — the `Scan` arm needs W6, the
-`Rechunk` arm needs the empirical check the section asks for), §5 (`.plan` for `DataArray`).
+`Rechunk` arm needs the empirical check the section asks for).
 
 ### Against this document's own framing
 
@@ -214,7 +215,7 @@ useful cut for a reviewer and the wrong one for picking up the next job. So, fla
 | **W7 §1** — merge adjacent `Project`s | landed (#102) | `optimize.merge_adjacent_projects`; see §1's closing note for the `single` barrier and the schema-free posture. |
 | **W7 §2** — merge adjacent `Rechunk`s | deferred | Its own note parks it behind W4. |
 | **W7 §3** — projections across `Scan`/`Rechunk` | part-blocked | `Scan` arm needs W6; `Rechunk` arm needs the empirical check §3 asks for. |
-| **W7 §5** — `.plan` for `DataArray` | not started | Independent, and the largest surface change of the four. |
+| **W7 §5** — `.plan` for `DataArray` | landed (#105) | `accessor.LazyProxy`, registered on both types; `__getitem__` is classified by the receiver, which also fixed a latent wrong-row collapse on `Dataset` chains. See §5's closing note. |
 | **W2 §8.1** — the weighted **select** rule | deferred, undecided | The only item left of the lowering memo, and it was never in §12's sequence. Unchanged reason: it needs a rewrite that *transforms an array* (subsetting the weights alongside the select) rather than one that reorders metadata — the first in the package to do so. |
 | **W8** — the Rust spike | gated | On W4 alone now. |
 
@@ -252,7 +253,7 @@ dated note (2026-07-29) saying exactly what its arm is. Nothing else in them cha
 | 2 | **W4 — chunk taxonomy** (`chunks.py`, `Rechunk.chunks: frozendict[Hashable, ChunkSpec]`, `_pushable_rechunk` → exhaustive `match`) | issue #99, [`04-chunk-taxonomy.md`](./04-chunk-taxonomy.md) | Removes the last `Any` and the last `isinstance` ladder; **the only thing holding the W8 Rust gate shut**; unblocks W7 §2. |
 | 3 | **W6 — `Scan` dims** | issue #100, [`06-scan-dims.md`](./06-scan-dims.md) (see its 2026-07-29 note) | One PR; also unblocks W7 §3's `Scan` arm — take that in the same `dim_effect` answer if `requires=dims` is chosen. |
 | 4 | **W5 — `Elementwise`** | issue #101, [`05-elementwise.md`](./05-elementwise.md) (see its 2026-07-29 note) | The biggest coverage win; 2–3 PRs. |
-| 5 | ~~**W7 §1** merge adjacent `Project`s (#102)~~ **done 2026-07-30** (`merge_adjacent_projects`; the failing-subset case left a *different* rewrite on the table, filed as #115); **§2** merge adjacent `Rechunk`s (#103, after W4); **§3** projections across `Scan`/`Rechunk` (#104 — the `Scan` half may already be paid by item 3; the `Rechunk` half needs §3's empirical check); **§5** `.plan` for `DataArray` (#105) | [`07-small-wins.md`](./07-small-wins.md) | Independent; slot between the numbered items. |
+| 5 | ~~**W7 §1** merge adjacent `Project`s (#102)~~ **done 2026-07-30** (`merge_adjacent_projects`; the failing-subset case left a *different* rewrite on the table, filed as #115); **§2** merge adjacent `Rechunk`s (#103, after W4); **§3** projections across `Scan`/`Rechunk` (#104 — the `Scan` half may already be paid by item 3; the `Rechunk` half needs §3's empirical check); ~~**§5** `.plan` for `DataArray` (#105)~~ **done 2026-07-31** (`LazyProxy` on both types; the `__getitem__` classification fixed a wrong-row collapse that predated it, and §7's list-form narrowing is now retirable) | [`07-small-wins.md`](./07-small-wins.md) | Independent; slot between the numbered items. |
 | 6 | **The rest of the "schema lies" family.** **#60** — a `DataArray` indexer falls to `classify`'s `_scalar` catch-all (`indexers.py`, last line) and mis-evolves the schema; the issue body specifies scope and the conservative fallback (record such selects `Opaque`). **#109** — `SchemaState.coords` is a bare set of names carrying no dims, so a coordinate xarray orphans by consuming the dim it is defined on is tracked as surviving; needs `coords` to become a mapping, mirroring `data_vars`. | issues #60, #109 | Both are the family item 1 belonged to. Less reachable than #90 was: #60 needs a bare reduce downstream, and nothing in `optimize` reads `coords` at all, so #109 is inert until the first rule does. |
 | ~~7~~ | ~~**`.reduce` mis-tabulation**~~ — **done 2026-07-30** (issue #96). **Parsed properly**, not untabulated: which positional holds the dim spec is now the `schema._DIM_ARG_POSITION` table, so `.reduce` records an honest `Reduce` and its chains optimise. The generator draws it positionally (3.1% of chains). Closing it surfaced a **live** bug in the same branch — `keepdims=True` keeps its dims at size 1, so the recorded `consumes` made the optimiser *reject a valid chain*; now `Opaque`, with the modelling spec'd as `07-small-wins.md` §9 (issue #117). | issue #96, `07-small-wins.md` §7's closing note | Landed. |
 | ~~8~~ | ~~**NumPy-style docstrings**~~ — **done** (issue #97). Every callable in `src/xrexpr/` now carries `Parameters`/`Returns`/`Raises` sections with its correctness argument under `Notes`, and the style is enforced rather than aspirational: ruff `D` with `convention = "numpy"`, plus the `numpydoc-validation` pre-commit hook for the content ruff can't check. | issue #97 | Landed. |

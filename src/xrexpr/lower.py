@@ -534,13 +534,13 @@ def emit(nodes: list[LoweredOp]) -> list[Call]:
     -------
     list of Call
         The calls to perform, in order — what
-        :meth:`~xrexpr.accessor.LazyDatasetProxy._replay` invokes against the dataset.
+        :meth:`~xrexpr.accessor.LazyProxy._replay` invokes against the dataset.
 
     Notes
     -----
     The inverse direction of :func:`to_lower_ir`: a node that stands for two calls emits
     two. A pure function of the plan — no dataset in sight — so codegen is unit-testable
-    on its own, and :meth:`~xrexpr.accessor.LazyDatasetProxy._replay` stays the short
+    on its own, and :meth:`~xrexpr.accessor.LazyProxy._replay` stays the short
     ``getattr`` loop it has always been instead of growing an arm per variant. That is
     what keeps per-call verbatim-ness a property of the whole pipeline rather than
     something each node kind has to be trusted with.
