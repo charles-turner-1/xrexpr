@@ -87,6 +87,14 @@ The whole story end-to-end on a synthetic dataset — record, explain, collect. 
 output on the page is produced by running the code.
 :::
 
+:::{grid-item-card} {octicon}`book` User guide
+:link: guide/concepts
+:link-type: doc
+
+What a plan is, how to read `explain()` output, and exactly which rewrites you get —
+and which you deliberately don't.
+:::
+
 ::::
 
 ```{toctree}
@@ -96,4 +104,14 @@ output on the page is produced by running the code.
 
 getting-started/installation
 getting-started/quickstart
+```
+
+```{toctree}
+:hidden:
+:caption: User guide
+:maxdepth: 2
+
+guide/concepts
+guide/reading-explain
+guide/rewrites
 ```
