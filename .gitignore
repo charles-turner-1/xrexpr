@@ -70,6 +70,10 @@ instance/
 
 # Sphinx documentation
 docs/_build/
+# autosummary writes a stub page per object; they are generated, never authored
+docs/api/generated/
+# myst-nb's execution cache
+docs/.jupyter_cache/
 
 # PyBuilder
 target/
