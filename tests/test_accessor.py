@@ -1013,7 +1013,7 @@ def test_projection_pushdown_skips_an_error_from_a_discarded_variable(dated_ds):
     ``station`` is a *string* variable, so a Dataset ``std("time")`` raises while reducing
     it. Eager therefore fails computing a standard deviation the chain explicitly throws
     away; the rewrite never computes it. The optimised answer is the better one — see
-    ``docs/roadmap/07-small-wins.md`` §8, which settles this as a deliberate property
+    ``planning/roadmap/07-small-wins.md`` §8, which settles this as a deliberate property
     rather than a divergence to be repaired.
 
     Safe because the values cannot move: the rule fires only once the projected variables

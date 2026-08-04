@@ -92,10 +92,12 @@ build passes and the cause traces to pip/conda version skew, switch `.readthedoc
 to `build.commands` (curl-install pixi, `pixi run -e docs docs`, copy
 `docs/_build/html` to `$READTHEDOCS_OUTPUT/html`). Until then, pip.
 
-**Sphinx must not see the memos.** `docs/` already holds the design memos and this
-roadmap; under `-W`, every `.md` file Sphinx discovers but no toctree references is a
-fatal warning. Allowlist the site directories rather than blocklisting the memos — the
-allowlist cannot rot when the next memo is added:
+**Sphinx must not see the memos.** *(Amended: the memos and this roadmap have since moved
+to `planning/`, so `docs/` is the site and nothing else. The allowlist below is kept as
+belt-and-braces — it is what keeps a stray note dropped into `docs/` from failing the
+build — but it is no longer load-bearing.)* Under `-W`, every `.md` file Sphinx discovers
+but no toctree references is a fatal warning. Allowlist the site directories rather than
+blocklisting anything else — the allowlist cannot rot when the next file is added:
 
 ```python
 include_patterns = [

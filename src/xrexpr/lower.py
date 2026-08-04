@@ -574,7 +574,7 @@ def _emit_node(node: LoweredOp) -> tuple[Call, ...]:
 
     A rule that *synthesises* a node is still responsible for its own header, as
     ``merge_adjacent_selects`` is; moving that reconstruction here is a follow-up
-    (``docs/roadmap/02-lowering.md`` §7).
+    (``planning/roadmap/02-lowering.md`` §7).
 
     ``assert_never`` closes the match: a new lowered variant fails type-check here until
     someone says what it replays as, which is exactly the question a fused node exists to

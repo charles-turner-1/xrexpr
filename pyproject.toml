@@ -144,7 +144,7 @@ select = [
 
 [tool.ruff.lint.per-file-ignores]
 # Every test now carries a NumPy-style docstring stating the scenario it pins (see
-# ``docs/roadmap/00-assessment.md``), so the suite is linted like the rest of the code --
+# ``planning/roadmap/00-assessment.md``), so the suite is linted like the rest of the code --
 # except D401: a test's summary states the scenario declaratively ("A select hops in front
 # of..."), not as an imperative instruction, which is what D401 expects of a function.
 "tests/**" = ["D401"]

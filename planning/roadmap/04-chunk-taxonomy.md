@@ -155,4 +155,4 @@ Notes for the implementer:
 - Behaviour identical before/after wiring (golden tests unchanged).
 - `pixi run python -m pytest tests -q`, `pixi run mypy`,
   `pixi run python -m ruff check src tests` all clean.
-- `docs/indexer-follow-ups.md` §2 marked DONE with a pointer here.
+- `planning/indexer-follow-ups.md` §2 marked DONE with a pointer here.

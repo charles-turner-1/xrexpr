@@ -144,7 +144,7 @@ passthrough and replays the chain exactly as written — GroupBy methods include
 State the residual limitation in the docstring: chains through a context are now
 **correct but never optimised**. Update the known-limitation paragraph at
 `accessor.py:127-133` to say exactly that (and point at
-`docs/roadmap/02-lowering.md` for the modelling that lifts it).
+`planning/roadmap/02-lowering.md` for the modelling that lifts it).
 
 ## Tests (`tests/test_accessor.py`)
 

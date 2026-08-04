@@ -358,7 +358,7 @@ NON_FLOAT_EMPTY_UNSAFE_REDUCES = frozenset({"median"})
 #: the properties below assert ``optimised == eager``, and eager here *raises*. What the
 #: optimiser does with one is deliberate and good — ``pushdown_projections`` skips the
 #: failing computation precisely because the plan discards it — but that is the sharpened
-#: contract in ``docs/roadmap/07-small-wins.md`` §8, which an equality assertion cannot
+#: contract in ``planning/roadmap/07-small-wins.md`` §8, which an equality assertion cannot
 #: express. It is pinned by a hand-written test instead.
 EMPTY_AXIS_UNSAFE_REDUCES = frozenset({"std", "var"})
 
@@ -1141,7 +1141,7 @@ def test_sel_label_slice_size_is_tracked_correctly():
     yields 2 elements while the positional reading gave **0** — under-reporting, the
     *unsafe* direction, since it is the error a size-driven rule would act on.
 
-    **Kept xfail deliberately** (``docs/roadmap/03-schema-sizes.md`` §5.5). The size
+    **Kept xfail deliberately** (``planning/roadmap/03-schema-sizes.md`` §5.5). The size
     is ``None`` rather than ``0``: the unsafe answer is gone, and this test's stricter
     claim — that the size is tracked *exactly* — remains unmet, so the marker stays.
     Reaching the exact 2 means reading ``ds.indexes["lat"]`` at ``apply_schema`` time,

@@ -610,7 +610,7 @@ class WeightedReduce:
     a plain :class:`Reduce` it would be indistinguishable from one, so ``pushdown_selects``
     would match it and hop a select in front of a weighted mean with the weights left
     un-subset — a wrong plan, silently. **No select ever crosses one** (see
-    ``docs/roadmap/02-lowering.md`` §8.1: subsetting ``w`` alongside would be the first
+    ``planning/roadmap/02-lowering.md`` §8.1: subsetting ``w`` alongside would be the first
     rewrite in this package to transform an *array* rather than reorder metadata, and that
     needs its own workstream).
 

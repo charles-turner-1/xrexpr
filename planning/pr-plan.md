@@ -1,6 +1,6 @@
 # PR plan: source-rewriting → expression IR
 
-Incremental delivery of [`docs/improvement-report.md`](./improvement-report.md).
+Incremental delivery of [`planning/improvement-report.md`](./improvement-report.md).
 Each PR ships green and adds ~100 LOC or fewer (deletions don't count). Builds on
 the `add-accessor` branch, whose `LazyDatasetProxy` already exists but is **not yet
 registered** as an accessor.
