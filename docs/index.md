@@ -114,4 +114,6 @@ getting-started/quickstart
 guide/concepts
 guide/reading-explain
 guide/rewrites
+guide/grouped-windowed-weighted
+guide/rechunking
 ```
