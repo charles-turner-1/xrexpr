@@ -351,6 +351,16 @@ The crown-jewel invariant is usually stated as *optimised equals eager*. Strictl
 Only `pushdown_projections` exercises the middle clause today. A new rule may rely on the
 first and third; it may not rely on failures being preserved.
 
+The third clause has been violated exactly once, and it is worth recording because the
+clause is what made it a bug rather than a preference. `pushdown_selects_past_rechunks`
+hoisted a select in front of `chunk({dim: "auto"})`, handing dask a zero-size array to
+divide by: the optimised plan **raised where the eager chain succeeded** — no discarded
+computation, no footgun turned into an answer, just a new error. Issue #121, fixed
+2026-08-01 by making the extent-dependent chunk specs a barrier
+([`04-chunk-taxonomy.md`](./04-chunk-taxonomy.md)). The property
+`test_no_rule_lands_a_select_before_an_extent_sized_rechunk` now asserts it of the whole
+optimised plan rather than of the one rule, since the clause binds every rule.
+
 ### What triggers it
 
 - **A string variable.** The example above: numpy will not take a standard deviation of

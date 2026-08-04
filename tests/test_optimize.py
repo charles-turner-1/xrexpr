@@ -537,18 +537,52 @@ def test_rechunk_kwarg_form_pushes(schema):
 
 
 def test_uniform_rechunk_forms_push_and_are_kept(schema):
-    """A uniform rechunk (``chunk()``, ``chunk(100)``, ``chunk("auto")``) always pushes and is kept, never spent.
+    """An extent-independent uniform rechunk (``chunk()``, ``chunk(100)``, ``chunk(-1)``) pushes and is kept, never spent.
 
     Notes
     -----
-    These forms name no dim, so there is nothing to strip and nothing spent. ``"auto"``
-    simply re-picks block sizes against whatever survives the select.
+    These forms name no dim, so there is nothing to strip and nothing spent — and xarray
+    reads a uniform spec as ``dict.fromkeys(self.dims, spec)``, so it already means
+    "whatever dims there are". The extent-*dependent* uniform forms are the other side of
+    the same taxonomy: see
+    :func:`test_extent_dependent_uniform_rechunk_forms_are_barriers`.
     """
-    for args in ((), (100,), ("auto",)):
+    for args in ((), (100,), (-1,)):
         plan = [_node("chunk", *args), _node("isel", time=0)]
         out = optimize(plan, schema)
         assert [n.name for n in out] == ["isel", "chunk"]
         assert out[1].args == args
+
+
+def test_extent_dependent_uniform_rechunk_forms_are_barriers(schema):
+    """``chunk("auto")``, ``chunk("10MB")`` and ``chunk((100, 400, 500))`` barrier, through the taxonomy.
+
+    Notes
+    -----
+    A uniform spec is classified into ``Rechunk.uniform`` by the same
+    :func:`~xrexpr.chunks.classify_chunk` the mapping form goes through, so these reach
+    :func:`~xrexpr.optimize._pushable_rechunk`'s ``match`` as :class:`~xrexpr.chunks.Auto`,
+    :class:`~xrexpr.chunks.ByteSize` and :class:`~xrexpr.chunks.BlockSeq` — the same arms
+    their ``chunk({"time": ...})`` spellings take. One taxonomy answers for both spellings,
+    rather than a pair of ``isinstance`` checks on ``args`` restating the answer.
+    """
+    for arg in ("auto", "10MB", (100, 400, 500)):
+        plan = [_node("chunk", arg), _node("isel", time=0)]
+        assert [n.name for n in optimize(plan, schema)] == ["chunk", "isel"]
+
+
+def test_a_uniform_float_size_is_an_opaque_barrier(schema):
+    """``chunk(100.0)`` is unmodelled and so barriers, as ``chunk({"time": 100.0})`` does.
+
+    Notes
+    -----
+    Dask accepts a whole float; xarray's API documents an int. Declining to model a
+    spelling xarray does not offer costs one optimisation and never correctness — the
+    conservative choice :class:`~xrexpr.chunks.OpaqueChunk` exists to make, now reaching the
+    uniform spelling too.
+    """
+    plan = [_node("chunk", 100.0), _node("isel", time=0)]
+    assert [n.name for n in optimize(plan, schema)] == ["chunk", "isel"]
 
 
 def test_explicit_block_tuple_is_a_barrier(schema):

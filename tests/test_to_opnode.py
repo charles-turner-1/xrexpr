@@ -14,7 +14,7 @@ only where a node is then folded through ``apply_schema``.
 import pytest
 from frozendict import frozendict
 
-from xrexpr.chunks import SingleSize
+from xrexpr.chunks import Auto, SingleSize, classify_chunk
 from xrexpr.indexers import ForwardSlice, Scalar
 from xrexpr.ir import ALL_DIMS, Opaque, Project, Rechunk, Reduce, Scan, Select
 from xrexpr.schema import apply_schema, to_opnode
@@ -263,22 +263,48 @@ def test_rechunk_kwarg_mapping(schema):
 
 @pytest.mark.parametrize("spec", [100, "auto", -1])
 def test_uniform_rechunk_names_no_dim(schema, spec):
-    """A uniform spec leaves ``chunks`` empty and stays in ``args``.
+    """A uniform spec leaves ``chunks`` empty, stays in ``args``, and classifies into ``uniform``.
 
     Notes
     -----
-    A uniform spec has no dim key a later select could invalidate, so it is replayed
-    verbatim rather than modelled.
+    A uniform spec has no dim key a later select could invalidate, so nothing lands in
+    ``chunks`` — but it is still a spec, and ``Rechunk.uniform`` is where the taxonomy sees
+    it. ``chunks`` and ``uniform`` are the two places a ``chunk`` call writes its spec, and
+    exactly one of them is populated.
     """
     node = to_opnode("chunk", (spec,), {})
     assert node.chunks == frozendict()
     assert node.args == (spec,)
+    assert node.uniform == classify_chunk(spec)
+
+
+def test_a_uniform_spec_silences_the_dim_kwargs(schema):
+    """``chunk("auto", time=5)`` records no named dim, because xarray applies none.
+
+    Notes
+    -----
+    Measured against xarray 2026.7.0: ``Dataset.chunk`` takes the
+    ``dict.fromkeys(self.dims, chunks)`` branch for any non-Mapping ``chunks`` and never
+    reaches ``either_dict_or_kwargs``, so ``ds.chunk("auto", time=5)`` chunks every dim
+    ``"auto"`` and applies nothing to ``time`` — where the mapping spelling of the same
+    clash, ``ds.chunk({"time": 4}, lat=5)``, raises instead.
+
+    Recording the silenced kwarg is not harmless: it is a spec key, so a rewrite could strip
+    the others around it and rebuild ``args`` from what is left, replaying a call the user
+    never wrote.
+    """
+    node = to_opnode("chunk", ("auto",), {"time": 5})
+    assert node.chunks == frozendict()
+    assert node.uniform == Auto()
+    assert node.args == ("auto",)  # verbatim for replay
+    assert node.kwargs == frozendict({"time": 5})
 
 
 def test_bare_rechunk_names_no_dim(schema):
-    """A bare ``chunk()`` names no dim, so ``chunks`` is empty."""
+    """A bare ``chunk()`` names no dim and has no uniform spec either."""
     node = to_opnode("chunk", (), {})
     assert node.chunks == frozendict()
+    assert node.uniform is None
 
 
 def test_rechunk_option_kwarg_not_treated_as_a_dim(schema):

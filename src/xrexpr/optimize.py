@@ -61,6 +61,7 @@ from xrexpr.chunks import (
     Auto,
     BlockSeq,
     ByteSize,
+    ChunkSpec,
     FullDim,
     NoChange,
     OpaqueChunk,
@@ -1027,9 +1028,10 @@ def pushdown_selects_past_rechunks(nodes: Plan, schema: SchemaState) -> Plan | N
     chunk spec — xarray raises ``ValueError: chunks keys ('time',) not found in data
     dimensions`` otherwise. So, against the select's ``consumes``:
 
-    - **no named dim dropped** — swap as-is (this covers the uniform forms, ``chunk()`` /
-      ``chunk(100)`` / ``chunk("auto")``, which name no dim at all; ``"auto"`` simply
-      re-picks block sizes against whatever survives, which is the point of asking for it).
+    - **no named dim dropped** — swap as-is. This covers the uniform forms that get this
+      far, ``chunk()`` and ``chunk(100)`` / ``chunk(-1)``, which name no dim: xarray reads
+      a uniform spec as ``dict.fromkeys(self.dims, spec)``, so it already means "whatever
+      dims there are" and a select in front simply leaves fewer of them.
     - **some named dims dropped** — swap, rebuilding the rechunk from the surviving keys.
     - **every named dim dropped** — swap and *drop the rechunk*. What is left would be
       ``chunk({})``: a single-chunk dask array, so no parallelism and no out-of-core
@@ -1037,6 +1039,14 @@ def pushdown_selects_past_rechunks(nodes: Plan, schema: SchemaState) -> Plan | N
       disk-chunk-aware ``open_dataset(chunks={})``; the *method* has no such knowledge.)
       A rechunk that named no dim to begin with is kept, since there the conversion is
       the stated purpose rather than a leftover.
+
+    What the rule does **not** do is repair a spec it moved past. The specs that would need
+    repairing — ``"auto"`` and a byte target, whose meaning changes with the extent — are
+    refused by :func:`_pushable_rechunk` instead, because measurement says no repair exists:
+    naming the emptied dim ``"auto"``, xarray's own fix in `pydata/xarray#11486
+    <https://github.com/pydata/xarray/pull/11486>`_, does not help, since dask's
+    ``auto_chunks`` pins a zero-length auto dim to ``(0,)`` and *recurses*, and on the second
+    pass it is no longer ``"auto"``. See :class:`~xrexpr.chunks.Auto`.
 
     Unlike :func:`pushdown_selects` this never raises: a rechunk cannot make a select
     unreplayable, only slower. One hop per call.
@@ -1083,45 +1093,57 @@ def _pushable_rechunk(node: Rechunk) -> bool:
 
     Notes
     -----
-    The barriers are of two different kinds, and the code says which is which.
+    **One check about the call header**, which no taxonomy can answer: **option kwargs**
+    (``token``, ``chunked_array_type``, ...) barrier, because a rebuilt spec couldn't carry
+    the option faithfully — the same reason :func:`_mergeable_select` bails. It is a fact
+    about how the call was written, not about what any spec is.
 
-    **The call header** — checked first, by shape:
+    **Then the specs**, both spellings through one ``match`` over
+    :data:`~xrexpr.chunks.ChunkSpec` closed with ``assert_never``, so this being the *policy*
+    site is enforced: a new variant fails mypy here until someone decides which side of the
+    line it falls on. ``Rechunk`` classifies its uniform form too, so ``chunk("auto")``
+    reaches this match as an :class:`~xrexpr.chunks.Auto` and ``chunk((100, 400, 500))`` as a
+    :class:`~xrexpr.chunks.BlockSeq` — the same arms their mapping spellings take, rather
+    than a pair of ``isinstance`` checks on ``args`` restating the answer.
 
-    - **option kwargs** (``token``, ``chunked_array_type``, ...), which a rebuilt spec
-      couldn't carry faithfully — the same reason :func:`_mergeable_select` bails.
-    - a **positional sequence** (``chunk((100, 400, 500))``), which is the uniform form of
-      an explicit block sequence and so barriers for the reason below. It never reaches the
-      taxonomy: naming no dim, it lives verbatim in ``args`` rather than in ``chunks``.
+    The line is whether **dask resolves the spec by measuring the array it is handed**:
 
-    Deliberately *not* folded into the taxonomy dispatch: both are facts about how the call
-    was written, not about what any one dim's spec is.
-
-    **The spec values** — a ``match`` over :data:`~xrexpr.chunks.ChunkSpec` closed with
-    ``assert_never``, so this being the *policy* site is enforced: a new variant fails
-    mypy here until someone decides which side of the line it falls on.
-
-    - an **explicit block sequence** (``chunk({"time": (100, 400, 500)})``) barriers because
-      its blocks must sum to the dim's length. A slice select moving in front would shrink
-      the dim and leave a spec that cannot replay at all — and someone writing explicit
-      block sizes is already reasoning about chunking, so nothing crosses such a call,
-      scalar selects included.
+    - **extent-dependent** specs barrier. An explicit block sequence must sum to the dim's
+      length, so a select in front leaves a spec that cannot replay at all; ``"auto"`` and a
+      byte target are resolved by *dividing* a byte budget by the array's own extent, so a
+      select in front changes what they mean — and if it empties a dim, into a
+      ``ZeroDivisionError`` where the eager chain succeeds (issue #121, and the notes on
+      :class:`~xrexpr.chunks.Auto`). Someone writing either is already reasoning about
+      chunking against the data as it stands, so nothing crosses such a call, scalar selects
+      included.
+    - **extent-independent** specs cross. A fixed size is that size on any array, ``-1`` is
+      one block whatever its length, and ``None`` keeps whatever is there. None of the three
+      can be invalidated by a select, which is what makes moving it in front safe.
     - an **unmodelled spec** barriers because the optimiser has said outright it cannot
       reason about the value; :class:`~xrexpr.chunks.OpaqueChunk` means the same here as
       :class:`~xrexpr.ir.Opaque` does one level up.
-    - everything else crosses. A size, a byte target, ``"auto"``, ``-1`` and ``None`` each
-      describe blocks in terms xarray re-resolves against whatever data survives the
-      select, which is the whole reason moving the select in front is safe.
+
+    Nothing here reads an extent, a size or the schema — the barrier follows from the spec
+    alone, so :class:`~xrexpr.schema.SchemaState`'s "no rewrite reads a size" holds
+    unqualified.
+
+    ``specs`` is annotated, and that is load-bearing rather than decorative: gathering the
+    two sites as ``(*node.chunks.values(), *uniform)`` infers ``Any``, which makes
+    ``assert_never`` accept anything and voids the exhaustiveness guarantee **silently** —
+    the probe technique reports success. Any rewrite of these three lines has to re-run that
+    proof.
     """
     if any(key not in node.chunks for key in node.kwargs):
         return False
-    if node.args and isinstance(node.args[0], list | tuple):
-        return False
-    for spec in node.chunks.values():
+    specs: list[ChunkSpec] = list(node.chunks.values())
+    if node.uniform is not None:
+        specs.append(node.uniform)
+    for spec in specs:
         match spec:
-            case BlockSeq() | OpaqueChunk():
-                return False
-            case SingleSize() | Auto() | ByteSize() | FullDim() | NoChange():
-                continue
+            case BlockSeq() | Auto() | ByteSize() | OpaqueChunk():
+                return False  # dask sizes these from the array it is handed
+            case SingleSize() | FullDim() | NoChange():
+                continue  # stated in terms no select can invalidate
             case _:
                 assert_never(spec)
     return True

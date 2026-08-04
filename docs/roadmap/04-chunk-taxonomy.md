@@ -19,6 +19,39 @@ measurement rather than choice:**
   such a rechunk used to push and is now a barrier, costing an optimisation and never
   correctness.
 
+**Extended 2026-08-01 (#121), with a fourth measured answer the spec did not anticipate:**
+
+- **The discriminant the policy turns on is *extent-dependence*.** `Auto`, `ByteSize` and
+  `BlockSeq` are the specs dask resolves by measuring the array it is handed, so what they
+  mean changes when a select changes the data. All three barrier; `SingleSize`, `FullDim`
+  and `NoChange` cross. The spec above had `"auto"` crossing on the reasoning that it
+  "re-picks against whatever survives" — true, and precisely the problem.
+
+  The narrower rule (refuse only an *emptying* select) was built first, as PR #126, and
+  rejected on measurement: dask pins every dim below `limit ** (1 / ndim)` and *recurses*,
+  so an emptied dim that was itself `"auto"` re-enters non-`"auto"` and poisons
+  `largest_block` anyway — `2-D {lat: auto, lon: auto}` with `lat` emptied raises at a 1 kB
+  `array.chunk-size` and not at 128 MiB. Whether a plan crashes therefore depends on
+  configuration and rank, neither of which a plan can read, so **no per-dim variant can
+  carry the distinction** — which is what rules out a `PerDimAuto`/`PartialAuto` shape. The
+  table is in `chunks.py`'s `Auto`.
+
+  Cost, measured over 2000 generated chains: of 179 `(Rechunk, Select)` adjacencies, 46
+  auto-sizing, the pre-fix rule pushed 105 and this one pushes 78. Fourteen of those hops
+  were legitimate; thirteen were the #121 hazard.
+
+- **Both spellings go through the one taxonomy.** `Rechunk` gained `uniform: ChunkSpec |
+  None`, classified from `args[0]` in `__post_init__`, because xarray reads any non-Mapping
+  spec as `dict.fromkeys(self.dims, spec)` — so `chunk("auto")` *is* the mapping form, just
+  written without the keys. That retired both `isinstance(args[0], ...)` reach-ins in
+  `optimize.py`: `chunk((100, 400, 500))` now barriers as a `BlockSeq` and `chunk("auto")`
+  as an `Auto`, on the same arms their mapping spellings take. The note below on pushability
+  being policy rather than a property still holds — no variant carries a flag; the match
+  reads the variants and decides.
+
+  It also fixed a misparse: `_chunk_spec` recorded the dim kwargs of `chunk("auto", lat=5)`,
+  which xarray silently ignores.
+
 **Goal:** finish `structural-dispatch-2.md` §3. The indexer half of the value sum type
 shipped in #66–#71; the chunk half is still `Any`: `Rechunk.chunks:
 frozendict[Hashable, Any]` (`ir.py:241`) and the `isinstance` ladder in

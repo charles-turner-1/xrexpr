@@ -986,15 +986,24 @@ def _chunk_spec(
     Notes
     -----
     Only the mapping form contributes. A uniform positional spec (``chunk(100)``,
-    ``chunk("auto")``) names no dim, so it yields an empty mapping and is left to be
-    replayed verbatim from ``args`` — which is exactly right, since a uniform spec has
-    no dim key that a later select could invalidate.
+    ``chunk("auto")``) names no dim, so it yields an empty mapping and is read instead by
+    ``Rechunk.uniform``, which classifies ``args[0]`` through the same taxonomy.
+
+    A uniform spec **silences the dim kwargs**, so they are dropped rather than recorded.
+    That is xarray's behaviour, not a simplification: ``Dataset.chunk`` takes the
+    ``dict.fromkeys(self.dims, chunks)`` branch for any non-Mapping ``chunks`` and never
+    reaches ``either_dict_or_kwargs``, so ``ds.chunk("auto", lat=5)`` chunks every dim
+    ``"auto"`` and applies nothing to ``lat`` — where the mapping spelling of the same
+    clash, ``ds.chunk({"lat": 4}, lon=5)``, raises instead. Recording the silenced kwarg
+    would let a rewrite rebuild ``args`` from it and replay a call the user did not write.
 
     The values stay **raw** here. Sorting them into
     :data:`~xrexpr.chunks.ChunkSpec` variants is ``Rechunk.__post_init__``'s job, so a
     hand-built node is normalised too and not only a recorded one — the same division
     :func:`_indexer_spec` and ``Select.__post_init__`` keep.
     """
+    if args and not isinstance(args[0], Mapping):
+        return frozendict()
     chunks: dict[Hashable, Any] = {}
     if args and isinstance(args[0], dict):
         chunks.update(args[0])
