@@ -57,6 +57,15 @@ from typing import Literal, TypeGuard
 from frozendict import frozendict
 from typing_extensions import assert_never
 
+from xrexpr.chunks import (
+    Auto,
+    BlockSeq,
+    ByteSize,
+    FullDim,
+    NoChange,
+    OpaqueChunk,
+    SingleSize,
+)
 from xrexpr.exceptions import InvalidExpressionError
 from xrexpr.indexers import (
     ForwardSlice,
@@ -1049,7 +1058,7 @@ def pushdown_selects_past_rechunks(nodes: Plan, schema: SchemaState) -> Plan | N
                         select,
                         Rechunk(
                             name=rechunk.name,
-                            args=(dict(kept),),
+                            args=({dim: s.to_raw() for dim, s in kept.items()},),
                             chunks=frozendict(kept),
                         ),
                     ]
@@ -1070,25 +1079,52 @@ def _pushable_rechunk(node: Rechunk) -> bool:
     Returns
     -------
     bool
-        ``True`` when the select may cross, ``False`` for the two barrier forms below.
+        ``True`` when the select may cross, ``False`` for the barrier forms below.
 
     Notes
     -----
-    Two forms are barriers:
+    The barriers are of two different kinds, and the code says which is which.
 
-    - an **explicit block sequence** (``chunk({"time": (100, 400, 500)})``, or a
-      positional sequence), whose blocks must sum to the dim's length. A slice select
-      moving in front would shrink the dim and leave a spec that cannot replay at all —
-      and someone writing explicit block sizes is already reasoning about chunking, so
-      nothing crosses such a call, scalar selects included.
+    **The call header** — checked first, by shape:
+
     - **option kwargs** (``token``, ``chunked_array_type``, ...), which a rebuilt spec
       couldn't carry faithfully — the same reason :func:`_mergeable_select` bails.
+    - a **positional sequence** (``chunk((100, 400, 500))``), which is the uniform form of
+      an explicit block sequence and so barriers for the reason below. It never reaches the
+      taxonomy: naming no dim, it lives verbatim in ``args`` rather than in ``chunks``.
+
+    Deliberately *not* folded into the taxonomy dispatch: both are facts about how the call
+    was written, not about what any one dim's spec is.
+
+    **The spec values** — a ``match`` over :data:`~xrexpr.chunks.ChunkSpec` closed with
+    ``assert_never``, so this being the *policy* site is enforced: a new variant fails
+    mypy here until someone decides which side of the line it falls on.
+
+    - an **explicit block sequence** (``chunk({"time": (100, 400, 500)})``) barriers because
+      its blocks must sum to the dim's length. A slice select moving in front would shrink
+      the dim and leave a spec that cannot replay at all — and someone writing explicit
+      block sizes is already reasoning about chunking, so nothing crosses such a call,
+      scalar selects included.
+    - an **unmodelled spec** barriers because the optimiser has said outright it cannot
+      reason about the value; :class:`~xrexpr.chunks.OpaqueChunk` means the same here as
+      :class:`~xrexpr.ir.Opaque` does one level up.
+    - everything else crosses. A size, a byte target, ``"auto"``, ``-1`` and ``None`` each
+      describe blocks in terms xarray re-resolves against whatever data survives the
+      select, which is the whole reason moving the select in front is safe.
     """
     if any(key not in node.chunks for key in node.kwargs):
         return False
     if node.args and isinstance(node.args[0], list | tuple):
         return False
-    return not any(isinstance(spec, list | tuple) for spec in node.chunks.values())
+    for spec in node.chunks.values():
+        match spec:
+            case BlockSeq() | OpaqueChunk():
+                return False
+            case SingleSize() | Auto() | ByteSize() | FullDim() | NoChange():
+                continue
+            case _:
+                assert_never(spec)
+    return True
 
 
 _RULES: tuple[Rule, ...] = (

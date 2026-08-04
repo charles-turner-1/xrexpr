@@ -16,9 +16,9 @@ in this module, never expected noise. Two narrowings are worth naming:
   worth stating because it is not obvious: the two selects need never be adjacent in
   the chain the user wrote. ``pushdown_selects`` hops a select left past a reduce, so
   ``isel(time=[1]).all(dim=['lat']).isel(time=0)`` becomes a run before it folds.
-- **No ``chunk``/rechunk ops.** ``Rechunk`` and its pushdown rule exist and are pinned
-  by the hand-written suites; generating rechunk chains is scheduled with the chunk
-  taxonomy (``docs/roadmap/07-small-wins.md`` §7, after W4).
+- **No ``chunk`` op unless dask is installed.** Replaying a rechunk needs a chunk
+  manager, so :data:`HAS_DASK` gates the kind out rather than letting a drawn chain
+  raise. Where it is installed, both call forms are generated — see :func:`_rechunks`.
 
 ``.reduce`` **is** generated, as of #96. It used to be excluded because ``_reduce_dims``
 read its first positional — a *function* — as a dim spec; now that the dim spec is read
@@ -35,6 +35,8 @@ A builder chain is a **pair** of calls, so :func:`_builder_pair` draws both at o
 each kind constrains its closer differently — see that function for the per-kind facts,
 every one of which was verified against xarray 2026.7.0 rather than assumed.
 """
+
+import importlib.util
 
 import numpy as np
 import pandas as pd
@@ -71,6 +73,27 @@ REDUCE_NAMES = tuple(
 #: and ``mean`` is in none of the exclusion sets :func:`_drawable_reduces` applies — so
 #: ``"reduce"`` needs no entry in any of them, and would need one if this changed.
 REDUCE_METHOD_FUNC = np.mean
+
+#: Whether ``chunk`` calls are generated at all. xrexpr never needs dask, but *replaying* a
+#: rechunk does, so without a chunk manager the drawn chain would raise rather than chunk.
+HAS_DASK = importlib.util.find_spec("dask") is not None
+
+#: The one *divergence* this widening found, and the reason a generated select may not empty
+#: a dim once a ``chunk`` is in the chain. Hoisting the select in front leaves the rechunk
+#: looking at a zero-length dim, and dask's auto-chunking divides by the largest block —
+#: ``ZeroDivisionError`` where the eager order succeeds. It predates the chunk taxonomy (the
+#: rule crossed ``"auto"`` before it too) and is issue #121; it is pinned by example in
+#: ``test_accessor.py`` and excluded here so this suite reports *new* breakage rather than
+#: that one, every run. **Removing this exclusion is the acceptance test for #121.**
+EMPTIED_DIM_BUG = "an empty dim in front of an auto-sizing rechunk raises in dask"
+
+#: What may follow a ``chunk`` in a generated chain. Dask-backed data is what narrows this,
+#: not the optimiser: several ops xarray accepts eagerly it refuses on a chunked array
+#: (``median`` over more than one axis, ``groupby`` on a chunked coord, ``rolling`` past a
+#: zero-length dim), and a chain that raises *in xarray* tests nothing here. Selects and
+#: projections are exactly what the rechunk rules are about, so nothing under test is lost —
+#: and a reduce or builder *before* a chunk is still drawn freely.
+AFTER_CHUNK = ["isel", "sel", "project", "chunk"]
 
 #: Reductions with no identity element, which numpy refuses to apply to an empty axis
 #: ("zero-size array to reduction operation fmax which has no identity"). An empty
@@ -568,6 +591,101 @@ def _weights(obj, dim):
 
 
 @st.composite
+def _block_lengths(draw, n):
+    """Explicit block lengths that add up to ``n`` exactly.
+
+    Parameters
+    ----------
+    n : int
+        The dim's current length.
+
+    Returns
+    -------
+    tuple of int
+        One to three blocks, summing to ``n`` — the only shape dask accepts, since a
+        sequence that adds up to anything else raises ``Chunks do not add up to shape``.
+    """
+    cuts = (
+        draw(st.lists(st.integers(1, n - 1), max_size=2, unique=True).map(sorted))
+        if n > 1
+        else []
+    )
+    bounds = [0, *cuts, n]
+    return tuple(hi - lo for lo, hi in zip(bounds, bounds[1:]))
+
+
+def _dim_chunk_specs(n):
+    """Every chunk spec one dim of length ``n`` can legally be given.
+
+    Parameters
+    ----------
+    n : int
+        The dim's current length, which is at least 1 — see :func:`_rechunks`.
+
+    Returns
+    -------
+    SearchStrategy
+        A strategy over raw specs covering each modelled variant: a block size, the two
+        symbolic forms, and an explicit sequence of block lengths.
+    """
+    return st.one_of(
+        st.sampled_from([-1, None, "auto"]),
+        st.integers(min_value=1, max_value=n),
+        _block_lengths(n),
+    )
+
+
+@st.composite
+def _rechunks(draw, obj):
+    """A ``chunk`` call that is legal against ``obj``, in a mapping or a uniform form.
+
+    Parameters
+    ----------
+    obj : xr.Dataset
+        The dataset the call will be applied to, drawn against its *current* sizes. Every
+        dim is non-empty — the caller checks, because dask's auto-chunking divides by the
+        largest block and so raises ``ZeroDivisionError`` on an array with a zero-length
+        dim. Empty selections are generated on purpose here, so that combination has to be
+        avoided rather than assumed away.
+
+    Returns
+    -------
+    Call
+        The generated call.
+
+    Notes
+    -----
+    Both forms are drawn because the optimiser treats them differently: a mapping names
+    dims, so a select that drops one has to strip the spec (and may empty it out
+    entirely), while a uniform spec names none and rides in ``args`` untouched. Within the
+    mapping form every :data:`~xrexpr.chunks.ChunkSpec` variant a legal call can carry is
+    reachable — including the explicit block lengths that make the rechunk a *barrier*,
+    which is the arm no rewrite may cross.
+    """
+    dims = sorted(map(str, obj.sizes))
+    if (
+        not dims or draw(st.integers(0, 3)) == 0
+    ):  # a quarter uniform, three quarters named
+        return draw(
+            st.sampled_from(
+                [
+                    Call("chunk"),
+                    Call("chunk", 2),
+                    Call("chunk", "auto"),
+                    Call("chunk", -1),
+                ]
+            )
+        )
+    spec = {
+        dim: draw(_dim_chunk_specs(obj.sizes[dim]))
+        for dim in draw(st.lists(st.sampled_from(dims), min_size=1, unique=True))
+    }
+    # Positionally or as dim keywords: two spellings of one mapping, and ``to_opnode``
+    # folds them into the same ``chunks`` -- which is the claim being exercised.
+    return Call("chunk", spec) if draw(st.booleans()) else Call("chunk", **spec)
+
+
+@st.composite
 def _calls(draw, ds, max_ops=4, builders=False):
     """A chain of ops that is legal against ``ds`` by construction.
 
@@ -578,16 +696,28 @@ def _calls(draw, ds, max_ops=4, builders=False):
     calls = []
     current = ds
     selected_dims: set[str] = set()  # every dim any select has already indexed
+    chunked = False  # whether a ``chunk`` has already been drawn — see AFTER_CHUNK
 
     # "builder" twice, so the ``assume`` in ``builder_plans`` discards fewer examples —
     # a chain with no builder pair in it is just a plain chain, already covered.
     kinds = ["isel", "sel", "reduce", "project"] + (["builder"] * 2 if builders else [])
+    if HAS_DASK:
+        kinds.append("chunk")
 
     for _ in range(draw(st.integers(min_value=0, max_value=max_ops))):
         if not current.sizes:
             break  # everything has been reduced away; nothing legal is left
 
-        kind = draw(st.sampled_from(kinds))
+        kind = draw(st.sampled_from(AFTER_CHUNK if chunked else kinds))
+
+        if kind == "chunk":
+            if not all(current.sizes.values()):
+                continue  # an empty dim: dask cannot auto-chunk it -- see ``_rechunks``
+            call = draw(_rechunks(current))
+            current = _apply(current, [call])
+            calls.append(call)
+            chunked = True
+            continue
 
         if kind == "builder":
             pair = draw(_builder_pair(current))
@@ -651,6 +781,8 @@ def _calls(draw, ds, max_ops=4, builders=False):
                 break
             dim = draw(st.sampled_from(available))
             call = Call(kind, **{dim: draw(indexers(current, dim, kind))})
+            if chunked and not all(_apply(current, [call]).sizes.values()):
+                continue  # would empty a dim in front of a rechunk -- see EMPTIED_DIM_BUG
             selected_dims.add(dim)
 
         current = _apply(current, [call])

@@ -59,6 +59,7 @@ from typing import Any, Final, Literal, final
 
 from frozendict import frozendict
 
+from xrexpr.chunks import ChunkSpec, classify_chunk
 from xrexpr.indexers import Indexer, classify
 
 __all__ = [
@@ -311,6 +312,12 @@ class Rechunk:
     split is what a rewrite needs: only *named* dims have to be stripped from the spec
     when a select drops them, and only a named-dim spec can be emptied out entirely.
 
+    Each value is a :data:`~xrexpr.chunks.ChunkSpec` — the closed value sum type the
+    optimiser reasons about — normalised from its raw ``chunk`` form by ``__post_init__``
+    (via :func:`~xrexpr.chunks.classify_chunk`), so a value is *always* a modelled variant
+    regardless of whether the node was recorded or hand-built. Exactly what
+    :class:`Select` does for its indexers, and for the same reason.
+
     Whether a given rechunk may be *crossed* is deliberately not decided here — that
     judgement lives with the rule (``_pushable_rechunk`` in ``optimize.py``), as it does
     for selects.
@@ -319,12 +326,21 @@ class Rechunk:
     name: Literal["chunk"]  # closed set → Literal
     args: tuple[Any, ...] = ()
     kwargs: frozendict[str, Any] = field(default_factory=frozendict)
-    chunks: frozendict[Hashable, Any] = field(default_factory=frozendict)
+    chunks: frozendict[Hashable, ChunkSpec] = field(default_factory=frozendict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "args", tuple(self.args))
         object.__setattr__(self, "kwargs", frozendict(self.kwargs))
-        object.__setattr__(self, "chunks", frozendict(self.chunks))
+        object.__setattr__(
+            self,
+            "chunks",
+            frozendict(
+                {
+                    dim: v if isinstance(v, ChunkSpec) else classify_chunk(v)
+                    for dim, v in self.chunks.items()
+                }
+            ),
+        )
 
 
 @dataclass(frozen=True)

@@ -209,15 +209,15 @@ useful cut for a reviewer and the wrong one for picking up the next job. So, fla
 
 | Item | State | Note |
 |---|---|---|
-| **W4** — chunk taxonomy | not started | `Rechunk.chunks` typing + the last `isinstance` ladder. **The only thing holding the W8 Rust gate shut**, so it is the highest-leverage item left. |
+| **W4** — chunk taxonomy | landed (#99) | `xrexpr.chunks`; `_pushable_rechunk` is exhaustive. The W8 Rust gate's last condition is met, so **W8 is now ungated** — still unscheduled, and still a spike rather than a commitment. |
 | **W5** — `Elementwise` | not started | Nothing in `src/` at all; §"What remains" gap 3. |
 | **W6** — `Scan` dims | not started | Also unblocks W7 §3's `Scan` arm. |
 | **W7 §1** — merge adjacent `Project`s | landed (#102) | `optimize.merge_adjacent_projects`; see §1's closing note for the `single` barrier and the schema-free posture. |
-| **W7 §2** — merge adjacent `Rechunk`s | deferred | Its own note parks it behind W4. |
+| **W7 §2** — merge adjacent `Rechunk`s | unblocked | Was parked behind W4, which has landed: the values it would merge are `ChunkSpec`s now. |
 | **W7 §3** — projections across `Scan`/`Rechunk` | part-blocked | `Scan` arm needs W6; `Rechunk` arm needs the empirical check §3 asks for. |
 | **W7 §5** — `.plan` for `DataArray` | landed (#105) | `accessor.LazyProxy`, registered on both types; `__getitem__` is classified by the receiver, which also fixed a latent wrong-row collapse on `Dataset` chains. See §5's closing note. |
 | **W2 §8.1** — the weighted **select** rule | deferred, undecided | The only item left of the lowering memo, and it was never in §12's sequence. Unchanged reason: it needs a rewrite that *transforms an array* (subsetting the weights alongside the select) rather than one that reorders metadata — the first in the package to do so. |
-| **W8** — the Rust spike | gated | On W4 alone now. |
+| **W8** — the Rust spike | ungated, unscheduled | Its last condition was W4, which has landed. Still a timeboxed spike to be decided on, not a commitment. |
 
 One item not in any workstream, found while writing #89: **the README never mentions
 `groupby`** — no builder-chain section at all, though fused nodes are W2's headline result.
@@ -250,12 +250,13 @@ dated note (2026-07-29) saying exactly what its arm is. Nothing else in them cha
 | # | Item | Spec / issue | Why this position |
 |---|---|---|---|
 | 1 | ~~**#90** — `_grouper_dims` fuses non-dim coordinate groupers~~ **done 2026-07-30.** `to_lower_ir` now takes the base dim names and refuses a grouper whose head is not among them; the same bug turned out to live in the `resample` and dotted-`groupby_bins` branches too. The generator widening that caught it also surfaced **#109** (see item 6). | issue #90, `02-lowering.md` §5.5's note — rewritten to what was wrong and what stays open | Was first because everything later trusts the schema. |
-| 2 | **W4 — chunk taxonomy** (`chunks.py`, `Rechunk.chunks: frozendict[Hashable, ChunkSpec]`, `_pushable_rechunk` → exhaustive `match`) | issue #99, [`04-chunk-taxonomy.md`](./04-chunk-taxonomy.md) | Removes the last `Any` and the last `isinstance` ladder; **the only thing holding the W8 Rust gate shut**; unblocks W7 §2. |
+| 2 | ~~**W4 — chunk taxonomy**~~ **done 2026-07-31** (issue #99). `chunks.py` carries the seven variants and `classify_chunk`; `Rechunk.chunks` is `frozendict[Hashable, ChunkSpec]`; `_pushable_rechunk`'s value test is a `match` closed with `assert_never`. The two questions the spec said to measure were measured: `None` ≠ `-1` (so `NoChange` and `FullDim` both stay), and a tuple of block lengths round-trips. **This closes the W8 gate's last condition** and unblocks W7 §2. | issue #99, [`04-chunk-taxonomy.md`](./04-chunk-taxonomy.md) | Was the highest-leverage item left. |
 | 3 | **W6 — `Scan` dims** | issue #100, [`06-scan-dims.md`](./06-scan-dims.md) (see its 2026-07-29 note) | One PR; also unblocks W7 §3's `Scan` arm — take that in the same `dim_effect` answer if `requires=dims` is chosen. |
 | 4 | **W5 — `Elementwise`** | issue #101, [`05-elementwise.md`](./05-elementwise.md) (see its 2026-07-29 note) | The biggest coverage win; 2–3 PRs. |
 | 5 | ~~**W7 §1** merge adjacent `Project`s (#102)~~ **done 2026-07-30** (`merge_adjacent_projects`; the failing-subset case left a *different* rewrite on the table, filed as #115); **§2** merge adjacent `Rechunk`s (#103, after W4); **§3** projections across `Scan`/`Rechunk` (#104 — the `Scan` half may already be paid by item 3; the `Rechunk` half needs §3's empirical check); ~~**§5** `.plan` for `DataArray` (#105)~~ **done 2026-07-31** (`LazyProxy` on both types; the `__getitem__` classification fixed a wrong-row collapse that predated it, and §7's list-form narrowing is now retirable) | [`07-small-wins.md`](./07-small-wins.md) | Independent; slot between the numbered items. |
 | 6 | **The rest of the "schema lies" family.** **#60** — a `DataArray` indexer falls to `classify`'s `_scalar` catch-all (`indexers.py`, last line) and mis-evolves the schema; the issue body specifies scope and the conservative fallback (record such selects `Opaque`). **#109** — `SchemaState.coords` is a bare set of names carrying no dims, so a coordinate xarray orphans by consuming the dim it is defined on is tracked as surviving; needs `coords` to become a mapping, mirroring `data_vars`. | issues #60, #109 | Both are the family item 1 belonged to. Less reachable than #90 was: #60 needs a bare reduce downstream, and nothing in `optimize` reads `coords` at all, so #109 is inert until the first rule does. |
 | ~~7~~ | ~~**`.reduce` mis-tabulation**~~ — **done 2026-07-30** (issue #96). **Parsed properly**, not untabulated: which positional holds the dim spec is now the `schema._DIM_ARG_POSITION` table, so `.reduce` records an honest `Reduce` and its chains optimise. The generator draws it positionally (3.1% of chains). Closing it surfaced a **live** bug in the same branch — `keepdims=True` keeps its dims at size 1, so the recorded `consumes` made the optimiser *reject a valid chain*; now `Opaque`, with the modelling spec'd as `07-small-wins.md` §9 (issue #117). | issue #96, `07-small-wins.md` §7's closing note | Landed. |
+| 9 | **#121 — an emptying select crosses an auto-sizing rechunk.** Hoisted in front of `chunk({dim: "auto"})`, a select that leaves a dim at length 0 makes dask's auto-chunking divide by zero: the optimised plan *raises* where the eager chain succeeds. Predates W4 and was found by its property widening. Pinned as a strict xfail; the fix needs the rule to read sizes at its own position, and to decide what an *unknown* size means there. | issue #121 | Small in surface, real in kind — it is the only case in the package where the rewrite is worse than eager rather than merely different (contrast `07-small-wins.md` §8). |
 | ~~8~~ | ~~**NumPy-style docstrings**~~ — **done** (issue #97). Every callable in `src/xrexpr/` now carries `Parameters`/`Returns`/`Raises` sections with its correctness argument under `Notes`, and the style is enforced rather than aspirational: ruff `D` with `convention = "numpy"`, plus the `numpydoc-validation` pre-commit hook for the content ruff can't check. | issue #97 | Landed. |
 
 Deliberately *not* on the list: the weighted **select** rule (`02` §8.1 — needs the
@@ -267,7 +268,9 @@ the tracker rather than only here; none is scheduled.
 
 Every row above carries its issue number, and #99–#107 were filed in this table's order.
 Item numbers are kept stable as rows are struck through, so that ordering stays readable;
-#109 arrived later and sits with the family it belongs to rather than at the end. Anything
+#109 arrived later and sits with the family it belongs to rather than at the end, and #121
+later still — as item 9, since it belongs to no family and the numbering is a reading order
+rather than a priority. Anything
 added from here should be filed and linked in the same pass — the checkpoint is only useful
 while it and the tracker agree.
 
