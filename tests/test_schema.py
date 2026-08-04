@@ -570,6 +570,16 @@ def _weighted(consumes, weight_dims, weights):
             ),
             frozenset({"lat"}),
         ),
+        # weights carrying a dim *one* variable has and another lacks: ``temperature``
+        # already spans ``time`` while ``elevation`` does not, and the broadcast reaches
+        # both. The mint is per variable, not per dataset -- issue #125, where testing the
+        # dim against the dataset skipped ``elevation`` because a sibling still carried it.
+        (
+            lambda ds: xr.DataArray(
+                [1.0, 2.0, 3.0, 4.0], dims="time", coords={"time": ds["time"]}
+            ),
+            frozenset({"lat"}),
+        ),
         # a bare closer clears everything, weight dims included
         (lambda ds: ds["lat"] * ds["lon"], ALL_DIMS),
     ],
