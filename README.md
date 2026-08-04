@@ -270,9 +270,9 @@ demoted to opaque and replayed verbatim.
 <details>
 <summary><b>Design notes and roadmap</b></summary>
 
-The design is written down at some length in [`docs/`](docs/), and the plan for what
-comes next lives in [`docs/roadmap/`](docs/roadmap/) — start with
-[`00-assessment.md`](docs/roadmap/00-assessment.md), which states where the codebase
+The design is written down at some length in [`planning/`](planning/), and the plan for what
+comes next lives in [`planning/roadmap/`](planning/roadmap/) — start with
+[`00-assessment.md`](planning/roadmap/00-assessment.md), which states where the codebase
 stands and what's still missing. In short: the intermediate representation and the
 lowering stage are in place; what's left is a proper type for chunk specs, letting
 selections cross elementwise ops instead of stopping at them, giving scans their

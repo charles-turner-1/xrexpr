@@ -304,7 +304,7 @@ def dim_effect(node: LoweredOp) -> DimEffect:
         case WeightedReduce(consumes=consumes, weight_dims=weight_dims):
             # ``blocks=None``: a select still never crosses one, because the hop would
             # need the *weights* subset alongside -- a data-touching rewrite, deferred
-            # (``docs/roadmap/02-lowering.md`` §8.1).
+            # (``planning/roadmap/02-lowering.md`` §8.1).
             #
             # ``requires`` admits projections, and the ``weight_dims`` term is what makes
             # that sound. A projection drops a dim *coordinate* no surviving variable uses,
@@ -764,7 +764,7 @@ def merge_adjacent_projects(nodes: Plan, schema: SchemaState) -> Plan | None:
       ``DataArray``, on which ``__getitem__`` is *indexing* rather than projection:
       ``ds["temperature"]["temperature"]`` raises ``KeyError`` where the collapsed
       ``ds["temperature"]`` returns data. Turning an error into a value is the one thing
-      the contract in ``docs/roadmap/07-small-wins.md`` §8 forbids outright, so a
+      the contract in ``planning/roadmap/07-small-wins.md`` §8 forbids outright, so a
       ``single`` first node is a hard barrier — the subset test alone would not catch it.
 
     **Deciding this without the schema does skip one error, deliberately.** A name in
@@ -945,7 +945,7 @@ def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
     dims the crossed op names, so they reduce identically either way. The sharpened
     contract — preserve every value the plan asks for, never introduce an error, but feel
     free to skip one raised by discarded work — is written up in
-    ``docs/roadmap/07-small-wins.md`` §8.
+    ``planning/roadmap/07-small-wins.md`` §8.
 
     **Weighted reduces are admitted too**, on the strength of that same contract. The
     argument that once excluded them — a weighted reduce *refuses* a variable lacking a

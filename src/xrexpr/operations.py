@@ -19,7 +19,7 @@ A spec *is* the kind, rather than carrying a ``kind: str`` field: that is what m
 ``to_opnode``'s dispatch a single ``match`` closed by ``assert_never``, so a variant
 added here without an arm there is a type error rather than a call silently recorded as
 :class:`~xrexpr.ir.Opaque`. It is the same move ``ir.Op`` and ``indexers.Indexer``
-already made — see ``docs/structural-dispatch.md`` §1 on why a ``kind`` string is a sum
+already made — see ``planning/structural-dispatch.md`` §1 on why a ``kind`` string is a sum
 type whose variants live only in the designer's head. Kind-specific metadata then has
 somewhere to live: :attr:`ReduceSpec.dim_arg` is a field rather than a second table
 keyed by name all over again.
