@@ -14,6 +14,34 @@ jobs:
       - uses: actions/setup-python@v5
       - uses: pre-commit/action@v3.0.1
 
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4.2.2
+
+      - name: Setup pixi environment
+        uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          environments: docs
+          frozen: true
+
+      # `-W --keep-going`, so a warning anywhere -- an unreferenced page, a broken
+      # cross-reference -- fails the build, and a cell that raises fails it too
+      # (nb_execution_raise_on_error). The docs env is the no-numbagg arm on purpose:
+      # see the comment on the test matrix above.
+      - name: Build the docs
+        run: pixi run -e docs docs
+
+      # The reviewable artifact. Read the Docs builds the same site from the same extra
+      # (via pip), and its PR preview is the one to read for prose; this one is the
+      # lock-frozen build, and is what says the *dependencies* are pinned correctly.
+      - name: Upload the built site
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-html
+          path: docs/_build/html
+
   test:
     runs-on: ubuntu-latest
     strategy:
