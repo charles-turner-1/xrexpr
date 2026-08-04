@@ -538,6 +538,30 @@ def test_explicit_block_tuple_chain_matches_eager(chunky_ds):
 
 
 @requires_dask
+def test_unparseable_byte_target_fails_exactly_as_eager_does(chunky_ds):
+    """A nonsense byte target raises dask's own error at ``collect``, as it does eagerly.
+
+    Notes
+    -----
+    The other half of the contract ``test_chunks.py`` pins without dask, where every string
+    classifies as a ``ByteSize`` unexamined. This is what unexamined buys: the same
+    ``ValueError`` xarray raises eagerly, in dask's words rather than any xrexpr invented.
+
+    Deferred, not lost. Recording the chain succeeds where the eager spelling has already
+    raised, and the rechunk is pushable (a byte target re-picks against whatever data
+    survives), so the select really does hop in front of it here. Neither the deferral nor
+    the rewrite may swallow the failure.
+    """
+    ds = chunky_ds
+    chain = ds.plan.chunk({"time": "banana"}).isel(time=slice(50, 250))  # records fine
+
+    with pytest.raises(ValueError, match="byte unit"):
+        ds.chunk({"time": "banana"}).isel(time=slice(50, 250)).compute()
+    with pytest.raises(ValueError, match="byte unit"):
+        chain.collect()
+
+
+@requires_dask
 def test_rechunk_and_reduce_pushdown_compose(chunky_ds):
     """Rechunk pushdown composes with reduce pushdown, end to end, matching the eager result."""
     ds = chunky_ds

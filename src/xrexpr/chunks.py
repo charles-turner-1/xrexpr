@@ -38,10 +38,12 @@ plays for indexers and :class:`~xrexpr.ir.Opaque` plays for op kinds. It exists 
 :func:`classify_chunk` must be **total** — ``Rechunk.__post_init__`` classifies hand-built
 nodes too, and the accessor records whatever it is handed. Some of what lands there xarray
 accepts (a whole float coerces; ``True`` means blocks of 1) and most of it xarray rejects
-(``0`` divides by zero, ``-2`` and an unparseable byte string raise). Neither case is
-modelled: the first is a spelling xarray's own API does not offer, the second is an error
-that stays the caller's to see — recording it opaquely leaves the rechunk a barrier and
-lets the failure surface at replay, in xarray's words, exactly as it would have eagerly.
+(``0`` divides by zero, ``-2`` raises). Neither case is modelled: the first is a spelling
+xarray's own API does not offer, the second is an error that stays the caller's to see —
+recording it opaquely leaves the rechunk a barrier and lets the failure surface at replay,
+in xarray's words, exactly as it would have eagerly. A byte-target string is never opaque
+even when it is nonsense: it is a :class:`ByteSize`, whose parse is dask's judgement at
+replay for the same reason.
 """
 
 import numbers

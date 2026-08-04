@@ -68,9 +68,19 @@ def test_auto_classifies_as_auto():
     assert classify_chunk("auto") == Auto()
 
 
-@pytest.mark.parametrize("raw", ["100MB", "10MiB", "1GB"])
+@pytest.mark.parametrize("raw", ["100MB", "10MiB", "1GB", "banana", ""])
 def test_byte_target_strings_classify_as_byte_size(raw):
-    """Any other string is a byte target, carried verbatim for dask to parse at replay."""
+    """Any other string is a byte target, carried verbatim for dask to parse at replay.
+
+    Notes
+    -----
+    Nonsense included, which is the case that makes "verbatim" mean something: judging the
+    string would mean importing dask to ask ``parse_bytes``, and dask is optional here. Nor
+    is the boundary guessable — ``""`` parses as one byte and ``"100"`` as a hundred, while
+    ``"auto "`` with a trailing space raises — so a pattern of xrexpr's own would only
+    drift. Declining to look leaves ``Could not interpret 'banana' as a byte unit`` dask's
+    to word, at replay, exactly as an eager ``chunk`` would have raised it.
+    """
     assert classify_chunk(raw) == ByteSize(raw)
 
 
