@@ -11,7 +11,7 @@ dataset. So the plan is a `list[Op]`, and rules are written over adjacent pairs.
 
 Only **unary** operations are modelled. Binary and n-ary ones (`merge`, `concat`,
 `where`) would carry plan-typed children and promote the container from a list to a tree.
-That is an additive, orthogonal change, deferred until such an operation is in scope —
+That is an additive, orthogonal change, deferred until such an operation is in scope,
 and the linearity assumption is named in one place rather than leaked into every rule, so
 the change stays a change to the container rather than an archaeology exercise.
 
@@ -25,11 +25,11 @@ Op = Reduce | Select | Scan | Project | Rechunk | Opaque
 ```
 
 A rule that asks "may this selection move left past that node?" wants to know that the
-node destroys `{lat}` — not that it was spelled `std`. A new *variant* is earned only by
+node destroys `{lat}`, not that it was spelled `std`. A new *variant* is earned only by
 genuinely new structural data, which is why there are six of these rather than one per
 method.
 
-The kind is usually settled by the method name, but not always — `__getitem__` is a
+The kind is usually settled by the method name, but not always: `__getitem__` is a
 `Project` when its key names variables and an `Opaque` otherwise. See
 [the operation table](operations.md#nominate-then-confirm).
 
@@ -42,7 +42,7 @@ to chunk specs, a `GroupedReduce` has both a consumed dim and a minted one.
 
 So the variants have genuinely different shapes, rather than one record with mostly-empty
 fields. `match` over `Op` then binds different fields per arm, and `assert_never` on the
-`case _` arm makes the union exhaustive under mypy — adding a variant fails type-checking
+`case _` arm makes the union exhaustive under mypy: adding a variant fails type-checking
 at every site that hasn't handled it, which is how a new kind gets a decision made about
 it everywhere instead of silently falling through a default.
 
@@ -56,7 +56,7 @@ DimSet = frozenset[Hashable] | AllDims
 ALL_DIMS: Final = AllDims()
 ```
 
-Expanding it eagerly would bake in the names the recorder happened to see — and past an
+Expanding it eagerly would bake in the names the recorder happened to see, and past an
 unmodelled operation those names may already be wrong. So the expansion is deferred to a
 reader holding an exact schema, and until then the field holds a sentinel.
 
@@ -71,14 +71,14 @@ This is the annotation that surfaces as `consumes=every dim` when
 ## Immutability is unconditional; hashability is not
 
 Every variant is frozen and coerces its containers, so a node cannot be mutated or drift
-from itself. Each is hashable and comparable **when its payload is** — and some payloads
+from itself. Each is hashable and comparable **when its payload is**, and some payloads
 aren't. `xr.DataArray.__hash__` is `None`, so a node carrying an array (`weighted(w)`, a
 boolean-mask `__getitem__`, `where(cond)`) raises `TypeError` on `hash()`, and `==`
 between two such nodes holding distinct-but-equal arrays raises `ValueError`, the
 elementwise comparison having no truth value.
 
 The stronger claim is deliberately not wanted. Making an array payload hashable means
-hashing its *values*, which for a dask-backed array means computing it at plan time — the
+hashing its *values*, which for a dask-backed array means computing it at plan time, the
 one thing this package promises never to do. Nothing in the pipeline hashes a node, and
 plan-equality compares nodes that *share* the payload object, where tuple comparison's
 identity check applies.
@@ -96,19 +96,19 @@ FluentOp   = Op | ContextOpen
 LoweredOp  = Op | GroupedReduce | WindowedReduce | WeightedReduce
 ```
 
-One set of dataclasses, two union aliases over them — so the level a function works at is
+One set of dataclasses, two union aliases over them, so the level a function works at is
 visible in its signature rather than in a comment.
 
 ```{mermaid}
 flowchart LR
-    subgraph fluent["<b>FluentOp</b> — one node per call"]
+    subgraph fluent["<b>FluentOp</b>, one node per call"]
         direction TB
         fShared["Reduce · Select · Scan<br/>Project · Rechunk"]
         fOpaque["Opaque"]
         fOpen["<b>ContextOpen</b><br/><i>fluent only</i>"]
     end
 
-    subgraph lowered["<b>LoweredOp</b> — what the optimiser rewrites"]
+    subgraph lowered["<b>LoweredOp</b>, what the optimiser rewrites"]
         direction TB
         lShared["Reduce · Select · Scan<br/>Project · Rechunk"]
         lOpaque["Opaque"]
@@ -134,6 +134,6 @@ type-checking at every site downstream of it. The stage's central obligation is
 discharged by the type rather than by a runtime check nobody remembers to write.
 
 One `ContextOpen` variant rather than one per builder: the openers carry identical
-structure — a verbatim header plus which builder it is — and per-builder differentiation
+structure (a verbatim header plus which builder it is), and per-builder differentiation
 belongs to the fused nodes, where it arrives with structural data to match on. Five empty
 arms at every `assert_never` site would earn nothing.

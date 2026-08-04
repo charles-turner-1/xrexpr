@@ -5,15 +5,15 @@ a mean. It writes down that you asked for one.
 
 ## The plan
 
-`ds.plan` returns a recording proxy. Each method you chain onto it — `.mean()`,
-`.isel()`, `.sel()`, `[["temperature"]]` — is *normalised into an operation* and
+`ds.plan` returns a recording proxy. Each method you chain onto it (`.mean()`,
+`.isel()`, `.sel()`, `[["temperature"]]`) is *normalised into an operation* and
 appended to a list. Nothing is evaluated, nothing is looked at, and the dataset itself is
 untouched. That list is the **plan**.
 
 The plan is deliberately a flat list rather than a tree: an xarray method chain is
 linear, each call taking one object and returning one, so a list is what it is. Ops are
-identified by their **kind** — `Reduce`, `Select`, `Project`, `Scan`, `Rechunk`,
-`Opaque` — not by which xarray method produced them. `mean` and `std` differ in the call
+identified by their **kind** (`Reduce`, `Select`, `Project`, `Scan`, `Rechunk`,
+`Opaque`), not by which xarray method produced them. `mean` and `std` differ in the call
 they will replay as, not in how the plan may be rearranged around them.
 
 Two things end a plan:
@@ -23,7 +23,7 @@ Two things end a plan:
 - **`.explain()`** optimises the plan and renders it as text. Nothing runs.
 
 Because `explain()` stops one step short of `collect()`, it shows you exactly the plan
-that would have run — see [reading `explain()` output](reading-explain.md).
+that would have run. See [reading `explain()` output](reading-explain.md).
 
 ## What happens between recording and running
 
@@ -40,7 +40,7 @@ flowchart LR
 Only the shaded box touches your data. Everything before it moves metadata around:
 dimension names, variable names, sizes.
 
-**Record.** Each call becomes one operation. This step has no memory — it looks at the
+**Record.** Each call becomes one operation. This step has no memory. It looks at the
 call in front of it and nothing else.
 
 **Lower.** Some single operations are spelled as *two* calls in xarray, via a builder
@@ -51,8 +51,8 @@ This is why `explain()` prints one line for a `groupby(...).mean()`, not two. A 
 pair it doesn't recognise is demoted to `Opaque` and replayed verbatim.
 
 **Optimise.** A handful of local rewrite rules are applied over and over until the plan
-stops changing. Each rule is a single small step — merge two adjacent selections, hop a
-selection one place left — and the repetition composes them into the large rewrite: a
+stops changing. Each rule is a single small step (merge two adjacent selections, hop a
+selection one place left), and the repetition composes them into the large rewrite: a
 selection bubbles past a whole run of reductions and reaches the front.
 
 **Replay.** The optimised operations are turned back into xarray calls and run against
@@ -60,8 +60,8 @@ your dataset, in order.
 
 ## Structural, not statistical
 
-The optimiser never sees your data. It reasons over a *logical schema* — which
-dimensions exist, how big they are, and which variables carry which dimensions — that it
+The optimiser never sees your data. It reasons over a *logical schema* (which
+dimensions exist, how big they are, and which variables carry which dimensions) that it
 folds forward through the plan as it goes.
 
 Two consequences worth internalising:
@@ -79,18 +79,18 @@ The precise version of the promise, which the rest of the guide leans on:
 > additionally avoid an error raised by a computation whose result the plan discards. It
 > may never change a value, nor introduce an error.
 
-That middle clause is not a loophole — it's a feature, and
+That middle clause is not a loophole. It's a feature, and
 [a chain that stops failing](rewrites.md#it-can-also-make-a-chain-stop-failing) shows why.
 
 ## Where the work goes
 
-If you want the mechanism rather than the model — how the plan is represented, what
-lowering guarantees, which rules exist and why the loop terminates — that's
+If you want the mechanism rather than the model (how the plan is represented, what
+lowering guarantees, which rules exist and why the loop terminates), that's
 [the internals section](../internals/pipeline.md). This guide stays in user terms:
 
-- [Reading `explain()` output](reading-explain.md) — every annotation decoded.
-- [What it rewrites](rewrites.md) — and what it deliberately won't.
-- [Grouped, windowed and weighted chains](grouped-windowed-weighted.md) — why two calls
+- [Reading `explain()` output](reading-explain.md): every annotation decoded.
+- [What it rewrites](rewrites.md), and what it deliberately won't.
+- [Grouped, windowed and weighted chains](grouped-windowed-weighted.md): why two calls
   become one operation, and what moves past each kind.
-- [Rechunking](rechunking.md) — the one operation whose rewrite turns on how you spelled
+- [Rechunking](rechunking.md): the one operation whose rewrite turns on how you spelled
   its argument.

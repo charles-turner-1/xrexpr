@@ -11,7 +11,7 @@ what you see is what the current version of `xrexpr` actually prints.
 
 ## A dataset to optimise
 
-No data file to download — we'll build one, the same way the test suite does: a
+No data file to download. We'll build one, the same way the test suite does: a
 `temperature` variable over `(time, lat, lon)`, alongside an `elevation` variable that
 is *missing* `time`. That second variable matters later.
 
@@ -36,7 +36,7 @@ ds
 
 ## The rewrite, in one line
 
-Write the readable ordering — reduce, then select:
+Write the readable ordering, reduce then select:
 
 ```{code-cell} python
 plan = ds.plan.mean(dim="lat").mean(dim="lon").isel(time=0)
@@ -49,11 +49,11 @@ Nothing has run. `plan` is a recorded chain, and `.explain()` shows what `.colle
 plan.explain()
 ```
 
-The `isel` has been hoisted to the front — that's the reorder that buys the speed-up,
+The `isel` has been hoisted to the front. That's the reorder that buys the speed-up,
 because both reductions now scan one time step instead of every one in the dataset.
 
 Each line is one operation as `xrexpr` understands it: **what kind** it is, **the calls
-it will replay as**, and in brackets **what the calls don't say** — here, which
+it will replay as**, and in brackets **what the calls don't say**. Here that's which
 dimensions each reduction removes. Reading the annotations in full is its own page in
 the user guide.
 
@@ -79,7 +79,7 @@ from xarray.testing import assert_equal
 assert_equal(result, ds.mean(dim="lat").mean(dim="lon").isel(time=0))
 ```
 
-For the record, on the author's machine the eager orderings differ by roughly 200x —
+For the record, on the author's machine the eager orderings differ by roughly 200x:
 `193 ms ± 49.6 ms` for reduce-then-select against `925 μs ± 401 μs` for
 select-then-reduce. Those numbers are hardware-dependent and are quoted rather than
 measured here; the plan text above is the part that can't drift.
@@ -94,7 +94,7 @@ ds.plan.mean(dim="time")[["temperature"]].explain()
 ```
 
 This is where `elevation` earns its place in the dataset. A projection only moves while
-the variables it keeps still carry the dimensions of the operations it crosses — and
+the variables it keeps still carry the dimensions of the operations it crosses, and
 `elevation` has no `time`, so reordering *this* chain would leave `mean(dim="time")`
 with no `time` to reduce:
 
@@ -107,7 +107,7 @@ nothing.
 
 ## Builder pairs are one operation
 
-xarray spells some single operations as *two* calls via a builder object —
+xarray spells some single operations as *two* calls via a builder object:
 `groupby(...).mean()`, `rolling(...).mean()`, `weighted(...).mean()`. `xrexpr` fuses
 each pair into a single node, which is why `explain()` prints one line for it, and
 selections hop in front of those too:
@@ -118,7 +118,7 @@ ds.plan.groupby("time.month").mean().isel(lat=0).explain()
 
 That's the climatology case: the grouping runs over one latitude instead of over all of
 them and then discarding the rest. The `time -> month` annotation is the fact worth knowing
-about a grouped reduce — the result is indexed by a *new* `month` dimension and the
+about a grouped reduce. The result is indexed by a *new* `month` dimension and the
 original `time` is gone, so a selection on `time` after it means something quite
 different from one before it, and `xrexpr` leaves those where you put them.
 

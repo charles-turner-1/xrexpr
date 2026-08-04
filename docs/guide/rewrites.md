@@ -63,7 +63,7 @@ ds.plan.mean(dim="time")[["temperature"]].explain()
 
 A projection only moves while the variables it keeps still carry the dimensions of the
 operations it crosses. `elevation` has no `time`, so this one stays exactly where it was
-written — moving it would leave `mean(dim="time")` with no `time` to reduce:
+written. Moving it would leave `mean(dim="time")` with no `time` to reduce:
 
 ```{code-cell} python
 ds.plan.mean(dim="time")[["elevation"]].explain()
@@ -80,28 +80,28 @@ ds.plan.groupby("time.month").mean().isel(lat=0).explain()
 ### Selections cross rechunks
 
 A `chunk()` changes no value, only chunk topology, so a selection can always move in
-front of one — and when the selection drops the only dimension the rechunk named, the
+front of one. When the selection drops the only dimension the rechunk named, the
 rechunk has nothing left to do and disappears entirely:
 
 ```{code-cell} python
 ds.plan.chunk({"time": 100}).isel(time=0).explain()
 ```
 
-Not every chunk spec may be crossed, though — an explicit block sequence pins blocks that
+Not every chunk spec may be crossed, though. An explicit block sequence pins blocks that
 must sum to the dimension's length, so nothing moves past one.
 [Rechunking](rechunking.md) covers where that line falls.
 
 ## What it deliberately won't touch
 
 **Order-sensitive operations.** A selection never hops over `cumsum`/`cumprod`/`diff` on
-the scanned dimension — the answer depends on how much of the dimension came before:
+the scanned dimension. The answer depends on how much of the dimension came before:
 
 ```{code-cell} python
 ds.plan.cumsum("time").isel(time=0).explain()
 ```
 
 **Selections on a dimension an operation created.** `isel(month=0)` after a
-`groupby("time.month")` is perfectly valid — it just can't move, because `month` doesn't
+`groupby("time.month")` is perfectly valid. It just can't move, because `month` doesn't
 exist until the grouped reduce mints it:
 
 ```{code-cell} python
@@ -134,7 +134,7 @@ except InvalidExpressionError as err:
 
 `xrexpr` computes only what your chain actually asks for, and that occasionally means
 *not* walking into an error eager evaluation walks straight into. Here is a dataset with a
-string-valued variable — station names, which have no standard deviation:
+string-valued variable, station names, which have no standard deviation:
 
 ```{code-cell} python
 stations = xr.Dataset(
@@ -149,8 +149,8 @@ stations = xr.Dataset(
 )
 ```
 
-Eager evaluation computes the standard deviation of `station` — purely because it happens
-to be in the Dataset — and falls over doing it, *before* the projection that says outright
+Eager evaluation computes the standard deviation of `station`, purely because it happens
+to be in the Dataset, then falls over doing it, *before* the projection that says outright
 it isn't wanted ever gets a chance to run:
 
 ```{code-cell} python
@@ -172,7 +172,7 @@ stations.plan.std("time")[["temperature"]].collect()
 ```
 
 `weighted` chains get the same treatment, and there the eager failure is even easier to
-hit — see
+hit. See
 [weighted reduces](grouped-windowed-weighted.md#weighted-reduces-take-projections-only).
 
 ## The invariant

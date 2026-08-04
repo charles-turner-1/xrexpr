@@ -6,7 +6,7 @@ kernelspec:
 
 # Rechunking
 
-A `chunk()` call changes no value — only how the data is divided into blocks. That makes
+A `chunk()` call changes no value, only how the data is divided into blocks. That makes
 it the easiest operation in the package to move a selection in front of: the selection
 cannot see chunking, and the rechunk then has less data to shuffle.
 
@@ -75,26 +75,26 @@ Applied to `ds.chunk({"time": ...})` on a 1000-long, already-100-blocked dim:
 | `100` | uniform 100-blocks | `SingleSize` |
 | `(100, 400, 500)` | those blocks exactly | `BlockSeq` |
 
-So `None` and `-1` are **not** two spellings of one behaviour — on an already-chunked dim
+So `None` and `-1` are **not** two spellings of one behaviour: on an already-chunked dim
 one leaves the blocks alone and the other fuses them into a single block. Anything else
 is an `OpaqueChunk`: a spelling xarray tolerates but doesn't document, or one it rejects
 outright.
 
 ```{mermaid}
 flowchart TB
-    subgraph free["extent-free — a selection crosses"]
+    subgraph free["extent-free, a selection crosses"]
         nochange["<b>NoChange</b>"]
         fulldim["<b>FullDim</b>"]
         single["<b>SingleSize</b>"]
     end
 
-    subgraph dep["extent-dependent — a barrier"]
+    subgraph dep["extent-dependent, a barrier"]
         auto["<b>Auto</b>"]
         bytesize["<b>ByteSize</b>"]
         blockseq["<b>BlockSeq</b>"]
     end
 
-    subgraph esc["unmodelled — a barrier"]
+    subgraph esc["unmodelled, a barrier"]
         opaque["<b>OpaqueChunk</b>"]
     end
 
@@ -154,7 +154,7 @@ ds.plan.chunk({"time": "10MB"}).isel(lat=0).explain()
 ds.plan.chunk({"time": (100, 400, 500)}).isel(lat=0).explain()
 ```
 
-Note that the selection in each of those is on `lat` — a dimension the rechunk never
+Note that the selection in each of those is on `lat`, a dimension the rechunk never
 named. It is refused anyway. If you are spelling out a byte target or a block sequence,
 you are already reasoning about chunking against the data as it stands, so `xrexpr`
 declines to change the data underneath you.
@@ -162,13 +162,13 @@ declines to change the data underneath you.
 :::{note}
 The `"auto"` case is not just a change of answer. Emptying a dimension in front of an
 `"auto"` rechunk can make dask's block-size arithmetic divide by zero, so a chain that
-worked eagerly would raise — and the invariant forbids introducing an error. Whether it
+worked eagerly would raise, and the invariant forbids introducing an error. Whether it
 raises depends on dask's configured chunk size and on the array's rank, neither of which
 a plan can read, so the whole spec form is a barrier rather than some narrower case of
 it.
 :::
 
-A spec the taxonomy doesn't model barriers for the plainest possible reason — `xrexpr`
+A spec the taxonomy doesn't model barriers for the plainest possible reason. `xrexpr`
 has said outright that it cannot reason about the value:
 
 ```{code-cell} python
@@ -182,7 +182,7 @@ eagerly.
 ## Two things that aren't about the spec
 
 **The uniform spelling.** `chunk(100)` applies one spec to every dim rather than naming
-them, and it classifies the same way its mapping form does — so it crosses or barriers on
+them, and it classifies the same way its mapping form does, so it crosses or barriers on
 the same grounds:
 
 ```{code-cell} python
@@ -196,7 +196,7 @@ ds.plan.chunk("auto").isel(lat=0).explain()
 **Option keyword arguments.** `chunk()` accepts options such as `token` and
 `chunked_array_type` alongside the specs. Rebuilding a rechunk around a moved selection
 would have to carry those faithfully, so their presence makes the call a barrier
-regardless of how good the specs are — a fact about how the call was written, not about
+regardless of how good the specs are, a fact about how the call was written, not about
 what any spec means:
 
 ```{code-cell} python
@@ -221,10 +221,10 @@ print("both match")
 
 Worth being clear about what those cells compare, since it is easy to expect more.
 `.collect()` ends in xarray's own `.compute()`, so what comes back is materialised and
-carries no chunks at all — for the second chain, the rechunk was optimised away and would
+carries no chunks at all. For the second chain, the rechunk was optimised away and would
 have produced none anyway. Chunking is about the shape of the *work*, not the shape of the
 answer, which is why `explain()` is where you look for it.
 
-That is the whole of the user guide. If you want the mechanism rather than the model —
-how the plan is represented, what lowering guarantees, and why the rewrite loop
-terminates — start with [the pipeline](../internals/pipeline.md).
+That is the whole of the user guide. If you want the mechanism rather than the model
+(how the plan is represented, what lowering guarantees, and why the rewrite loop
+terminates), start with [the pipeline](../internals/pipeline.md).
