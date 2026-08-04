@@ -100,6 +100,7 @@ as an appendix.
 | W7 | [`07-small-wins.md`](./07-small-wins.md) | independent small rules & cleanups, pick up between workstreams | ~1 PR each |
 | W8 | [`08-rust-gate.md`](./08-rust-gate.md) | the Rust gate conditions and the PyO3 spike spec | timeboxed spike |
 | ~~W9~~ | [`09-grouped-contexts.md`](./09-grouped-contexts.md) | **superseded by W2**; kept for the record, §4 moved to W3 | — |
+| W10 | [`10-documentation.md`](./10-documentation.md) | the docs site (Sphinx + MyST, RTD-hosted, executed examples), essay migration, docstring slimming | 8 PRs |
 
 ## Sequencing
 
@@ -225,6 +226,13 @@ One item not in any workstream, found while writing #89: **the README never ment
 "grouped and windowed operations" section is still owed, and is a docs job rather than part
 of any workstream above.
 
+> **Promoted to a workstream (2026-08-04).** The debt above was paid into the README by
+> #92/#93 because the README was the only rendered artefact there was. That posture is now
+> superseded: [`10-documentation.md`](./10-documentation.md) (W10) gives the material a
+> real home — a MyST/Sphinx site on Read the Docs — migrates the module-docstring essays
+> into it, and then slims both the docstrings and the README's `<details>` blocks down to
+> pointers.
+
 ## Checkpoint — handover (2026-07-29)
 
 Written at the point where the previous checkpoint's whole "in review" chain (#84–#89)
@@ -258,6 +266,7 @@ dated note (2026-07-29) saying exactly what its arm is. Nothing else in them cha
 | ~~7~~ | ~~**`.reduce` mis-tabulation**~~ — **done 2026-07-30** (issue #96). **Parsed properly**, not untabulated: which positional holds the dim spec is now the `schema._DIM_ARG_POSITION` table, so `.reduce` records an honest `Reduce` and its chains optimise. The generator draws it positionally (3.1% of chains). Closing it surfaced a **live** bug in the same branch — `keepdims=True` keeps its dims at size 1, so the recorded `consumes` made the optimiser *reject a valid chain*; now `Opaque`, with the modelling spec'd as `07-small-wins.md` §9 (issue #117). | issue #96, `07-small-wins.md` §7's closing note | Landed. |
 | ~~9~~ | ~~**#121 — an emptying select crosses an auto-sizing rechunk**~~ **done 2026-08-01.** Fixed on the *spec*, not the pair: `Auto`, `ByteSize` and `BlockSeq` are the specs dask resolves by measuring the array it is handed, so all three barrier and `_pushable_rechunk` stays one `match`. The narrower guard was built first and rejected — measurement showed the hazard depends on `array.chunk-size` and the rank, so no per-dim discriminant separates safe from unsafe (`chunks.py`'s `Auto` carries the table). `Rechunk` now classifies its **uniform** form too, which retired the two `isinstance(args[0], ...)` reach-ins. The generator exclusion is lifted and the strict xfail is a passing test. | issue #121, [`04-chunk-taxonomy.md`](./04-chunk-taxonomy.md) | Was the only case in the package where the rewrite was worse than eager rather than merely different (contrast `07-small-wins.md` §8). |
 | ~~8~~ | ~~**NumPy-style docstrings**~~ — **done** (issue #97). Every callable in `src/xrexpr/` now carries `Parameters`/`Returns`/`Raises` sections with its correctness argument under `Notes`, and the style is enforced rather than aspirational: ruff `D` with `convention = "numpy"`, plus the `numpydoc-validation` pre-commit hook for the content ruff can't check. | issue #97 | Landed. |
+| 10 | **W10 — the documentation site** (added 2026-08-04). Sphinx + myst-nb on Read the Docs; the module-docstring essays migrate to `internals/` pages; the final PR slims the docstrings and the README. PRs 1–7 are additive and interleave freely with the code items above; PR 8 edits the same module docstrings W5/W6 will touch, so it lands after whichever of those is in flight. | issue to file, [`10-documentation.md`](./10-documentation.md) | Last, as item 10: docs block nothing, and the destructive PR wants the essay churn behind it. |
 
 Deliberately *not* on the list: the weighted **select** rule (`02` §8.1 — needs the
 package's first data-touching rewrite, and its own design decision; issue #107),
