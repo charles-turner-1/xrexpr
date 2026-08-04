@@ -43,6 +43,21 @@ dev = [
     "ruff",  # linting
     "xarray",
 ]
+# Declared once, consumed twice: pixi exposes every optional-dependency group as a
+# feature of the same name (which is how the ``dev`` extra above and
+# ``[tool.pixi.feature.dev]`` below merge), and Read the Docs installs ``.[docs]`` with
+# pip. Adding a docs dependency here reaches both without a second list to keep in step.
+docs = [
+    "sphinx>=8",
+    "myst-nb>=1.2",  # MyST pages *and* executed code cells; it bundles myst-parser
+    "pydata-sphinx-theme>=0.16",
+    "sphinx-design",  # landing-page cards
+    "sphinx-copybutton",
+    "sphinxcontrib-mermaid>=1.0",  # MyST has no native mermaid
+    "ipykernel",  # myst-nb executes pages through a Jupyter kernel
+    "dask",  # docs-only, same posture as the test feature: the rechunking pages call
+             # .chunk(), while xrexpr itself stays dask-free
+]
 
 [project.scripts]
 
@@ -190,6 +205,11 @@ test-py312 = { features = ["py312", "test", "numbagg"] }
 test-py313 = { features = ["py313", "test", "numbagg"] }
 test-numbagg = { features = ["test", "numbagg"] }
 test-nonumbagg = { features = ["test"] }
+# ``solve-group = "default"`` so the docs build against the same xarray the tests do.
+# Deliberately absent: numbagg. xarray dispatches reductions to it when it is importable
+# and its presence changes results, not just coverage (see the CI matrix comment), so the
+# docs env is the no-numbagg arm and executed output has one canonical form.
+docs = { features = ["docs"], solve-group = "default" }
 
 [tool.pixi.feature.test.dependencies]
 pytest = ">=8.4.2,<9"
@@ -218,6 +238,9 @@ black = { cmd = "black src tests", description = "Run the black formatter" }
 mypy = { cmd = "mypy", description = "Run mypy type checks (config: [tool.mypy])" }
 pre-commit = { cmd = "pre-commit run --all-files && pixi lock", description = "Run pre-commit hooks" }
 pre-commit-install = { cmd = "pre-commit install", description = "Install pre-commit hooks" }
+
+[tool.pixi.feature.docs.tasks]
+docs = { cmd = "sphinx-build -W --keep-going -b html docs docs/_build/html", description = "Build the docs (warnings are errors)" }
 
 [tool.pixi.feature.py310.dependencies]
 python = "3.10.*"
