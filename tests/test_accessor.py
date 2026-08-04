@@ -1415,6 +1415,54 @@ def test_getitem_after_a_bare_name_projection_is_indexing_too(ds):
     assert_equal(chain.collect(), ds["temperature"][[1, 2]][[1]])
 
 
+@pytest.mark.parametrize(
+    "escape",
+    [
+        # the two doors a recorded ``Opaque`` hands back a DataArray through
+        lambda o: o.pipe(lambda d: d["temperature"]),
+        lambda o: o.get("temperature"),
+    ],
+    ids=["pipe", "get"],
+)
+def test_getitem_after_an_opaque_is_not_a_projection(ds, escape):
+    """An ``Opaque`` may return a ``DataArray``, so the ``__getitem__``s after it index too.
+
+    Notes
+    -----
+    ``Opaque`` is the node the IR does not model, and that covers its *result type*: both
+    ``pipe`` and ``get`` take a ``Dataset`` to a ``DataArray`` without a modelled node in
+    sight. Classified on the key alone the pair would be two ``Project``s, and
+    ``merge_adjacent_projects`` -- which is licensed to fire past an ``Opaque`` -- would
+    collapse ``[[1, 2]][[1]]`` to ``[[1]]``. That returns a valid array of the *wrong rows*
+    rather than raising, so the equality assertion is the one that matters here.
+    """
+    chain = escape(ds.plan)[[1, 2]][[1]]
+
+    assert [type(n) for n in chain._ops] == [Opaque, Opaque, Opaque]
+    assert_equal(chain.collect(), escape(ds)[[1, 2]][[1]])
+
+
+def test_getitem_after_a_dataset_valued_opaque_is_demoted_too(ds):
+    """An opaque that *does* return a Dataset demotes what follows it anyway, losing one merge.
+
+    Notes
+    -----
+    The acknowledged cost of reading ``Opaque`` as receiver-unknown, pinned as intended
+    rather than left to surprise. ``rename`` returns a ``Dataset``, so these two list-form
+    projections would merge safely -- but that is only knowable from the opaque's *name*,
+    and a table of Dataset-preserving names would rot as xarray grows. Projection pushdown
+    loses nothing, since :func:`~xrexpr.optimize._trusted_prefix` already stops it at the
+    first ``Opaque``; ``merge_adjacent_projects`` is the whole of what is forfeited.
+    """
+    chain = ds.plan.rename({"temperature": "t2m"})[["t2m", "elevation"]][["t2m"]]
+
+    assert [type(n) for n in chain._ops] == [Opaque, Opaque, Opaque]
+    assert_equal(
+        chain.collect(),
+        ds.rename({"temperature": "t2m"})[["t2m", "elevation"]][["t2m"]],
+    )
+
+
 def test_a_list_form_projection_keeps_the_chain_in_dataset_land(ds):
     """A list-form projection yields a Dataset, so later ``__getitem__``s still record projections.
 

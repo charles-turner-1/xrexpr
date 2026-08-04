@@ -763,10 +763,18 @@ def merge_adjacent_projects(nodes: Plan, schema: SchemaState) -> Plan | None:
     §8's middle clause, the same licence :func:`pushdown_projections` runs on: the plan
     says outright that the extra name is not wanted, and the error comes from work whose
     result it discards. No value moves, because the surviving key is unchanged. Taking
-    the schema-free reading is also what lets the rule fire past an
-    :class:`~xrexpr.ir.Opaque`, and admit a ``p1`` that names a coordinate
-    (``ds[["lat", "temperature"]][["lat"]]``, which composes correctly), neither of which
-    a ``data_vars`` guard confined to :func:`_trusted_prefix` could do.
+    the schema-free reading is also what lets the rule admit a ``p1`` that names a
+    coordinate (``ds[["lat", "temperature"]][["lat"]]``, which composes correctly), which
+    a ``data_vars`` guard confined to :func:`_trusted_prefix` could not do.
+
+    It also lets the rule fire past an :class:`~xrexpr.ir.Opaque` — but nothing recorded
+    supplies such a pair any more. An ``Opaque`` may *return a DataArray*
+    (``ds.plan.pipe(lambda d: d["tas"])``), on which a list key indexes rather than
+    projects, so :meth:`~xrexpr.accessor.LazyProxy._getitem_is_projection` demotes every
+    ``__getitem__`` after one; without that, ``[[1, 2]][[1]]`` would satisfy the subset
+    test and collapse to the wrong row. The behaviour stays for plans built by hand or by
+    a future producer that *can* prove the receiver — the rule's contract is unchanged,
+    only its supply.
 
     One merge per call; :func:`optimize`'s fixpoint collapses a run of three. The rule
     shrinks the plan, so the termination measure is satisfied on its first component.

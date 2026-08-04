@@ -176,22 +176,39 @@ class LazyProxy:
           collapse to ``da[[1]]`` — row 1, where the eager chain indexes *within* the
           selected pair and gives row 2.
 
-        The live object is a ``DataArray`` **either** because the base is one **or**
-        because the chain has already made it one, which a bare-name projection does
-        (``ds.plan["tas"][[1, 2]][[1]]`` is the same wrong-row collapse, one op later).
-        Nothing else recorded can: every modelled node maps a ``Dataset`` to a
-        ``Dataset``, and the two spellings are told apart by the key ``args`` hold, since
-        the node's ``variables`` reads ``("tas",)`` for both ``ds["tas"]`` and
-        ``ds[["tas"]]``. Once a ``DataArray``, assumed a ``DataArray`` for the rest of the
-        chain: an ``Opaque`` that converts back (``da.to_dataset()``) only costs the
-        projections after it their modelling, and ``Opaque`` is the answer that is always
-        *correct* — this classification is only ever allowed to give up optimisation, never
-        to admit a rewrite the eager chain would not permit.
+        So the answer is "projection" only while the receiver is *known* to be a
+        ``Dataset``, which takes two things of every node already recorded: that it is
+        modelled at all, and that what it models maps a ``Dataset`` to a ``Dataset``. Each
+        has one way to fail, and this method is the two of them:
+
+        - a :class:`~xrexpr.ir.Project` that is ``single`` returns a ``DataArray``
+          (``ds.plan["tas"][[1, 2]][[1]]`` is the same wrong-row collapse as above, one op
+          later). ``single`` is the *key*'s reading, not the node's ``variables``, which
+          says ``("tas",)`` for both ``ds["tas"]`` and ``ds[["tas"]]``;
+        - an :class:`~xrexpr.ir.Opaque` is the node the IR does not model, and that is
+          true of its *result type* too: ``ds.plan.pipe(lambda d: d["tas"])`` and
+          ``ds.plan.get("tas")`` both record one and both hand back a ``DataArray``.
+          Reading the name to guess which opaques preserve a ``Dataset`` would be a table
+          that silently rots as xarray grows; unmodelled means unmodelled.
+
+        The cost is one rewrite and it is confined to ``merge_adjacent_projects``: past an
+        ``Opaque`` the folded ``data_vars`` is a guess, so
+        :func:`~xrexpr.optimize._trusted_prefix` already keeps
+        :func:`~xrexpr.optimize.pushdown_projections` out. Two list-form projections behind
+        a genuinely ``Dataset``-valued opaque (``ds.plan.rename(...)[["a", "b"]][["a"]]``)
+        therefore stop merging — the case that cannot be told from the unsafe one without
+        the receiver.
+
+        Once not a ``Dataset``, assumed not a ``Dataset`` for the rest of the chain: an
+        ``Opaque`` that converts back (``da.to_dataset()``) only costs the projections
+        after it their modelling, and ``Opaque`` is the answer that is always *correct* —
+        this classification is only ever allowed to give up optimisation, never to admit a
+        rewrite the eager chain would not permit.
         """
         if self._in_context() or isinstance(self._base, xr.DataArray):
             return False
         return not any(
-            isinstance(node, Project) and not isinstance(node.args[0], list)
+            isinstance(node, Opaque) or (isinstance(node, Project) and node.single)
             for node in self._ops
         )
 
