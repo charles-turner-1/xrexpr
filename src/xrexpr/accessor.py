@@ -1,26 +1,23 @@
-"""The ``.plan`` accessor: a lazy recording proxy over an ``xr.Dataset`` or ``xr.DataArray``.
+"""The ``.plan`` accessor — a lazy recording proxy over an ``xr.Dataset`` or ``xr.DataArray``.
 
-``ds.plan`` returns a :class:`LazyProxy` that records the chained method
-calls made on it (``.mean``, ``.isel``, ``.sel``, ``__getitem__``, ...) instead
-of executing them. Calling :meth:`~LazyProxy.collect` optimises the
-recorded plan and replays it onto the real dataset (:meth:`~LazyProxy.explain`
-returns the optimised plan as text without running it).
+``ds.plan`` returns a :class:`LazyProxy` that *records* the chained calls made on it
+(``.mean``, ``.isel``, ``.sel``, ``__getitem__``, ...) instead of executing them.
+:meth:`~LazyProxy.collect` optimises the recorded plan and replays it onto the real
+dataset; :meth:`~LazyProxy.explain` returns the optimised plan as text without running it.
 
-The recorded plan is a list of :data:`~xrexpr.ir.FluentOp` variants: each call is
-normalised by :func:`~xrexpr.schema.to_opnode`, a pure function of that call, and
-appended — recording holds no schema of its own. ``collect`` then runs the plan through
-the pipeline in ``lower.py``: :func:`~xrexpr.lower.to_lower_ir` translates what was
-written into what it means, :func:`~xrexpr.optimize.optimize` rewrites that (a fixpoint
-of rules, folding the base schema forward itself), :func:`~xrexpr.lower.emit` turns the
-result back into calls, and ``_replay`` performs them against the
-base dataset.
+Recording is a **pure append and holds no schema of its own**, and that is a refusal
+rather than an omission. The proxy does have the base dataset in hand, so it could fold a
+schema forward and resolve things eagerly — but past a call it cannot model, that schema
+is a guess, so anything resolved against it would be resolved against a fiction. The fold
+belongs to the optimiser, which knows where the guessing starts.
 
-One class serves both objects, because only two things differ and neither is worth a
-second implementation: a ``DataArray`` has no ``data_vars`` (so the projection rules
-have nothing to fire on) and its ``__getitem__`` is *indexing*, not projection (see
-``LazyProxy._getitem_is_projection``). Which behaviour applies is read off the base
-object rather than stored — the same derived-property discipline
+One class serves both objects, because only two things differ and neither earns a second
+implementation: a ``DataArray`` has no ``data_vars`` (so the projection rules have nothing
+to fire on) and its ``__getitem__`` is *indexing*, not projection. Which behaviour applies
+is read off the base object rather than stored — the same derived-property discipline
 :class:`~xrexpr.schema.SchemaState` follows.
+
+See ``docs/internals/pipeline.md``.
 """
 
 from functools import wraps

@@ -1,31 +1,23 @@
-"""The *value* sum type: a closed taxonomy over what a single ``isel``/``sel`` indexer is.
+"""The *value* sum type — a closed taxonomy over what one ``isel``/``sel`` indexer is.
 
-``Select.indexer`` maps each dim to one indexer *value*. A raw indexer value is a sum type
-in disguise — exactly one of six shapes — and without a taxonomy every call site in
-``ir.py``/``optimize.py``/``schema.py`` would have to re-derive those shapes by hand. This
-module makes the taxonomy a *type*, so the classification lives in one place
-(:func:`classify`) and the facts that follow from it become methods rather than
-re-decisions:
+``Select.indexer`` maps each dim to one indexer value, and a raw one is a sum type in
+disguise: exactly one of six shapes. This module makes the taxonomy a *type*, so
+:func:`classify` is the sole constructor and is **total**, and the facts that follow
+become methods rather than re-decisions at every call site in
+``ir.py``/``optimize.py``/``schema.py``: :attr:`drops_dim`, :meth:`size`, :meth:`to_raw`.
 
-- :attr:`drops_dim` — does this indexer remove its dim (a scalar) or keep it? (``ir.py``'s
-  ``Select.consumes``.)
-- :meth:`size` — the new length of a *kept* dim under this indexer. Sizing a dim whose
-  current length is unknown, or a ``sel`` label slice, is not this layer's call: those
-  answer "unknown" at ``schema._selected_size``, which guards every call to this.
-- :meth:`to_raw` — the exact xarray-facing value to hand back to replay when a rewrite
-  rebuilds a node's ``args`` from its ``indexer``.
+Whether two indexers *compose* is deliberately **not** modelled here: composition is a
+policy the optimiser chooses to prove, not an intrinsic fact of a value, so it stays a
+``match`` in ``optimize.py``. What this module guarantees is the discriminant that policy
+matches on. :class:`ForwardSlice` earns its own variant so the "forward, non-negative
+bounds" carve-out the composer needs is a **constructor invariant** rather than a guard
+re-run at every call site, and :class:`Label` is this layer's escape hatch, for ``sel``
+labels that cannot be reasoned about positionally.
 
-Whether two indexers *compose* (the ``optimize.py`` concern) is deliberately **not** modelled
-here: composition is a policy the optimiser chooses to prove, not an intrinsic fact of a value,
-so it stays a ``match`` in ``optimize.py``. What this module guarantees is the discriminant it
-matches on.
+:meth:`size` has one boundary: a dim of unknown length, or a ``sel`` label slice, answers
+"unknown" one level up at ``schema._selected_size``, which guards every call into it.
 
-``ForwardSlice`` earns its own variant so the "forward, non-negative bounds" carve-out that
-the composer needs is a *constructor invariant* — a ``ForwardSlice`` cannot be built with a
-negative bound — rather than a guard re-run at every call site. ``Label`` is the value layer's
-escape hatch: a ``sel`` coordinate label (a string, timestamp, tuple key, label slice, or
-label sequence) is genuinely open and cannot be reasoned about positionally — the same role
-``Opaque`` plays for op kinds.
+See ``docs/internals/values.md``.
 """
 
 import numbers

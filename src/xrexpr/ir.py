@@ -1,56 +1,23 @@
-"""The expression IR: a sum type over the operation *kinds* the optimiser distinguishes.
+"""The expression IR — a sum type over the operation *kinds* the optimiser distinguishes.
 
-A Dataset method chain is *linear* (each op has exactly one input — the previous
-dataset), so the IR is a **list** of :data:`Op`, not a tree. Each variant carries the
-verbatim call header (``name``/``args``/``kwargs``) that replay re-invokes, *plus* the
-normalised metadata the optimiser reasons about — and that metadata differs per kind, so
-the variants have genuinely different shapes rather than one flat record with mostly-empty
-fields. ``match`` over :data:`Op` then binds different fields per arm, and ``assert_never``
-makes the union exhaustive under mypy.
+A method chain is linear, so a plan is a **list** of :data:`Op`, not a tree. Each variant
+carries the verbatim call header replay re-invokes *plus* the normalised metadata the
+optimiser reasons about, and that metadata differs per kind, so the variants have
+genuinely different shapes rather than one flat record. :data:`FluentOp` and
+:data:`LoweredOp` name the two levels over one set of dataclasses, so the level a
+function works at is legible in its signature.
 
-The union tracks structural **kinds**, not xarray methods: ``mean``/``std``/``sum`` are
-all one :class:`Reduce`, told apart by ``name`` (the method table lives in
-``operations.py``). A new *variant* is earned only by genuinely new structural data.
-Kinds are usually settled by the method name, but not always: ``__getitem__`` is a
-:class:`Project` when its key names variables and an :class:`Opaque` otherwise, so its
-row in the table only *nominates* the kind — the shape of the *key* confirms it.
+Three invariants to keep when editing here. Every ``match`` over one of these unions
+closes with ``assert_never``, so a new variant is a type error at every unhandled site
+rather than a silent fallthrough. Dim sets are symbolic where the call is — a bare
+``ds.mean()`` records :data:`ALL_DIMS`, a *sentinel*, distinct from ``None``, which means
+*unknown*. And a node is frozen unconditionally but hashable only when its payload is; an
+array payload raises, deliberately, because hashing it would mean computing it.
 
-``to_opnode`` (in ``schema.py``) builds these at record time; ``lower.py`` translates
-that recording into what it *means*, the optimiser (``optimize.py``) rewrites the
-result, and ``lower.emit`` turns it back into the calls the ``.plan`` accessor replays.
-:data:`FluentOp` and :data:`LoweredOp` name the two levels — one set of dataclasses,
-two union aliases over them, so the level a function works at is in its signature.
+Only **unary** ops are modelled. Keep that linearity assumption named here rather than
+leaked into individual rules.
 
-**Dim sets are symbolic where the call is.** A bare ``ds.mean()`` names no dim: it means
-"every dim there is *when this runs*", which is not knowable at record time — past an
-unmodelled op the recorder's schema is a guess, so expanding it eagerly bakes in names
-that may already be wrong (``rename`` is the case that bites). :data:`DimSet` therefore
-admits the sentinel :data:`ALL_DIMS` alongside a concrete ``frozenset``, and the
-expansion is deferred to a reader that has an exact schema. It is a *sentinel*, not
-``None``: ``None`` already means **don't know** in this codebase
-(``SchemaState.var_dims``), whereas ``ALL_DIMS`` means something definite. Readers
-narrow it with a match arm rather than an ``assert``, so the two cases are handled where
-the field is used.
-
-**Immutability is unconditional; hashability is not.** Every variant is frozen and
-coerces its containers, so a node cannot be mutated or drift from itself — and each is
-hashable and comparable **when its payload is**. Some payloads aren't:
-``xr.DataArray.__hash__`` is ``None``, so a node carrying an array (``weighted(w)``, a
-boolean-mask ``__getitem__``, ``where(cond)``) raises ``TypeError`` on ``hash()``, and
-``==`` between two such nodes holding *distinct but equal* arrays raises ``ValueError``
-(the elementwise comparison has no truth value). The stronger claim is deliberately not
-wanted: making an array payload hashable means hashing its *values*, which for a
-dask-backed array means computing it at plan time — the one thing this package promises
-never to do. (``indexers.Mask`` normalises to a tuple of booleans for a related reason,
-but that payload is small and already realised, so the precedent does not transfer.)
-Nothing here hashes a node, and plan-equality compares nodes that *share* the payload
-object, where tuple comparison's identity check applies — see ``test_ir.py``, which pins
-all three behaviours.
-
-Only **unary** ops are modelled here. Binary/n-ary ops (``merge``/``concat``/``where``)
-would add their own variants carrying plan-typed children and promote the container from
-a list to a tree — an additive, orthogonal change deferred until such an op is in scope.
-Keep that linearity assumption named *here*, not leaked into individual rules.
+See ``docs/internals/ir.md``; ``test_ir.py`` pins the hashability behaviour.
 """
 
 from collections.abc import Hashable, Mapping

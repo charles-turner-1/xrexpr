@@ -1,53 +1,24 @@
-"""The plan optimiser: rewrite a linear :data:`~xrexpr.ir.LoweredOp` plan to a cheaper equivalent.
+"""The plan optimiser — rewrite a linear lowered plan to a cheaper equivalent.
 
-:func:`optimize` runs a set of local rewrite *rules* to a **fixpoint** — each rule
-maps a plan to an equivalent plan, and the loop reapplies the whole set until the
-plan stops changing. Local rules + a fixpoint let a small rewrite (a select moving
-one hop) compose into a global one (the select reaching the front) without any rule
-having to reason about the whole chain.
+:func:`optimize` runs the local rewrite rules in ``_RULES`` to a **fixpoint**: each maps a
+plan to an equivalent plan and returns ``None`` when it changes nothing. Local rules plus
+a fixpoint let a small rewrite compose into a large one: a select reaching the front of a
+plan is one rule firing repeatedly, and nothing reasons about the whole chain.
 
-Rules (in ``_RULES``):
+Two things to keep when adding a rule. Termination rests on a lexicographic measure,
+``(len(plan), sum of the indices of the Select and Project nodes)``, so **no rule may push
+a node right, and none may lengthen a plan**; one that wants to needs a new measure, not
+an exception. And the dim algebra has a single dispatch site, :func:`dim_effect`, a
+``match`` closed with ``assert_never`` — a new node kind may still take the conservative
+answer, but no longer *by accident*.
 
-- :func:`merge_adjacent_selects` — fold a run of consecutive ``isel``/``isel`` (or
-  ``sel``/``sel``) into a single indexer, *composing* rather than overwriting when both
-  select the same dim.
-- :func:`merge_adjacent_projects` — drop the first of an adjacent pair of projections when
-  the second asks for a subset of its variables, so ``ds[["tas", "pr"]][["tas"]]`` stops
-  building an intermediate Dataset holding a variable it discards one node later.
-- :func:`pushdown_selects` — hop a select left past **any** node whose dims permit it, so
-  the work behind it runs on less data: past a plain reduce, and past a grouped or
-  windowed one, which is what lowering's fused nodes exist to make expressible —
-  ``groupby("time.month").mean().isel(lat=0)`` groups one latitude instead of all of them.
-- :func:`pushdown_projections` — hop a variable projection left past a preceding reduce,
-  select or fused reduce (weighted included), so only the needed variables flow through
-  the plan. This also disarms a footgun: the discarded variables can no longer raise for
-  lacking a dim they were never asked about.
-- :func:`pushdown_selects_past_rechunks` — hop a select left past a preceding ``chunk``
-  so the rechunk moves less data.
+The schema fold lives here, not in recording, because only the optimiser knows how far it
+can be trusted. :func:`~xrexpr.schema.apply_schema` models :class:`~xrexpr.ir.Opaque` as
+variable-preserving, which ``rename`` and ``drop_vars`` are not, so ``_trusted_prefix``
+bounds the rules that consult ``data_vars``. Dim-level rules are unaffected — an opaque
+node costs rewrites, not correctness.
 
-Each is a *local, single-step* rewrite; the fixpoint composes them (a select bubbles
-past a whole run of reductions, and newly-adjacent selects then merge).
-
-**One dispatch site for dim algebra.** The two pushdown rules above ask different
-questions of the node they cross — what a *select* coming from the right must avoid, and
-what a *projection* going to its left must supply — and both read the answer from
-:func:`dim_effect`, a single ``match`` closed with ``assert_never``, so a new node kind
-must state its dim effect before either rule will compile against it.
-:func:`pushdown_selects_past_rechunks` deliberately stays outside it: it has no
-disjointness test at all — a rechunk changes no dim, so a select *always* commutes with
-one — and instead rewrites the spec it crosses.
-
-**The schema, and how far it can be trusted.** Dim-level rules read almost everything they
-need off the nodes themselves, but a *variable*-level rule can't: whether a projection may
-cross an op depends on which dims the projected variables carry at that point in the plan.
-So :func:`optimize` takes the **base** schema and ``_schemas`` folds it forward to give
-the schema each node sees — the plan's single fold, and also where a symbolic
-:data:`~xrexpr.ir.ALL_DIMS` is resolved (:func:`~xrexpr.schema.resolve_dims`).
-:func:`~xrexpr.schema.apply_schema` models
-:class:`~xrexpr.ir.Opaque` as variable-preserving, which is not true of ``rename`` or
-``drop_vars``, so those folded schemas are exact only up to the first opaque node —
-``_trusted_prefix`` marks that boundary and rules that consult ``data_vars`` stay
-inside it.
+See ``docs/internals/optimiser.md``.
 """
 
 from collections.abc import Callable, Hashable, Iterable, Mapping
