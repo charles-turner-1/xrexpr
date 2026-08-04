@@ -829,13 +829,24 @@ def test_tracked_schema_agrees_with_evaluation(case):
 
     - **dims**: the same dim names survive. This is what the rewrites actually reason
       about — ``consumes`` and the pushdown conflict check are name-based.
-    - **coords and variables**: exactly the result's, not merely a subset. A scalar select
-      drops the dim while xarray keeps a scalar coordinate behind, and an aggregating op
-      removes that coordinate outright — both are modelled now that a coordinate is a
-      variable with dims, so there is nothing left to be conservative about.
+    - **coords**: exactly the result's, not merely a subset. A scalar select drops the dim
+      while xarray keeps a scalar coordinate behind, and an aggregating op removes that
+      coordinate outright — both are modelled now that a coordinate is a variable with
+      dims, so there is nothing left to be conservative about.
+    - **variables**: each with **the dims it spans**, not merely by name. The store is
+      per-variable, so a name-only comparison cannot see a variable whose dims are wrong
+      — and the dataset-level dim set cannot either, as long as some *sibling* still
+      carries the dim. That is exactly how issue #125 survived here: the ``WeightedReduce``
+      arm skipped minting ``time`` onto ``elevation`` because ``temperature`` still had it,
+      and every dataset-level fact stayed true. It became visible only through a trailing
+      ``[["elevation"]]``, a conjunction this generator draws roughly once in 20,000 plans.
 
     Dim *order* is deliberately not asserted: ``Dataset.sizes`` does not promise the
-    insertion order the schema threads, so comparing as sets is the honest check.
+    insertion order the schema threads, and ``_minted`` sorts minted dims by ``str`` to
+    keep a ``SchemaState`` a value across ``PYTHONHASHSEED`` (see
+    ``test_several_minted_dims_land_in_a_deterministic_order``), which is its own order
+    rather than xarray's. Comparing as sets is the honest check; the ordering that *is*
+    promised is pinned by example instead.
 
     **Confined to plans with no unmodelled op**, which until builder chains were generated
     was an assumption the generator happened to guarantee rather than one anybody stated.
@@ -863,7 +874,14 @@ def test_tracked_schema_agrees_with_evaluation(case):
     # one demotes it to 0-d. Asserted **exactly** rather than as a subset, which the bare-name
     # ``coords`` set could never have supported.
     assert set(schema.coords) == set(result.coords)
-    assert set(schema.variables) == set(result.variables)
+
+    # Per variable, which subsumes the name-set comparison this replaced *and* the size
+    # keys above — ``sizes`` is pruned to ``dim_names``, which is derived from these very
+    # dims. Both are kept anyway: they fail first and say less when they do, so a shrunk
+    # counterexample reads as "a dim went missing" before it reads as a variables diff.
+    assert {k: set(v) for k, v in schema.variables.items()} == {
+        k: set(v.dims) for k, v in result.variables.items()
+    }
 
 
 @SETTINGS
@@ -975,13 +993,33 @@ def test_every_builder_kind_is_generated_and_replays_equal_to_eager(data, kind):
     *exclude* the group dim is a per-group **map**, not an aggregation, and deliberately
     does not fuse. Everything else the generator emits must, or the widening is exercising
     the opaque fallback while looking like it exercises the fused nodes.
+
+    The **per-variable schema** is asserted here as well as in
+    :func:`test_tracked_schema_agrees_with_evaluation`, and for the reason this test
+    exists: each fused arm mints or resizes dims on its own terms, and asking for the kind
+    by name is what makes that arm's schema checked *every run* rather than on the ~9% of
+    random chains that happen to contain one. Issue #125 — a weight dim minted onto the
+    dataset instead of onto each variable — is caught by ~12% of the ``weighted`` pairs
+    drawn here, so this parametrisation fails essentially every run, where the general
+    property found it in none of 20,000 plans.
     """
     ds = data.draw(datasets(dated=True))
     pair = data.draw(_builder_pair(ds, kind=kind))
 
     assert pair is not None and pair[0].name == kind
-    lowered = to_lower_ir(_build_plan(ds, pair)[0], _dim_names(ds))
+    plan, schema = _build_plan(ds, pair)
+    lowered = to_lower_ir(plan, _dim_names(ds))
     event(f"{kind}: {'fused' if len(lowered) == 1 else 'opaque pair'}")
     assert len(lowered) == 1 or kind in {"groupby", "resample"}
 
-    assert_equal(_apply(ds.plan, pair).collect(), _apply(ds, pair))
+    eager = _apply(ds, pair)
+    assert_equal(_apply(ds.plan, pair).collect(), eager)
+
+    # Only where the schema claims to know: an unfused pair lowers to ``Opaque``, which
+    # ``apply_schema`` models as dim- and variable-preserving and a per-group map is not.
+    # The same trust boundary the ``assume`` above states, spelled as a guard because a
+    # kind that *stopped* fusing should still be asserted about, not discarded.
+    if len(lowered) == 1:
+        assert {k: set(v) for k, v in schema.variables.items()} == {
+            k: set(v.dims) for k, v in eager.variables.items()
+        }
