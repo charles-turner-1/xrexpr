@@ -32,6 +32,13 @@ W6. They are order-significant but dim-keeping, so the equality-vs-eager propert
 proves the optimiser hops a *disjoint* select or projection across a scan while leaving an
 intersecting one put — the leave-don't-raise leg the hand-written goldens pin by example.
 
+**Elementwise ops** (``astype``/``fillna``/``clip``/``round``) are generated too, as of
+W5, with scalar arguments only — so they record :class:`~xrexpr.ir.Elementwise` and the
+equality-vs-eager property covers a select or projection crossing them in arbitrary
+interleavings. The unsafe-argument path (a data- or per-variable-shaped argument demoting
+to :class:`~xrexpr.ir.Opaque`) is left to the hand-written suite; the generator draws only
+the safe forms, so a drawn chain never turns an elementwise op into a barrier by accident.
+
 **Builder chains** (``groupby``/``resample``/``rolling``/``coarsen``/``weighted``) are
 generated too, by :func:`builder_plans`. They feed the *contract* properties below
 (optimised equals eager, lowering idempotent, the emit round-trip, tracked names) but not
@@ -95,7 +102,7 @@ HAS_DASK = importlib.util.find_spec("dask") is not None
 #: zero-length dim), and a chain that raises *in xarray* tests nothing here. Selects and
 #: projections are exactly what the rechunk rules are about, so nothing under test is lost —
 #: and a reduce or builder *before* a chunk is still drawn freely.
-AFTER_CHUNK = ["isel", "sel", "project", "chunk"]
+AFTER_CHUNK = ["isel", "sel", "project", "elementwise", "chunk"]
 
 #: Reductions with no identity element, which numpy refuses to apply to an empty axis
 #: ("zero-size array to reduction operation fmax which has no identity"). An empty
@@ -702,7 +709,7 @@ def _calls(draw, ds, max_ops=4, builders=False):
 
     # "builder" twice, so the ``assume`` in ``builder_plans`` discards fewer examples —
     # a chain with no builder pair in it is just a plain chain, already covered.
-    kinds = ["isel", "sel", "reduce", "scan", "project"] + (
+    kinds = ["isel", "sel", "reduce", "scan", "project", "elementwise"] + (
         ["builder"] * 2 if builders else []
     )
     if HAS_DASK:
@@ -748,6 +755,29 @@ def _calls(draw, ds, max_ops=4, builders=False):
                     )
                 ),
             )
+            current = _apply(current, [call])
+            calls.append(call)
+            continue
+
+        if kind == "elementwise":
+            # A per-element op keeps every dim, size and variable, so it composes anywhere
+            # in the chain. Scalar arguments only, so it records ``Elementwise`` -- a
+            # data-shaped argument would demote to ``Opaque``, a path the hand-written suite
+            # pins instead. ``astype`` casts to *float* only: an int cast raises on a NaN a
+            # degenerate reduce upstream can produce (``mean`` over an empty selection),
+            # while a float cast never does.
+            names = ["astype", "fillna", "clip"]
+            if not any(v.dtype == bool for v in current.data_vars.values()):
+                names.append("round")  # numpy round refuses a boolean array
+            name = draw(st.sampled_from(names))
+            if name == "astype":
+                call = Call("astype", draw(st.sampled_from(["float32", "float64"])))
+            elif name == "round":
+                call = Call("round", draw(st.integers(min_value=0, max_value=2)))
+            elif name == "clip":
+                call = Call("clip", 0.0, 1.0)
+            else:
+                call = Call("fillna", 0.0)
             current = _apply(current, [call])
             calls.append(call)
             continue
