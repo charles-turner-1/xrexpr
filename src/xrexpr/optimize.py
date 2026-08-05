@@ -221,9 +221,8 @@ class DimEffect:
 
 
 #: Nothing crosses this node in either direction — the answer for every kind whose dim
-#: effect the optimiser does not model (``Scan``, whose order matters; ``Opaque``, which
-#: could do anything; ``Rechunk``, which has its own rule) and for ``Project``, which the
-#: *other* rules handle.
+#: effect the optimiser does not model (``Opaque``, which could do anything; ``Rechunk``,
+#: which has its own rule) and for ``Project``, which the *other* rules handle.
 _OPAQUE_EFFECT = DimEffect(blocks=None, requires=None)
 
 
@@ -297,7 +296,17 @@ def dim_effect(node: LoweredOp) -> DimEffect:
                     return DimEffect(blocks=None, requires=named | weight_dims)
                 case _:
                     assert_never(consumes)
-        case Scan() | Project() | Rechunk() | Opaque():
+        case Scan(dims=dims):
+            # A scan keeps its dims but is order-significant. ``blocks=dims``: a select on
+            # a *disjoint* dim commutes (the scan acts independently at each position of
+            # the others), an intersecting one is left, never raised -- ``on_conflict``
+            # stays the default ``"immovable"``, since the dims survive. ``requires=dims``:
+            # a projection may go before the scan iff the kept variables still carry the
+            # scanned dims, exactly a reduce's condition -- ``07-small-wins.md`` §3's
+            # ``Scan`` arm. (A *prefix* forward-slice on the scanned dim also commutes with
+            # ``cumsum``/``cumprod`` but not ``diff``; a later refinement, out of scope.)
+            return DimEffect(blocks=dims, requires=dims)
+        case Project() | Rechunk() | Opaque():
             return _OPAQUE_EFFECT
         case _:
             assert_never(node)

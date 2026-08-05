@@ -478,6 +478,19 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
             for dim, window in windowed.window.items():
                 if dim in sizes:
                     sizes[dim] = _windowed_size(windowed, sizes[dim], window)
+        case Scan(name="diff", dims=frozenset() as dims) as scan:
+            # ``diff(dim, n=1)`` shrinks ``dim`` by ``n``; ``label`` only picks which end,
+            # not the size. ``diff``'s dim is a required positional, so ``dims`` is always
+            # this concrete frozenset, never ``ALL_DIMS`` -- an ``ALL_DIMS`` scan (a bare
+            # ``cumsum()``) falls through to the size-preserving ``pass`` arm below.
+            # ``cumsum``/``cumprod`` keep every size and go there too. Latent today
+            # (nothing downstream of a scan reads sizes), but the schema should not carry a
+            # known lie once the dims exist to fix it.
+            n = scan.kwargs.get("n", scan.args[1] if len(scan.args) > 1 else 1)
+            for dim in dims:
+                size = sizes.get(dim)
+                if size is not None:  # an unknown length stays unknown, never guessed
+                    sizes[dim] = max(size - n, 0)
         case Scan() | Rechunk() | Opaque():
             pass
         case _:
@@ -806,7 +819,7 @@ def to_opnode(
                 name=name,
                 args=args,
                 kwargs=kw,
-                consumes=_reduce_dims(args, kwargs, position),
+                consumes=_dim_spec(args, kwargs, position),
             )
         case SelectSpec(name=select):
             return Select(
@@ -816,7 +829,11 @@ def to_opnode(
                 indexer=_select_indexer(args, kwargs),
             )
         case ScanSpec(name=scan):
-            return Scan(name=scan, args=args, kwargs=kw)
+            # Scans put the dim first (``cumsum(dim)``, ``diff(dim)``), so position 0 --
+            # ``ScanSpec`` needs no ``dim_arg`` field the way ``ReduceSpec`` does.
+            return Scan(
+                name=scan, args=args, kwargs=kw, dims=_dim_spec(args, kwargs, 0)
+            )
         case RechunkSpec(name=rechunk):
             return Rechunk(
                 name=rechunk,
@@ -875,21 +892,26 @@ def _projected_names(args: tuple[Any, ...]) -> tuple[Hashable, ...] | None:
     return None
 
 
-def _reduce_dims(
+def _dim_spec(
     args: tuple[Any, ...], kwargs: Mapping[str, Any], position: int
 ) -> DimSet:
-    """Parse the dims a reduction removes out of its call.
+    """Parse the dim spec out of a reduce or scan call.
+
+    Serves both kinds: a reduce (which *removes* the dims) and a scan (which *keeps*
+    them). The parsing convention is identical — a ``dim=`` kwarg, else the positional at
+    ``position``, else every current dim — because ``mean``, ``cumsum``, ``cumprod`` and
+    ``diff`` all take the dim first.
 
     Parameters
     ----------
     args : tuple
-        The reduction's positional arguments.
+        The call's positional arguments.
     kwargs : Mapping
-        The reduction's keyword arguments, where a ``dim=`` spec takes precedence.
+        The call's keyword arguments, where a ``dim=`` spec takes precedence.
     position : int
         Where the dim spec sits among ``args`` — the reduction's
-        :attr:`~xrexpr.operations.ReduceSpec.dim_arg`, which is 0 for every reduction but
-        ``.reduce``, whose first positional is a *function*.
+        :attr:`~xrexpr.operations.ReduceSpec.dim_arg` (0 for every reduction but
+        ``.reduce``, whose first positional is a *function*), and 0 for every scan.
 
     Returns
     -------
@@ -900,9 +922,10 @@ def _reduce_dims(
     Notes
     -----
     An unspecified ``dim`` is left symbolic rather than expanded here: which dims exist
-    depends on where in the plan the reduce ends up running, and this function is not
-    the place that knows. That covers ``.reduce(func)`` as much as ``mean()``: a bare
-    reduce over every dim is a bare reduce whatever spells it.
+    depends on where in the plan the op ends up running, and this function is not the
+    place that knows. That covers ``.reduce(func)`` and a bare ``cumsum()`` as much as
+    ``mean()``: a bare pass over every dim is a bare pass whatever spells it. (``diff``
+    makes its dim a required positional, so its bare case can't arise.)
 
     ``keepdims=True`` is **not** handled here, because there is no answer this function
     could give: the dims survive at size 1, so neither a named ``consumes`` nor

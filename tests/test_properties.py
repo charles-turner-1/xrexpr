@@ -20,12 +20,17 @@ in this module, never expected noise. Two narrowings are worth naming:
   manager, so :data:`HAS_DASK` gates the kind out rather than letting a drawn chain
   raise. Where it is installed, both call forms are generated — see :func:`_rechunks`.
 
-``.reduce`` **is** generated, as of #96. It used to be excluded because ``_reduce_dims``
+``.reduce`` **is** generated, as of #96. It used to be excluded because ``_dim_spec``
 read its first positional — a *function* — as a dim spec; now that the dim spec is read
 from the second, the node is honest and the chains are worth generating. It is drawn
 separately from :data:`REDUCE_NAMES` rather than added to it, because its call shape
 differs (the function comes first) and the builder closers are generated as
 ``name(**spec)``.
+
+**Scans** (``cumsum``/``cumprod``/``diff``, :data:`SCAN_NAMES`) are generated too, as of
+W6. They are order-significant but dim-keeping, so the equality-vs-eager property is what
+proves the optimiser hops a *disjoint* select or projection across a scan while leaving an
+intersecting one put — the leave-don't-raise leg the hand-written goldens pin by example.
 
 **Builder chains** (``groupby``/``resample``/``rolling``/``coarsen``/``weighted``) are
 generated too, by :func:`builder_plans`. They feed the *contract* properties below
@@ -45,6 +50,7 @@ import xarray as xr
 from frozendict import frozendict
 from hypothesis import HealthCheck, assume, event, given, settings
 from hypothesis import strategies as st
+from packaging.version import Version
 from xarray.testing import assert_equal
 
 import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
@@ -52,10 +58,10 @@ import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
 # aliased: this module's own ``Call`` is a generated *recorded* call (name + args/kwargs),
 # a different thing from the emitted call header ``lower.Call`` denotes.
 from xrexpr.chunks import Auto, BlockSeq, ByteSize
-from xrexpr.ir import ContextOpen, Opaque, Rechunk, Select
+from xrexpr.ir import ContextOpen, Opaque, Rechunk, Scan, Select
 from xrexpr.lower import Call as Lowered
 from xrexpr.lower import emit, to_lower_ir
-from xrexpr.operations import CONTEXT_METHODS, OP_TABLE, ReduceSpec
+from xrexpr.operations import CONTEXT_METHODS, OP_TABLE, ReduceSpec, ScanSpec
 from xrexpr.optimize import optimize
 from xrexpr.schema import SchemaState, apply_schema, to_opnode
 
@@ -68,6 +74,17 @@ REDUCE_NAMES = tuple(
         n for n, s in OP_TABLE.items() if isinstance(s, ReduceSpec) and n != "reduce"
     )
 )
+
+#: Order-significant scans, spelled ``name(dim)`` positionally. ``diff`` shrinks its dim,
+#: ``cumsum``/``cumprod`` keep it; all three are drawn so the equality-vs-eager property
+#: proves a disjoint select or projection may hop while an intersecting one stays put.
+SCAN_NAMES = tuple(sorted(n for n, s in OP_TABLE.items() if isinstance(s, ScanSpec)))
+
+#: ``cumsum``/``cumprod`` drop the scanned dim's coordinates before xarray 2026.04.0 (the
+#: coordinate-retention fix, pull 10987) and keep them after; ``diff`` keeps them on every
+#: version. The schema-agreement property relaxes its *exact coord* check for those two ops
+#: only on the versions where xarray itself drops them.
+SCAN_DROPS_SCANNED_COORDS = Version(xr.__version__) < Version("2026.4.0")
 
 #: The function generated ``.reduce`` calls pass. ``np.mean`` deliberately: the
 #: drawability constraints of a ``.reduce`` call are those of the function it is given,
@@ -692,7 +709,9 @@ def _calls(draw, ds, max_ops=4, builders=False):
 
     # "builder" twice, so the ``assume`` in ``builder_plans`` discards fewer examples —
     # a chain with no builder pair in it is just a plain chain, already covered.
-    kinds = ["isel", "sel", "reduce", "project"] + (["builder"] * 2 if builders else [])
+    kinds = ["isel", "sel", "reduce", "scan", "project"] + (
+        ["builder"] * 2 if builders else []
+    )
     if HAS_DASK:
         kinds.append("chunk")
 
@@ -736,6 +755,27 @@ def _calls(draw, ds, max_ops=4, builders=False):
                     )
                 ),
             )
+            current = _apply(current, [call])
+            calls.append(call)
+            continue
+
+        if kind == "scan":
+            scans = SCAN_NAMES
+            if any(v.dtype == bool for v in current.data_vars.values()):
+                # ``diff`` subtracts, which numpy refuses on booleans (an upstream
+                # ``all``/``any`` produces them); ``cumsum``/``cumprod`` cast and are fine.
+                scans = tuple(n for n in scans if n != "diff")
+            name = draw(st.sampled_from(scans))
+            if name == "diff":
+                # ``diff`` shrinks its dim by one, so draw a dim long enough to stay
+                # non-empty -- an empty dim is legal but noise here, not the point.
+                candidates = sorted(d for d, s in current.sizes.items() if s >= 2)
+                if not candidates:
+                    continue
+                dim = draw(st.sampled_from(candidates))
+            else:
+                dim = draw(st.sampled_from(sorted(current.sizes)))
+            call = Call(name, dim)
             current = _apply(current, [call])
             calls.append(call)
             continue
@@ -1083,20 +1123,32 @@ def test_tracked_schema_agrees_with_evaluation(case):
 
     assert set(schema.sizes) == set(result.sizes)
 
-    # Every tracked coordinate, not just the dim coordinates — the restriction issue #109
-    # asked for is gone, because coordinates are variables now and their lifetimes are
-    # modelled per-op: an aggregating op drops one over the dim it aggregates, an indexing
-    # one demotes it to 0-d. Asserted **exactly** rather than as a subset, which the bare-name
-    # ``coords`` set could never have supported.
-    assert set(schema.coords) == set(result.coords)
+    # ``cumsum``/``cumprod`` drop the scanned dim's *coordinates* on xarray before the
+    # 2026.04.0 retention fix (pull 10987) and keep them after — the dim itself survives
+    # either way, and nothing in ``optimize`` reads coords, so no rewrite turns on it. On
+    # the versions that keep them the schema is exact and these checks run in full; only on
+    # the older ones, and only for these two ops, do the coord and per-variable comparisons
+    # relax. Sizes and dim names — what the rules actually read — are asserted above for
+    # every plan, and ``diff`` (stable across versions) is never relaxed.
+    coords_are_version_stable = not (
+        SCAN_DROPS_SCANNED_COORDS
+        and any(isinstance(n, Scan) and n.name in {"cumsum", "cumprod"} for n in plan)
+    )
+    if coords_are_version_stable:
+        # Every tracked coordinate, not just the dim coordinates — the restriction issue
+        # #109 asked for is gone, because coordinates are variables now and their lifetimes
+        # are modelled per-op: an aggregating op drops one over the dim it aggregates, an
+        # indexing one demotes it to 0-d. Asserted **exactly** rather than as a subset,
+        # which the bare-name ``coords`` set could never have supported.
+        assert set(schema.coords) == set(result.coords)
 
-    # Per variable, which subsumes the name-set comparison this replaced *and* the size
-    # keys above — ``sizes`` is pruned to ``dim_names``, which is derived from these very
-    # dims. Both are kept anyway: they fail first and say less when they do, so a shrunk
-    # counterexample reads as "a dim went missing" before it reads as a variables diff.
-    assert {k: set(v) for k, v in schema.variables.items()} == {
-        k: set(v.dims) for k, v in result.variables.items()
-    }
+        # Per variable, which subsumes the name-set comparison this replaced *and* the size
+        # keys above — ``sizes`` is pruned to ``dim_names``, which is derived from these very
+        # dims. Both are kept anyway: they fail first and say less when they do, so a shrunk
+        # counterexample reads as "a dim went missing" before it reads as a variables diff.
+        assert {k: set(v) for k, v in schema.variables.items()} == {
+            k: set(v.dims) for k, v in result.variables.items()
+        }
 
 
 @SETTINGS

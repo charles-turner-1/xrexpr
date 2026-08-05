@@ -10,7 +10,7 @@ all?** Because an extent is a *checksum on the arm that produced it*. An arm's r
 to state what an op does, and "what shape comes out" is the only part of that statement
 which can be checked against reality cheaply and exactly. A schema that tracked names alone
 would be unfalsifiable for the whole class of ops that keep every dim and change an extent —
-which is where the model has actually been wrong (see ``test_diff_shrinks_its_dim`` below).
+exactly the class ``test_diff_shrinks_its_dim`` (below) pins.
 
 So sizes buy early detection, not correctness. The two guards are separate and catch
 different things:
@@ -207,20 +207,12 @@ def test_unknown_is_never_reported_as_zero(ds):
 # --- what sizes catch ----------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the Scan arm is a blanket pass, which is exact for cumsum/cumprod and wrong "
-    "for diff -- scheduled with W6 (issue #100), which gives Scan its dims. Kept xfail "
-    "rather than deleted because it is the worked example of what tracking extents buys: "
-    "flip it to passing when #100 lands.",
-)
 def test_diff_shrinks_its_dim(ds):
-    """``ds.diff('time')`` drops one element along ``time``; the schema says it doesn't.
+    """``ds.diff('time')`` drops one element along ``time``, and the schema now says so.
 
     .. code-block:: python
 
-        ds.diff("time").sizes    # {'time': 3, 'lat': 3}   -- one shorter
-        # tracked:               # {'time': 4, 'lat': 3}   -- wrong
+        ds.diff("time").sizes    # {'time': 3, 'lat': 3}   -- one shorter, tracked right
 
     **This is the class of bug extents exist to catch.** ``diff`` and ``cumsum`` are the
     same node type (``Scan``), and a names-only schema cannot tell them apart: neither
@@ -232,6 +224,17 @@ def test_diff_shrinks_its_dim(ds):
     *order*, caught by ``optimised == eager``, not by anything here.
     """
     tracked, real = _fold(ds, [("diff", ("time",), {})])
+    assert tracked == real
+
+
+def test_diff_shrinks_its_dim_by_n(ds):
+    """``ds.diff('time', n=2)`` drops two elements along ``time``, tracked to match.
+
+    The size arm reads ``n`` (the schema shrinks ``time`` by exactly ``n``), so a
+    second-difference is distinguished from a first, not merely from a shape-transparent
+    ``cumsum``.
+    """
+    tracked, real = _fold(ds, [("diff", ("time",), {"n": 2})])
     assert tracked == real
 
 

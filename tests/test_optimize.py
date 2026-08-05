@@ -209,11 +209,39 @@ def test_scan_then_select_on_scan_dim_left_untouched(schema):
     assert [n.name for n in out] == ["cumsum", "isel"]
 
 
-def test_scan_then_disjoint_select_left_untouched(schema):
-    """Even a disjoint select is left behind a scan, since pushdown only fires on reduces."""
+def test_scan_then_disjoint_select_hops_in_front(schema):
+    """A select on a dim disjoint from a scan's hops in front: the scan runs per-position along its own dim."""
     plan = [_node("cumsum", "time"), _node("isel", lat=0)]
     out = optimize(plan, schema)
-    assert [n.name for n in out] == ["cumsum", "isel"]
+    assert [n.name for n in out] == ["isel", "cumsum"]
+
+
+def test_select_reaches_the_front_past_a_reduce_and_a_scan(schema):
+    """A disjoint select reaches the front past both a reduce and a scan, via the fixpoint composing both hops."""
+    plan = [_node("cumsum", "time"), _node("mean", "lat"), _node("isel", lon=0)]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["isel", "cumsum", "mean"]
+
+
+def test_projection_hops_past_a_scan(schema):
+    """A projection hops in front of a scan when the kept variable still carries the scanned dim."""
+    plan = [_node("cumsum", "time"), _node("__getitem__", ["temperature"])]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["__getitem__", "cumsum"]
+    assert out[0].variables == ("temperature",)
+
+
+def test_projection_not_pushed_past_a_scan_on_missing_dim(schema):
+    """A projection to a variable missing the scanned dim is left behind the scan, not hopped.
+
+    Notes
+    -----
+    ``elevation`` has no ``time``, so leading with it would leave ``cumsum("time")`` scanning
+    a dim the variable lacks. Immovable, and left as written rather than raised.
+    """
+    plan = [_node("cumsum", "time"), _node("__getitem__", ["elevation"])]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["cumsum", "__getitem__"]
 
 
 def test_pushdown_composes_past_two_reduces(schema):
@@ -1155,8 +1183,10 @@ def test_projection_and_select_both_cross_a_fused_reduce(schema):
         ),
         # a window resizes what it names and needs the same dims present
         (_windowed(), frozenset({"time"}), frozenset({"time"})),
+        # a scan keeps its dims but is order-significant: a disjoint select hops (blocks),
+        # a projection needing those dims hops too (requires), an intersecting select stays
+        (_node("cumsum", "time"), frozenset({"time"}), frozenset({"time"})),
         # nothing crosses these, in either direction
-        (_node("cumsum", "time"), None, None),
         (_node("where", "cond"), None, None),
         (_node("chunk", {"time": 2}), None, None),
         (_node("__getitem__", ["temperature"]), None, None),

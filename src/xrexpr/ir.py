@@ -187,21 +187,30 @@ class Scan:
         The call's positional arguments, verbatim.
     kwargs : frozendict
         The call's keyword arguments, verbatim.
+    dims : DimSet
+        The dims the scan runs along, parsed by ``to_opnode`` from the call's dim spec
+        exactly as ``Reduce.consumes`` is — a concrete frozenset, or :data:`ALL_DIMS`
+        for a bare ``cumsum()`` that named none. A scan *keeps* these dims (the whole
+        point of the variant), so the field is ``dims`` rather than ``consumes``.
 
     Notes
     -----
     Distinct from a reduce (which destroys its dim) and from an opaque op (a scan is
-    *known* to preserve dims, so a rule must not reorder across it); its scanned-dim
-    metadata arrives with the first scan-aware rule.
+    *known* to preserve dims, so a rule must not reorder across it). The scanned-dim
+    metadata that :func:`~xrexpr.optimize.dim_effect` reads to hop a disjoint select or
+    projection across the scan lives in :attr:`dims`.
     """
 
     name: Literal["cumsum", "cumprod", "diff"]  # closed set → Literal
     args: tuple[Any, ...] = ()
     kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    dims: DimSet = frozenset()  # ``frozenset | AllDims``, as ``Reduce.consumes``
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "args", tuple(self.args))
         object.__setattr__(self, "kwargs", frozendict(self.kwargs))
+        if not isinstance(self.dims, AllDims):
+            object.__setattr__(self, "dims", frozenset(self.dims))
 
 
 @dataclass(frozen=True)
