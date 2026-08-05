@@ -346,6 +346,38 @@ def test_fillna_with_dataarray_records_opaque_and_replays_equal(ds):
     assert_equal(chain.collect(), ds.fillna(other))
 
 
+def test_scalar_select_crosses_fillna_matches_eager(ds):
+    """A scalar ``isel`` hops in front of a ``fillna`` and a ``mean``, and still equals eager.
+
+    Notes
+    -----
+    The reorder is what this pins — ``isel`` leads the optimised plan — and ``assert_equal``
+    proves crossing the elementwise op (and the disjoint reduce) changed no value, the
+    dropped ``time`` dim included.
+    """
+    chain = ds.plan.mean("lat").fillna(0.0).isel(time=0)
+    assert [c.name for c in emit(chain._optimized())] == ["isel", "mean", "fillna"]
+    assert_equal(chain.collect(), ds.mean("lat").fillna(0.0).isel(time=0))
+
+
+def test_dim_keeping_select_crosses_fillna_matches_eager(ds):
+    """A dim-keeping ``isel`` (a list of positions) also crosses a ``fillna`` and equals eager."""
+    chain = ds.plan.fillna(0.0).isel(lon=[0, 2])
+    assert [c.name for c in emit(chain._optimized())] == ["isel", "fillna"]
+    assert_equal(chain.collect(), ds.fillna(0.0).isel(lon=[0, 2]))
+
+
+def test_projection_crosses_astype_matches_eager(ds):
+    """A projection hops past an ``astype`` (and a ``mean``) to the front, matching eager, coords included."""
+    chain = ds.plan.mean("time").astype("float32")[["temperature"]]
+    assert [c.name for c in emit(chain._optimized())] == [
+        "__getitem__",
+        "mean",
+        "astype",
+    ]
+    assert_equal(chain.collect(), ds.mean("time").astype("float32")[["temperature"]])
+
+
 def test_blocked_projection_still_replays(ds):
     """A projection that can't move still replays to the eager result, since the plan is valid as written.
 

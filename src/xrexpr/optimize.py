@@ -307,11 +307,16 @@ def dim_effect(node: LoweredOp) -> DimEffect:
             # ``Scan`` arm. (A *prefix* forward-slice on the scanned dim also commutes with
             # ``cumsum``/``cumprod`` but not ``diff``; a later refinement, out of scope.)
             return DimEffect(blocks=dims, requires=dims)
-        case Elementwise() | Project() | Rechunk() | Opaque():
-            # ``Elementwise`` is grouped here provisionally: a per-element op is not a
-            # barrier, but its transparent effect (empty ``blocks``/``requires``, so every
-            # select and projection crosses it) is the optimisation W5 turns on separately,
-            # once the variant and its record-time classification are in place.
+        case Elementwise():
+            # A per-element op keeps every dim, so a select on *any* dim commutes with it
+            # (empty ``blocks`` -- every select is disjoint) and a projection needs no dim
+            # to cross it (empty ``requires``). This is not the ``None``/``None`` of a
+            # barrier: the shapes that would break commutation -- a data- or per-variable-
+            # shaped argument -- never reach here, having recorded ``Opaque`` at
+            # ``schema._elementwise_safe``. ``apply_schema`` is exact for the node too, so
+            # the trusted prefix rightly spans it with no change to ``_trusted_prefix``.
+            return DimEffect(blocks=frozenset(), requires=frozenset())
+        case Project() | Rechunk() | Opaque():
             return _OPAQUE_EFFECT
         case _:
             assert_never(node)
