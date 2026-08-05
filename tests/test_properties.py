@@ -39,6 +39,13 @@ interleavings. The unsafe-argument path (a data- or per-variable-shaped argument
 to :class:`~xrexpr.ir.Opaque`) is left to the hand-written suite; the generator draws only
 the safe forms, so a drawn chain never turns an elementwise op into a barrier by accident.
 
+**Scattered NaNs** in the float data (see :func:`datasets`) are what give the
+equality-vs-eager property its teeth for the elementwise ops above: ``fillna`` and every
+skipna reduce treat a NaN specially, so a value-level reorder bug changes an answer only
+where a NaN sits, and a NaN-free array would let it pass. The comparison is done on
+*materialised* values (:func:`_assert_replays_equal`) so it does not run through a dask
+reduction, which raises on a degenerate chunk a strided slice can leave — see that helper.
+
 **Builder chains** (``groupby``/``resample``/``rolling``/``coarsen``/``weighted``) are
 generated too, by :func:`builder_plans`. They feed the *contract* properties below
 (optimised equals eager, lowering idempotent, the emit round-trip, tracked names) but not
@@ -115,7 +122,18 @@ DIM_NAMES = ("time", "lat", "lon")
 # xarray op timing is jittery on small arrays, and generation applies ops eagerly, so a
 # per-example deadline just produces flakes. Function-scoped fixtures are not used here
 # (the dataset is generated), so that health check is irrelevant rather than suppressed.
-SETTINGS = settings(deadline=None, suppress_health_check=[HealthCheck.too_slow])
+#
+# ``max_examples`` is raised above Hypothesis's default of 100: the input space widened as
+# the generators grew (builder pairs, scans, elementwise ops, and now scattered NaNs), and
+# the interesting interactions -- a ``fillna`` and a skipna reduce reordered around a NaN,
+# a select threading a specific fused pair -- are a small fraction of draws, so more of them
+# is what turns "could generate that" into "did". The suite is cheap (tiny arrays), so this
+# stays well within CI's budget.
+SETTINGS = settings(
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+    max_examples=250,
+)
 
 # Empty selections are generated on purpose, and reducing an empty (or single-element)
 # axis makes numpy warn about degenerate statistics. That is expected here rather than a
@@ -179,6 +197,35 @@ def _apply(obj, calls):
     return obj
 
 
+def _assert_replays_equal(optimised, eager):
+    """Assert a replayed plan equals its eager spelling, comparing **materialised** values.
+
+    Parameters
+    ----------
+    optimised : xarray.Dataset or xarray.DataArray
+        The result of collecting the ``.plan`` chain.
+    eager : xarray.Dataset or xarray.DataArray
+        The result of the same chain applied eagerly.
+
+    Notes
+    -----
+    The generated chains contain ``chunk`` calls, so a side may be dask-backed.
+    :func:`~xarray.testing.assert_equal` compares via ``array_equiv``, which computes
+    ``(a == b).all()`` — and on dask operands that ``.all()`` is built as a *dask reduction*,
+    whose graph construction raises ``AxisError`` when the array carries a degenerate
+    ``(1, 0)`` chunk (an empty block), as strided-slicing a block-tuple chunk leaves behind:
+    ``chunk(lat=(1, 2))`` then ``isel(lat=slice(0, 2, 2))``. A dask limitation reproducible in
+    pure xarray+dask, not a rewrite defect — the values agree.
+
+    Calling ``.compute()`` first does **not** skip the reduction; it moves it off dask.
+    Materialising each side is a plain concatenation (which handles the empty block fine),
+    so ``assert_equal`` then runs the same ``(a == b).all()`` on *numpy* operands, where it
+    is well-defined and the dask-only graph error cannot arise. The chunking under test still
+    happened during replay, which is what these properties exercise.
+    """
+    assert_equal(optimised.compute(), eager.compute())
+
+
 def _dim_names(ds):
     """What ``to_lower_ir`` needs of the base dataset: its dim names, and nothing else.
 
@@ -216,6 +263,12 @@ def _build_plan(ds, calls):
 def datasets(draw, dated=False):
     """A tiny dataset with 2-3 dims, monotonic integer coords and readable values.
 
+    The float data occasionally carries scattered NaNs (see the body): the equality-vs-eager
+    property is only as sharp as the data is, and a value-level reorder bug -- a ``fillna``
+    hopped past a skipna reduce, say -- changes an answer only where a NaN sits, so a
+    NaN-free array would let it pass. The coords stay NaN-free and monotonic, so ``sel`` and
+    the size tracking are unaffected.
+
     ``dated`` gives ``time`` a **datetime** index instead, which two builders need and
     nothing else does: ``resample`` requires one outright, and ``groupby("time.month")``
     has no component to read off an integer coord. It is off by default so the plain
@@ -238,6 +291,24 @@ def datasets(draw, dated=False):
     # their whole question is whether the projected *subset* still carries the dims the
     # crossed op names, which is vacuous when every variable carries every dim.
     elevation = np.arange(int(np.prod(sizes[1:])), dtype=float).reshape(sizes[1:])
+    # Occasionally scatter NaNs into the float data. A NaN is what gives the
+    # equality-vs-eager property teeth against a *value* reorder: ``fillna`` and every
+    # skipna reduce treat it specially, so fill-then-reduce differs from reduce-then-fill,
+    # and a bug that hopped one past the other would change a value only when a NaN is
+    # present. Gated on a coin and capped below each array's size (so a reduce still sees
+    # real data) -- both so a genuine failure shrinks back to the clean arrays. ``astype``
+    # is generated to float dtypes only, so a NaN never meets an integer cast that would
+    # raise (see ``_calls``).
+    for arr in (values, elevation):
+        if arr.size > 1 and draw(st.booleans()):
+            holes = draw(
+                st.sets(
+                    st.integers(min_value=0, max_value=arr.size - 1),
+                    min_size=1,
+                    max_size=arr.size - 1,  # leave at least one real value
+                )
+            )
+            arr.flat[list(holes)] = np.nan
     # A **non-dim coordinate** on the last dim — the docs' ``region(lat)``, and everyday
     # xarray. It is what the builder generators were blind to until issue #90: a grouper's
     # *name* does not say which dim it consumes, because ``groupby("region")`` groups along
@@ -931,7 +1002,7 @@ def test_optimised_plan_matches_eager_evaluation(case):
     for node in to_lower_ir(_build_plan(ds, calls)[0], _dim_names(ds)):
         if type(node).__name__.endswith("Reduce") and type(node).__name__ != "Reduce":
             event(f"fused: {type(node).__name__}")
-    assert_equal(_apply(ds.plan, calls).collect(), _apply(ds, calls))
+    _assert_replays_equal(_apply(ds.plan, calls).collect(), _apply(ds, calls))
 
 
 @pytest.mark.skipif(not HAS_DASK, reason="rechunk replay needs a chunk manager")
@@ -957,7 +1028,7 @@ def test_optimised_plan_matches_eager_evaluation_under_a_tiny_chunk_target(case)
 
     ds, calls = case
     with dask.config.set({"array.chunk-size": "1kB"}):
-        assert_equal(_apply(ds.plan, calls).collect(), _apply(ds, calls))
+        _assert_replays_equal(_apply(ds.plan, calls).collect(), _apply(ds, calls))
 
 
 @SETTINGS
@@ -1092,7 +1163,7 @@ def test_adjacent_selects_collapse_without_changing_meaning(case):
     )
 
     assert len(optimised) == 1, "a run of selects on distinct dims should fold to one"
-    assert_equal(_apply(ds.plan, calls).collect(), _apply(ds, calls))
+    _assert_replays_equal(_apply(ds.plan, calls).collect(), _apply(ds, calls))
 
 
 @SETTINGS
