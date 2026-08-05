@@ -11,7 +11,7 @@ the plan for what comes after them.)*
 - [x] W2 — lowering stage + fused GroupedReduce/WindowedReduce/WeightedReduce
 - [x] W3 — SchemaState sizes → int | None
 - [x] W4 — chunk-spec taxonomy (closes the W8 Rust gate)
-- [ ] W5 — Elementwise + its cross rules  *(next in the recommended order)*
+- [x] W5 — Elementwise + its cross rules
 - [x] W6 — Scan gains its dims
 - [~] W7 — small wins (§1, §3, §5 done; §2 unblocked and the only one left)
 - [ ] W8 — PyO3 spike (now ungated; unscheduled)
@@ -370,3 +370,60 @@ workstream and, per the handover order, the next item. Still open: **W5** (Eleme
 not a wrong value), **#115** (coord-only projection — now unblocked, since its stated
 prerequisite #109 has landed), and **#117** (model `keepdims=True`). Deferred by design:
 #91 (GroupedMap), #106 (Rust spike, ungated/unscheduled), #107 (weighted-select rule).
+
+## Checkpoint — W5 landed (2026-08-05)
+
+A status entry, not a revision, written the same day as the refresh above and superseding
+its "head of the queue" line: **W5 is done.** With it, every feature workstream (W1–W6,
+W10) has landed; what remains is small wins, the "schema lies" bugs, and the gated Rust
+spike.
+
+### W5 — `Elementwise`, landed as a 4-PR stack (#101)
+
+| PR | What |
+|---|---|
+| #152 | the `Elementwise` variant + `ElementwiseSpec`, classified at record time behind the `_elementwise_safe` guard; behaviour-neutral (a barrier in `dim_effect` still) |
+| #153 | the single `dim_effect` arm (`blocks`/`requires` both empty) that lets selects and projections cross it; no new rule, nothing in `_RULES` |
+| #154 | the property generator draws `astype`/`fillna`/`clip`/`round` |
+| #156 | scattered NaNs in the generated data + soak `max_examples` 100→250 |
+
+Two facts the spec (`05-elementwise.md`) predated, resolved in the build:
+
+- **`OpSpec` is a sum type now**, so the table row is a new `ElementwiseSpec` dataclass and
+  `to_opnode` gains a `case ElementwiseSpec(...)` arm — not the spec's stale
+  `OpSpec("elementwise", False)` / `kind == "elementwise"` string. House style: sum types
+  over kind strings.
+- **The lowering pipeline added two exhaustive sites** the spec never named —
+  `lower._emit_node` and `explain._annotate` — which the `assert_never`s flagged the moment
+  `Elementwise` joined the `Op` union. Both are mechanical (single-call replay, no
+  annotation).
+
+The optimiser side really was one arm: both pushdowns are generic over `dim_effect`, and
+`_trusted_prefix` needed no change because `apply_schema` is exact for the node.
+
+### Two things found in review, worth recording
+
+- **A reduce never reorders across an elementwise, and that is now pinned.** A `mean` does
+  not commute with a `fillna` (fill-then-average ≠ average-then-fill), and it must never
+  cross one — which it cannot, since **no rule moves a `Reduce`** (it is only ever the
+  *crossed* node in `dim_effect`). #153 adds structural goldens for the invariant plus a
+  NaN-bearing equality test, since the base fixtures are NaN-free and a value-level check
+  needs a NaN to have teeth.
+- **A latent upstream dask bug, surfaced by the larger soak — not ours.** Strided-slicing
+  an uneven block-tuple chunking (`chunk(lat=(1, 2))` then `isel(lat=slice(0, 2, 2))`)
+  leaves a degenerate `(1, 0)` chunk, and a *full reduction* over it — the `(a == b).all()`
+  inside `xarray.testing.assert_equal`'s `array_equiv` — raises `AxisError` from dask's
+  `_concatenate2`. Reproducible in pure xarray+dask, and the values agree; it is the
+  comparison, not any rewrite, that fails. The suite's three replayed-vs-eager checks now
+  go through `_assert_replays_equal`, which compares *materialised* values (`.compute()`
+  moves the `.all()` off dask and onto numpy, where it is well-defined). A root-cause memo
+  is written; a dask issue (primary) and an xarray cross-link are still **to be filed** —
+  the one follow-up this checkpoint leaves open that has no tracker number yet.
+
+### Everything still open
+
+**W7 §2** (merge adjacent `Rechunk`s, #103); the "schema lies" items **#60** (DataArray
+indexers misclassified as scalar), **#115** (coord-only projection, now unblocked), and
+**#117** (model `keepdims=True`); and **W8** (the Rust spike, #106 — ungated, unscheduled).
+Deferred by design: #91 (GroupedMap), #107 (weighted-select rule). No feature workstream
+remains — the roadmap's structural programme is complete.
