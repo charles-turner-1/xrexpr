@@ -52,6 +52,7 @@ from xrexpr.ir import (
     ALL_DIMS,
     AllDims,
     DimSet,
+    Elementwise,
     GroupedReduce,
     LoweredOp,
     Opaque,
@@ -306,7 +307,11 @@ def dim_effect(node: LoweredOp) -> DimEffect:
             # ``Scan`` arm. (A *prefix* forward-slice on the scanned dim also commutes with
             # ``cumsum``/``cumprod`` but not ``diff``; a later refinement, out of scope.)
             return DimEffect(blocks=dims, requires=dims)
-        case Project() | Rechunk() | Opaque():
+        case Elementwise() | Project() | Rechunk() | Opaque():
+            # ``Elementwise`` is grouped here provisionally: a per-element op is not a
+            # barrier, but its transparent effect (empty ``blocks``/``requires``, so every
+            # select and projection crosses it) is the optimisation W5 turns on separately,
+            # once the variant and its record-time classification are in place.
             return _OPAQUE_EFFECT
         case _:
             assert_never(node)

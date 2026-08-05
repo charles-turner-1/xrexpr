@@ -27,6 +27,7 @@ from typing_extensions import assert_never
 from xrexpr.ir import (
     AllDims,
     DimSet,
+    Elementwise,
     GroupedReduce,
     LoweredOp,
     Opaque,
@@ -125,7 +126,9 @@ def _annotate(node: LoweredOp) -> str:
             return ", ".join(p for p in parts if p)
         case Opaque():
             return "not modelled -- nothing crosses it"
-        case Select() | Project() | Rechunk() | Scan() | WindowedReduce():
+        case (
+            Select() | Project() | Rechunk() | Scan() | Elementwise() | WindowedReduce()
+        ):
             return ""
         case _:
             assert_never(node)

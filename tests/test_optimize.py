@@ -1250,6 +1250,7 @@ def test_dim_effect_covers_every_lowered_variant():
             _node("mean", "lat"),
             _node("isel", time=0),
             _node("cumsum", "time"),
+            _node("fillna", 0),
             _node("__getitem__", ["temperature"]),
             _node("chunk", {"time": 2}),
             _node("where", "cond"),

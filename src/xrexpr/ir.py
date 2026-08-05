@@ -35,6 +35,7 @@ __all__ = [
     "ContextOpen",
     "ContextOpenName",
     "DimSet",
+    "Elementwise",
     "FluentOp",
     "GroupedReduce",
     "LoweredOp",
@@ -211,6 +212,46 @@ class Scan:
         object.__setattr__(self, "kwargs", frozendict(self.kwargs))
         if not isinstance(self.dims, AllDims):
             object.__setattr__(self, "dims", frozenset(self.dims))
+
+
+@dataclass(frozen=True)
+class Elementwise:
+    """A per-element op (``fillna``/``astype``/``round``/...) — keeps every dim, size and
+    variable, and so commutes with any select or projection.
+
+    Attributes
+    ----------
+    name : str
+        The method name. An open set of tabulated elementwise ops, so ``str``; kind-safety
+        comes from :data:`~xrexpr.operations.OP_TABLE` carrying the row, as for
+        :class:`Reduce`.
+    args : tuple
+        The call's positional arguments, verbatim.
+    kwargs : frozendict
+        The call's keyword arguments, verbatim.
+
+    Notes
+    -----
+    Distinct from :class:`Opaque` in exactly the fact the optimiser needs: an elementwise
+    op is *known* to preserve dims, sizes and variables, so :func:`~xrexpr.schema.apply_schema`
+    is exact for it (a pass-through) and :func:`~xrexpr.optimize.dim_effect` lets both
+    pushdowns cross it, where an ``Opaque`` is a full barrier.
+
+    Minted **only when every argument is a plain value** (see
+    ``schema._elementwise_safe``): ``fillna(da)`` fills from another array and
+    ``fillna({"tas": 0})`` is per-variable — neither commutes with a projection the way a
+    plain scalar does, so both demote to :class:`Opaque` at record time. The shape of an
+    argument deciding the kind has precedent in :class:`Project` vs :class:`Opaque` on the
+    ``__getitem__`` key.
+    """
+
+    name: str  # open set of elementwise ops → str, kind-safety via OP_TABLE
+    args: tuple[Any, ...] = ()
+    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "args", tuple(self.args))
+        object.__setattr__(self, "kwargs", frozendict(self.kwargs))
 
 
 @dataclass(frozen=True)
@@ -642,7 +683,7 @@ class WeightedReduce:
 #: The optimiser's IR node — a sum over the structural op *kinds*. ``match`` over this
 #: binds different fields per arm; ``typing.assert_never`` on the ``case _`` arm makes
 #: the union exhaustive (adding a variant fails type-check at every unhandled site).
-Op = Reduce | Select | Scan | Project | Rechunk | Opaque
+Op = Reduce | Select | Scan | Elementwise | Project | Rechunk | Opaque
 
 #: What the recorder produces — one node per call, as the fluent API spelled it —
 #: including the half-operations (:class:`ContextOpen`) that only mean something paired.

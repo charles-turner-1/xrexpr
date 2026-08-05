@@ -23,6 +23,7 @@ from collections.abc import Hashable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+import numpy as np
 import xarray as xr
 from frozendict import frozendict
 from packaging.version import Version
@@ -34,6 +35,7 @@ from xrexpr.ir import (
     AllDims,
     ContextOpen,
     DimSet,
+    Elementwise,
     FluentOp,
     GroupedReduce,
     LoweredOp,
@@ -48,6 +50,7 @@ from xrexpr.ir import (
 )
 from xrexpr.operations import (
     ContextSpec,
+    ElementwiseSpec,
     ProjectSpec,
     RechunkSpec,
     ReduceSpec,
@@ -379,6 +382,9 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
       *shrinks* its dim, and on xarray before 2026.4.0 (:data:`SCAN_DROPS_SCANNED_COORDS`)
       ``cumsum``/``cumprod`` **drop** every coordinate over the scanned dim while keeping
       the dim itself — the version-gated bug this arm reproduces so the schema stays exact;
+    - :class:`~xrexpr.ir.Elementwise` changes nothing — it is per-element, so every dim,
+      size and variable survives; this arm is *exact* for it, unlike the assumption below
+      for :class:`~xrexpr.ir.Opaque`;
     - :class:`~xrexpr.ir.Rechunk`/:class:`~xrexpr.ir.Opaque` change nothing (a rechunk
       changes only chunk topology).
 
@@ -528,7 +534,7 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
             dropped = {c for c in coord_names if not over.isdisjoint(variables[c])}
             coord_names -= dropped
             variables = {k: v for k, v in variables.items() if k not in dropped}
-        case Scan() | Rechunk() | Opaque():
+        case Elementwise() | Scan() | Rechunk() | Opaque():
             pass
         case _:
             assert_never(node)
@@ -791,8 +797,8 @@ def to_opnode(
         The variant this call is: a :class:`~xrexpr.ir.Reduce`,
         :class:`~xrexpr.ir.Select`, :class:`~xrexpr.ir.Project`,
         :class:`~xrexpr.ir.Rechunk`, :class:`~xrexpr.ir.Scan`,
-        :class:`~xrexpr.ir.ContextOpen`, or :class:`~xrexpr.ir.Opaque` for anything
-        untabulated.
+        :class:`~xrexpr.ir.Elementwise`, :class:`~xrexpr.ir.ContextOpen`, or
+        :class:`~xrexpr.ir.Opaque` for anything untabulated.
 
     Notes
     -----
@@ -834,6 +840,12 @@ def to_opnode(
       :class:`~xrexpr.ir.ContextOpen`, which says only *a context opens here*. The one
       kind whose meaning this function deliberately does not settle — the call is half an
       operation, and the pair is ``lower.to_lower_ir``'s to read.
+    - **elementwise** (``fillna``/``astype``/``round``/...): a
+      :class:`~xrexpr.ir.Elementwise`, but **only when every argument is a plain value**
+      (``_elementwise_safe``). ``fillna(other_da)`` and ``fillna({"tas": 0})`` carry a
+      data- or per-variable-shaped argument that does not commute with a projection, so
+      they fall past the guard to ``Opaque`` — the same shape-of-the-argument nomination
+      the ``project`` arm makes.
     - **scan** / untabulated ops: no dims resolved (name/args/kwargs only).
 
     ``args``/``kwargs`` are kept verbatim for faithful replay; ``consumes``/``indexer``
@@ -882,16 +894,55 @@ def to_opnode(
             # Decidable per-call even though what it *means* is not: a builder-returning
             # method opens a context whatever follows it. Pairing is lowering's job.
             return ContextOpen(name=opener, args=args, kwargs=kw)
+        case ElementwiseSpec(name=ew) if _elementwise_safe(args, kwargs):
+            # ``fillna(0)``/``astype("float32")``/... with plain-valued arguments only:
+            # per-element, so it keeps every dim, size and variable. A data- or
+            # per-variable-shaped argument fails the guard and falls to ``Opaque`` below.
+            return Elementwise(name=ew, args=args, kwargs=kw)
         case ProjectSpec(name=getitem) if (
             variables := _projected_names(args)
         ) is not None:
             return Project(name=getitem, args=args, kwargs=kw, variables=variables)
-        case ProjectSpec() | None:
-            # A ``__getitem__`` whose key names no variable (a mask, a dict), or a method
-            # with no row at all: both are replayed verbatim and never reordered.
+        case ElementwiseSpec() | ProjectSpec() | None:
+            # An elementwise call with an unsafe (data-/per-variable-shaped) argument, a
+            # ``__getitem__`` whose key names no variable (a mask, a dict), or a method
+            # with no row at all: all are replayed verbatim and never reordered.
             return Opaque(name=name, args=args, kwargs=kw)
         case unreachable:
             assert_never(unreachable)
+
+
+def _elementwise_safe(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> bool:
+    """Whether every argument to an elementwise call is a plain value.
+
+    Parameters
+    ----------
+    args : tuple
+        The call's positional arguments.
+    kwargs : Mapping
+        The call's keyword arguments.
+
+    Returns
+    -------
+    bool
+        ``True`` when no argument is data- or variable-shaped, so the call is per-element
+        and commutes with any select or projection; ``False`` when one is, so the call
+        must record :class:`~xrexpr.ir.Opaque` instead.
+
+    Notes
+    -----
+    A **blocklist**, not an allowlist: an argument is unsafe only if it is an
+    ``xr.DataArray``/``xr.Dataset`` (``fillna(other)`` fills from another array's values),
+    a ``dict`` (``fillna({"tas": 0})`` is per-variable), or a ``list``/``tuple``/``ndarray``
+    (array-shaped). Everything else passes — which is what lets ``astype``'s ``np.dtype``
+    instances and ``type`` objects, and scalar ``clip``/``fillna`` bounds, mint an
+    :class:`~xrexpr.ir.Elementwise`. An allowlist would have to enumerate every dtype
+    spelling; the blocklist names only the shapes that break commutation. The shape of an
+    argument deciding the kind has precedent in ``_projected_names`` (:class:`~xrexpr.ir.Project`
+    vs :class:`~xrexpr.ir.Opaque`).
+    """
+    unsafe = (xr.DataArray, xr.Dataset, dict, list, tuple, np.ndarray)
+    return not any(isinstance(v, unsafe) for v in (*args, *kwargs.values()))
 
 
 def _projected_names(args: tuple[Any, ...]) -> tuple[Hashable, ...] | None:

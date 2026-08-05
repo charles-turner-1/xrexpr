@@ -12,11 +12,21 @@ only where a node is then folded through ``apply_schema``.
 """
 
 import pytest
+import xarray as xr
 from frozendict import frozendict
 
 from xrexpr.chunks import Auto, SingleSize, classify_chunk
 from xrexpr.indexers import ForwardSlice, Scalar
-from xrexpr.ir import ALL_DIMS, Opaque, Project, Rechunk, Reduce, Scan, Select
+from xrexpr.ir import (
+    ALL_DIMS,
+    Elementwise,
+    Opaque,
+    Project,
+    Rechunk,
+    Reduce,
+    Scan,
+    Select,
+)
 from xrexpr.schema import apply_schema, to_opnode
 
 
@@ -246,6 +256,55 @@ def test_scan_carries_no_resolved_dims(schema):
     node = to_opnode("cumsum", ("time",), {})
     assert isinstance(node, Scan)
     assert node.args == ("time",)  # dim kept in args for replay
+
+
+def test_fillna_scalar_records_elementwise(schema):
+    """``fillna(0)`` records an ``Elementwise`` with the scalar arg kept verbatim."""
+    node = to_opnode("fillna", (0,), {})
+    assert isinstance(node, Elementwise)
+    assert node.name == "fillna"
+    assert node.args == (0,)  # verbatim, for replay
+
+
+def test_astype_dtype_records_elementwise(schema):
+    """``astype("float32")`` records an ``Elementwise``: a dtype spelling is a plain value.
+
+    Notes
+    -----
+    The guard is a blocklist, so a ``np.dtype`` instance or a ``type`` passes it too — the
+    reason it is a blocklist rather than an allowlist enumerating dtype spellings.
+    """
+    assert isinstance(to_opnode("astype", ("float32",), {}), Elementwise)
+    assert isinstance(to_opnode("astype", (float,), {}), Elementwise)
+    import numpy as np
+
+    assert isinstance(to_opnode("astype", (np.dtype("float32"),), {}), Elementwise)
+
+
+def test_clip_scalar_bounds_records_elementwise(schema):
+    """``clip`` with scalar bounds (positional or keyword) is per-element, so ``Elementwise``."""
+    assert isinstance(to_opnode("clip", (0, 1), {}), Elementwise)
+    assert isinstance(to_opnode("clip", (), {"min": 0, "max": 1}), Elementwise)
+
+
+def test_fillna_dataarray_arg_is_opaque(schema):
+    """``fillna(<DataArray>)`` fills from another array's values, so it demotes to ``Opaque``.
+
+    Notes
+    -----
+    A data-shaped fill does not commute with a projection the way a scalar does, so the
+    guard (``_elementwise_safe``) refuses it and the call replays verbatim, un-reordered.
+    """
+    other = xr.DataArray([1.0, 2.0, 3.0], dims="lat")
+    node = to_opnode("fillna", (other,), {})
+    assert isinstance(node, Opaque)
+    assert node.name == "fillna"  # the real name, not remapped
+
+
+def test_fillna_dict_arg_is_opaque(schema):
+    """``fillna({"temperature": 0})`` is per-variable, so it demotes to ``Opaque``."""
+    node = to_opnode("fillna", ({"temperature": 0},), {})
+    assert isinstance(node, Opaque)
 
 
 def test_rechunk_positional_mapping(schema):
