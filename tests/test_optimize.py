@@ -244,6 +244,93 @@ def test_projection_not_pushed_past_a_scan_on_missing_dim(schema):
     assert [n.name for n in out] == ["cumsum", "__getitem__"]
 
 
+def test_select_hops_past_an_elementwise(schema):
+    """A select hops in front of an elementwise op: it is per-element, so the two commute."""
+    plan = [_node("fillna", 0), _node("isel", time=0)]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["isel", "fillna"]
+
+
+def test_select_composes_past_an_elementwise_and_a_reduce(schema):
+    """The fixpoint hops a select past a ``fillna`` *and* a disjoint ``mean``, composing the two rules.
+
+    Notes
+    -----
+    ``mean("lat") -> fillna(0) -> isel(time=0)`` optimises to the select in front: it
+    crosses ``fillna`` (the elementwise rule) and then ``mean`` (the existing reduce rule).
+    The ``fillna`` node itself never moves — only the select passes it.
+    """
+    plan = [_node("mean", "lat"), _node("fillna", 0), _node("isel", time=0)]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["isel", "mean", "fillna"]
+
+
+def test_projection_hops_past_an_elementwise(schema):
+    """A projection hops in front of an elementwise op — it needs no dim to cross one."""
+    plan = [_node("astype", "float32"), _node("__getitem__", ["temperature"])]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["__getitem__", "astype"]
+    assert out[0].variables == ("temperature",)
+
+
+def test_projection_composes_past_an_elementwise_and_a_reduce(schema):
+    """A projection reaches the front past an ``astype`` and a ``mean``, reducing only the kept variable."""
+    plan = [
+        _node("mean", "time"),
+        _node("astype", "float32"),
+        _node("__getitem__", ["temperature"]),
+    ]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["__getitem__", "mean", "astype"]
+
+
+def test_nothing_reorders_around_an_unsafe_elementwise(schema):
+    """A ``fillna`` with a per-variable ``dict`` records ``Opaque``, so the select stays put behind it.
+
+    Notes
+    -----
+    The guard demotes the data-shaped argument to :class:`~xrexpr.ir.Opaque` at record
+    time, and an ``Opaque`` is a full barrier — so this pins that the transparent effect is
+    confined to the *safe* form, and an unsafe one blocks reordering exactly as before.
+    """
+    plan = [_node("fillna", {"temperature": 0}), _node("isel", time=0)]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["fillna", "isel"]
+
+
+def test_a_reduce_and_an_elementwise_keep_their_order(schema):
+    """A reduce and an elementwise never reorder against each other, in either arrangement.
+
+    Notes
+    -----
+    A ``mean`` does *not* commute with a ``fillna`` -- filling then averaging differs from
+    averaging then filling -- and the optimiser must never swap them. It cannot: **no rule
+    moves a** :class:`~xrexpr.ir.Reduce` (a reduce is only ever the *crossed* node in
+    ``dim_effect``, never the moving one), and nothing moves an
+    :class:`~xrexpr.ir.Elementwise` either. The transparent effect lets *selects and
+    projections* cross the node; it does not license reordering the node against a reduce.
+    """
+    assert [
+        n.name for n in optimize([_node("fillna", 0), _node("mean", "lat")], schema)
+    ] == [
+        "fillna",
+        "mean",
+    ]
+    assert [
+        n.name for n in optimize([_node("mean", "lat"), _node("fillna", 0)], schema)
+    ] == [
+        "mean",
+        "fillna",
+    ]
+
+
+def test_a_select_threads_past_a_reduce_and_elementwise_without_reordering_them(schema):
+    """A select reaches the front past both a ``fillna`` and a disjoint ``mean``, leaving their order intact."""
+    plan = [_node("fillna", 0), _node("mean", "lat"), _node("isel", time=0)]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["isel", "fillna", "mean"]
+
+
 def test_pushdown_composes_past_two_reduces(schema):
     """The fixpoint hops a select left one reduce at a time until it reaches the front."""
     plan = [
