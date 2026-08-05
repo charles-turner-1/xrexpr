@@ -11,9 +11,9 @@ the plan for what comes after them.)*
 - [x] W2 — lowering stage + fused GroupedReduce/WindowedReduce/WeightedReduce
 - [x] W3 — SchemaState sizes → int | None
 - [x] W4 — chunk-spec taxonomy (closes the W8 Rust gate)
-- [ ] W5 — Elementwise + its cross rules
-- [ ] W6 — Scan gains its dims
-- [~] W7 — small wins (§1, §5 done; §2 unblocked; §3 part-blocked on W6)
+- [ ] W5 — Elementwise + its cross rules  *(next in the recommended order)*
+- [x] W6 — Scan gains its dims
+- [~] W7 — small wins (§1, §3, §5 done; §2 unblocked and the only one left)
 - [ ] W8 — PyO3 spike (now ungated; unscheduled)
 - [x] W10 — documentation site
 
@@ -341,3 +341,32 @@ Everything still open: **W5** (Elementwise, #101), **W6** (Scan dims, #100), **W
 (#103/#104), **W8** (the Rust spike, #106 — ungated, unscheduled), and the "schema lies"
 family (#60, #109, #115, #117). Deferred by design: #91 (GroupedMap), #107 (the
 weighted-select rule).
+
+## Checkpoint — status refresh (2026-08-05)
+
+A status entry, not a revision. Reconciles the doc with `main` after four more items
+landed; the previous refresh's "everything still open" line above is now stale in three
+places and this supersedes it.
+
+Landed since the 2026-08-04 refresh:
+
+- **W6** — `Scan` gains its dims, `diff` becomes its own variant, scan-aware select
+  pushdown (#100), together with **W7 §3** — `pushdown_projections` across `Scan` and
+  `Rechunk` (#104), both in #146. The `Scan` arm §3 was part-blocked on is paid; the
+  `Rechunk` arm rode along on the same `dim_effect` answer.
+- **#109** — `SchemaState.coords` became a dims-carrying mapping, so coordinate lifetimes
+  are trackable; the schema no longer keeps three views of one fact.
+- **#149** — the pre-2026.4.0 `cumsum`/`cumprod` scan-coord drop is now reproduced
+  bug-for-bug in `apply_schema`, gated on the xarray version (`SCAN_DROPS_SCANNED_COORDS`
+  in `schema.py`), so the tracked schema is *exact* on every supported version and the
+  property test checks coords unconditionally (#150). Fixing it also closed a latent,
+  version-independent `GroupedReduce` bug: a dimension-name grouper on a *bare* dimension
+  minted a coordinate the real xarray does not.
+
+**W5 (#101) is now the head of the queue** — with W6 done it is the last unstarted feature
+workstream and, per the handover order, the next item. Still open: **W5** (Elementwise,
+#101), **W7 §2** (merge adjacent `Rechunk`s, #103), and the smaller "schema lies" items
+**#60** (DataArray indexers misclassified as scalar — a live *hides-an-invalid-chain* bug,
+not a wrong value), **#115** (coord-only projection — now unblocked, since its stated
+prerequisite #109 has landed), and **#117** (model `keepdims=True`). Deferred by design:
+#91 (GroupedMap), #106 (Rust spike, ungated/unscheduled), #107 (weighted-select rule).
