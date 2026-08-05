@@ -378,6 +378,29 @@ def test_projection_crosses_astype_matches_eager(ds):
     assert_equal(chain.collect(), ds.mean("time").astype("float32")[["temperature"]])
 
 
+def test_a_reduce_is_never_reordered_across_a_fillna_matches_eager():
+    """A ``fillna`` before a reduce keeps its order, with a NaN present so a wrong reorder would show.
+
+    Notes
+    -----
+    ``fillna`` and a reduce do not commute when a NaN is present -- fill-then-average
+    differs from average-then-fill -- so this is the case a hypothetical reduce-crossing
+    bug would break. The shared fixtures carry no NaN, which would make ``fillna`` a no-op
+    and rob an equality check of its teeth, so this builds a dataset with one. A select is
+    threaded through to make the optimiser actually rewrite: it hops to the front past both
+    ops, and the ``fillna``/``mean`` order must survive intact.
+    """
+    t = np.arange(24.0).reshape(4, 3, 2)
+    t[0, 0, 0] = np.nan
+    ds = xr.Dataset(
+        {"temperature": (("time", "lat", "lon"), t)},
+        coords={"time": np.arange(4), "lat": np.arange(3), "lon": np.arange(2)},
+    )
+    chain = ds.plan.fillna(0.0).mean("lat").isel(time=0)
+    assert [c.name for c in emit(chain._optimized())] == ["isel", "fillna", "mean"]
+    assert_equal(chain.collect(), ds.fillna(0.0).mean("lat").isel(time=0))
+
+
 def test_blocked_projection_still_replays(ds):
     """A projection that can't move still replays to the eager result, since the plan is valid as written.
 

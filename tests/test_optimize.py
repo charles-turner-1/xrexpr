@@ -298,6 +298,39 @@ def test_nothing_reorders_around_an_unsafe_elementwise(schema):
     assert [n.name for n in out] == ["fillna", "isel"]
 
 
+def test_a_reduce_and_an_elementwise_keep_their_order(schema):
+    """A reduce and an elementwise never reorder against each other, in either arrangement.
+
+    Notes
+    -----
+    A ``mean`` does *not* commute with a ``fillna`` -- filling then averaging differs from
+    averaging then filling -- and the optimiser must never swap them. It cannot: **no rule
+    moves a** :class:`~xrexpr.ir.Reduce` (a reduce is only ever the *crossed* node in
+    ``dim_effect``, never the moving one), and nothing moves an
+    :class:`~xrexpr.ir.Elementwise` either. The transparent effect lets *selects and
+    projections* cross the node; it does not license reordering the node against a reduce.
+    """
+    assert [
+        n.name for n in optimize([_node("fillna", 0), _node("mean", "lat")], schema)
+    ] == [
+        "fillna",
+        "mean",
+    ]
+    assert [
+        n.name for n in optimize([_node("mean", "lat"), _node("fillna", 0)], schema)
+    ] == [
+        "mean",
+        "fillna",
+    ]
+
+
+def test_a_select_threads_past_a_reduce_and_elementwise_without_reordering_them(schema):
+    """A select reaches the front past both a ``fillna`` and a disjoint ``mean``, leaving their order intact."""
+    plan = [_node("fillna", 0), _node("mean", "lat"), _node("isel", time=0)]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["isel", "fillna", "mean"]
+
+
 def test_pushdown_composes_past_two_reduces(schema):
     """The fixpoint hops a select left one reduce at a time until it reaches the front."""
     plan = [
