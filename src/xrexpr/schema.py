@@ -25,6 +25,7 @@ from typing import Any, Literal
 
 import xarray as xr
 from frozendict import frozendict
+from packaging.version import Version
 from typing_extensions import assert_never
 
 from xrexpr.indexers import Indexer
@@ -56,6 +57,12 @@ from xrexpr.operations import (
 from xrexpr.operations import spec as op_spec
 
 __all__ = ["SchemaState", "apply_schema", "resolve_dims", "to_opnode"]
+
+#: ``cumsum``/``cumprod`` dropped every coordinate spanning the scanned dim before xarray
+#: 2026.4.0 (the coordinate-retention fix, pull 10987); ``diff`` never did. The ``Scan``
+#: arm in :func:`apply_schema` reproduces that bug-for-bug so the tracked schema stays
+#: *exact* on every supported version rather than modelling only the fixed behaviour.
+SCAN_DROPS_SCANNED_COORDS = Version(xr.__version__) < Version("2026.4.0")
 
 
 @dataclass(frozen=True)
@@ -368,8 +375,12 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
       reduce, then mints every surviving weight dim onto each **variable** that lacks it
       and marks every weight dim's extent unknown — the weights broadcast in the dims a
       variable lacks and align (so possibly *shrink*) the ones it shares;
-    - :class:`~xrexpr.ir.Scan`/:class:`~xrexpr.ir.Rechunk`/:class:`~xrexpr.ir.Opaque`
-      change nothing (a rechunk changes only chunk topology).
+    - :class:`~xrexpr.ir.Scan` mostly preserves the schema, with two exceptions: ``diff``
+      *shrinks* its dim, and on xarray before 2026.4.0 (:data:`SCAN_DROPS_SCANNED_COORDS`)
+      ``cumsum``/``cumprod`` **drop** every coordinate over the scanned dim while keeping
+      the dim itself — the version-gated bug this arm reproduces so the schema stays exact;
+    - :class:`~xrexpr.ir.Rechunk`/:class:`~xrexpr.ir.Opaque` change nothing (a rechunk
+      changes only chunk topology).
 
     An :class:`~xrexpr.ir.Opaque` is assumed variable-preserving, which is *not* true
     in general (``rename``/``drop_vars``/``assign``). That makes the schema exact only
@@ -437,11 +448,22 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
                 frozenset({grouped.group_dim}) | grouped.consumes,
             )
             variables = _minted(variables, coord_names, frozenset({grouped.new_dim}))
-            # The group labels become a coordinate of their own -- grouped-specific, and the
-            # reason this arm mints a *variable* rather than only a dim. A broadcast weight
-            # dim (below) need not have a coord at all.
-            variables[grouped.new_dim] = (grouped.new_dim,)
-            coord_names = coord_names | {grouped.new_dim}
+            # The group labels usually become a coordinate of their own -- grouped-specific,
+            # and the reason this arm mints a *variable* rather than only a dim (a broadcast
+            # weight dim, below, need not have a coord at all). But xarray mints that
+            # coordinate only when the grouper *had* one. A coordinate or component grouper
+            # always does -- ``groupby("region")`` and ``groupby("time.month")`` both give a
+            # ``new_dim`` distinct from ``group_dim`` -- so those always mint. Grouping a
+            # bare *dimension* (``new_dim == group_dim`` and no coordinate over it) mints no
+            # coordinate: xarray leaves the dim without one (verified on 2025.6.1 and
+            # 2026.7.0), which is exactly what a pre-2026.4.0 scan leaves behind when it
+            # drops the scanned dim's coordinate (:data:`SCAN_DROPS_SCANNED_COORDS`).
+            if (
+                grouped.new_dim != grouped.group_dim
+                or grouped.group_dim in schema.coords
+            ):
+                variables[grouped.new_dim] = (grouped.new_dim,)
+                coord_names = coord_names | {grouped.new_dim}
             # The minted dim's extent is the number of groups -- a fact about coordinate
             # *values*, which this layer does not read. ``None`` rather than a guess.
             sizes[grouped.new_dim] = None
@@ -491,6 +513,21 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
                 size = sizes.get(dim)
                 if size is not None:  # an unknown length stays unknown, never guessed
                     sizes[dim] = max(size - n, 0)
+        case Scan(name="cumsum" | "cumprod", dims=dims) if SCAN_DROPS_SCANNED_COORDS:
+            # Pre-2026.4.0 xarray routed ``cumsum``/``cumprod`` through ``Dataset.reduce``,
+            # which keeps a coordinate only when it spans *none* of the reduced dims -- so
+            # every coordinate over the scanned dim is dropped (index coord or not), while
+            # the data variables keep the dim (the scan preserves shape). The dim then
+            # survives as a "dimension without coordinates". PR 10987 (the flox migration)
+            # fixed it to retain coords; on those versions ``SCAN_DROPS_SCANNED_COORDS`` is
+            # false, this arm is skipped, and the op falls through to the coord- and
+            # size-preserving ``pass`` below. ``diff`` never had the bug -- its own arm
+            # above keeps coords on every version. Unlike ``_aggregated`` this drops the
+            # coordinate *variables* only and leaves the data variables (and sizes) alone.
+            over = resolve_dims(dims, schema.dim_names)
+            dropped = {c for c in coord_names if not over.isdisjoint(variables[c])}
+            coord_names -= dropped
+            variables = {k: v for k, v in variables.items() if k not in dropped}
         case Scan() | Rechunk() | Opaque():
             pass
         case _:

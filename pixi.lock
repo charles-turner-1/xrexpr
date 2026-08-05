@@ -17011,6 +17011,7 @@ packages:
   name: xrexpr
   requires_dist:
   - frozendict
+  - packaging
   - typing-extensions
   - xarray
   - black ; extra == 'dev'
