@@ -22,6 +22,7 @@ from xrexpr.exceptions import InvalidExpressionError
 from xrexpr.ir import (
     ALL_DIMS,
     ContextOpen,
+    Elementwise,
     GroupedReduce,
     Opaque,
     Project,
@@ -321,6 +322,28 @@ def test_projection_pushdown_past_select_equal(ds):
     """A projection hopped past a select collects to the same result as the eager chain."""
     got = ds.plan.isel(time=0).mean("lat")[["temperature"]].collect()
     assert_equal(got, ds.isel(time=0).mean("lat")[["temperature"]])
+
+
+def test_fillna_in_a_chain_records_elementwise_and_replays_equal(ds):
+    """A chain with ``fillna(0)`` records an ``Elementwise`` and collects to the eager result.
+
+    Notes
+    -----
+    Records the variant and exercises record -> optimise -> replay end to end. Nothing
+    reorders around the elementwise op yet (W5 PR 1 leaves it a barrier in ``dim_effect``);
+    that the plan is still correct is what this pins.
+    """
+    chain = ds.plan.mean("lat").fillna(0.0).isel(time=0)
+    assert any(isinstance(n, Elementwise) for n in chain._ops)
+    assert_equal(chain.collect(), ds.mean("lat").fillna(0.0).isel(time=0))
+
+
+def test_fillna_with_dataarray_records_opaque_and_replays_equal(ds):
+    """``fillna(<DataArray>)`` demotes to ``Opaque`` (unsafe arg) and replays verbatim to eager."""
+    other = xr.zeros_like(ds["temperature"])
+    chain = ds.plan.fillna(other)
+    assert any(isinstance(n, Opaque) and n.name == "fillna" for n in chain._ops)
+    assert_equal(chain.collect(), ds.fillna(other))
 
 
 def test_blocked_projection_still_replays(ds):

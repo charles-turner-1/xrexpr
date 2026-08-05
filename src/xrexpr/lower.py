@@ -30,6 +30,7 @@ from typing_extensions import assert_never
 from xrexpr.ir import (
     AllDims,
     ContextOpen,
+    Elementwise,
     FluentOp,
     GroupedReduce,
     LoweredOp,
@@ -593,7 +594,15 @@ def _emit_node(node: LoweredOp) -> tuple[Call, ...]:
                     kwargs=weighted.reduce_kwargs,
                 ),
             )
-        case Reduce() | Select() | Scan() | Project() | Rechunk() | Opaque():
+        case (
+            Reduce()
+            | Select()
+            | Scan()
+            | Elementwise()
+            | Project()
+            | Rechunk()
+            | Opaque()
+        ):
             return (Call(name=node.name, args=node.args, kwargs=node.kwargs),)
         case _:
             assert_never(node)

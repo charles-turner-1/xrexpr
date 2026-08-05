@@ -21,6 +21,7 @@ import xarray as xr
 from xrexpr.ir import (
     ALL_DIMS,
     AllDims,
+    Elementwise,
     GroupedReduce,
     Project,
     Reduce,
@@ -703,6 +704,22 @@ def test_scan_leaves_schema_unchanged(ds):
     after = apply_schema(schema, node)
     assert after.sizes == schema.sizes
     assert after.coords == schema.coords
+
+
+def test_elementwise_leaves_schema_exactly_unchanged(ds):
+    """An ``Elementwise`` preserves every variable, coordinate and size — the arm is exact.
+
+    Notes
+    -----
+    Unlike :class:`~xrexpr.ir.Opaque` (which ``apply_schema`` treats as variable-preserving
+    only by *assumption*, past the trust boundary), a per-element op genuinely changes no
+    dim, size or variable, so every field of the snapshot is identical after it.
+    """
+    schema = SchemaState.from_dataset(ds)
+    after = apply_schema(schema, Elementwise(name="fillna", args=(0,)))
+    assert after.variables == schema.variables
+    assert after.coord_names == schema.coord_names
+    assert after.sizes == schema.sizes
 
 
 def test_schema_threads_through_a_chain(ds):

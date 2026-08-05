@@ -29,6 +29,7 @@ __all__ = [
     "CONTEXT_METHODS",
     "OP_TABLE",
     "ContextSpec",
+    "ElementwiseSpec",
     "OpSpec",
     "ProjectSpec",
     "RechunkSpec",
@@ -75,6 +76,34 @@ class ScanSpec:
     """
 
     name: Literal["cumsum", "cumprod", "diff"]
+
+
+@dataclass(frozen=True)
+class ElementwiseSpec:
+    """A per-element op — ``fillna``/``astype``/``round``/... — which keeps every dim.
+
+    Attributes
+    ----------
+    name : str
+        The method name. An open set of elementwise ops, so ``str``, matching
+        :class:`~xrexpr.ir.Elementwise`.
+
+    Notes
+    -----
+    The table nominates these the way :class:`ProjectSpec` nominates ``__getitem__``:
+    ``fillna(0)`` is an :class:`~xrexpr.ir.Elementwise`, but ``fillna(other_da)`` and
+    ``fillna({"tas": 0})`` are the same method with a data- or per-variable-shaped
+    argument that does *not* commute with a projection, and record :class:`~xrexpr.ir.Opaque`.
+    The shape of the argument decides, at record time, in ``to_opnode``'s guarded arm
+    (``schema._elementwise_safe``).
+
+    Deliberately conservative: only ops that are per-element for *every* plain-valued
+    argument are tabulated. ``where`` (its ``cond`` is data), ``interp``/``interpolate_na``
+    (dim-aware) and ``map`` (an arbitrary callable) are excluded; growing the set is a
+    one-line change once a case is shown to hold.
+    """
+
+    name: str  # open set of elementwise ops → str, as on ``ir.Elementwise``
 
 
 @dataclass(frozen=True)
@@ -163,7 +192,15 @@ class ContextSpec:
 #: :data:`~xrexpr.ir.Op` variant the call is, plus whatever that kind needs to know.
 #: ``to_opnode`` matches over this union and closes it with ``assert_never``; a name with
 #: no row at all is :class:`~xrexpr.ir.Opaque`.
-OpSpec = ReduceSpec | ScanSpec | SelectSpec | RechunkSpec | ProjectSpec | ContextSpec
+OpSpec = (
+    ReduceSpec
+    | ScanSpec
+    | ElementwiseSpec
+    | SelectSpec
+    | RechunkSpec
+    | ProjectSpec
+    | ContextSpec
+)
 
 
 _REDUCTIONS = (
@@ -185,12 +222,19 @@ _REDUCTIONS = (
 # do with it either way, ``get_args`` being ``tuple[Any, ...]``.
 _CONTEXTS: tuple[ContextOpenName, ...] = get_args(ContextOpenName)
 
+# Conservative on purpose (see ``ElementwiseSpec``): every one of these is per-element for
+# any plain-valued argument, so it keeps every dim, size and variable. ``str``-typed rather
+# than a ``Literal`` because the set is expected to grow, and ``ir.Elementwise.name`` is
+# ``str`` to match.
+_ELEMENTWISE = ("fillna", "astype", "round", "clip", "isnull", "notnull")
+
 _SPECS: tuple[OpSpec, ...] = (
     *(ReduceSpec(name) for name in _REDUCTIONS),
     ReduceSpec("reduce", dim_arg=1),  # ``reduce(func, dim, ...)`` — see ReduceSpec
     ScanSpec("cumsum"),
     ScanSpec("cumprod"),
     ScanSpec("diff"),
+    *(ElementwiseSpec(name) for name in _ELEMENTWISE),
     SelectSpec("isel"),
     SelectSpec("sel"),
     RechunkSpec("chunk"),
