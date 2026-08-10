@@ -281,8 +281,10 @@ dated note (2026-07-29) saying exactly what its arm is. Nothing else in them cha
 | 10 | **W10 — the documentation site** (added 2026-08-04). Sphinx + myst-nb on Read the Docs; the module-docstring essays migrate to `internals/` pages; the final PR slims the docstrings and the README. PRs 1–7 are additive and interleave freely with the code items above; PR 8 edits the same module docstrings W5/W6 will touch, so it lands after whichever of those is in flight. | issue to file, [`10-documentation.md`](./10-documentation.md) | Last, as item 10: docs block nothing, and the destructive PR wants the essay churn behind it. |
 
 Deliberately *not* on the list: the weighted **select** rule (`02` §8.1 — needs the
-package's first data-touching rewrite, and its own design decision; issue #107),
-`GroupedMap` (`02` §5.6 — modelled spec, waiting on its stated trigger; issue #91), and
+package's first data-touching rewrite, and its own design decision; issue #107, now a
+sub-issue of #158, whose coord/index-aware second pass is where that decision is framed —
+see §8.1's 2026-08-10 note), `GroupedMap` (`02` §5.6 — modelled spec, waiting on its
+stated trigger; issue #91), and
 the W8 Rust spike (gated on item 2; issue #106, spec in
 [`08-rust-gate.md`](./08-rust-gate.md)). All three are tracked so the gate is visible in
 the tracker rather than only here; none is scheduled.
