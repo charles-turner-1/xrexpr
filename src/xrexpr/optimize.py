@@ -40,6 +40,7 @@ from xrexpr.chunks import (
 )
 from xrexpr.exceptions import InvalidExpressionError
 from xrexpr.indexers import (
+    Advanced,
     ForwardSlice,
     GeneralSlice,
     Indexer,
@@ -519,6 +520,11 @@ def _compose_indexer(outer: Indexer, inner: Indexer) -> Indexer | None:
         case ForwardSlice():
             return _compose_slice(outer, inner)
         case Scalar() | GeneralSlice() | Label():
+            return None
+        case Advanced():
+            # Never actually reached: a select carrying an advanced indexer is ``Opaque``,
+            # so no two of them are ever composed. Answered for exhaustiveness -- its select
+            # is a barrier, so "uncomposable" is the only sound reply.
             return None
         case _:
             assert_never(outer)

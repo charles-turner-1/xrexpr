@@ -30,6 +30,7 @@ from hypothesis import strategies as st
 from xarray.testing import assert_equal
 
 from xrexpr.indexers import (
+    Advanced,
     ForwardSlice,
     GeneralSlice,
     Indexer,
@@ -214,6 +215,43 @@ def test_multidimensional_bool_array_is_not_a_mask():
     xarray at replay in its own words.
     """
     assert isinstance(classify(np.array([[True, False], [True, False]])), Label)
+
+
+def test_orthogonal_dataarray_indexer_classifies_as_advanced():
+    """A same-named ``DataArray`` indexer is ``Advanced``, carrying the indexed dim."""
+    idx = classify(xr.DataArray([0, 1], dims="time"))
+    assert isinstance(idx, Advanced)
+    assert idx.dims == ("time",)
+
+
+def test_vectorized_dataarray_indexer_classifies_as_advanced():
+    """A fresh-named ``DataArray`` indexer is ``Advanced``, carrying its new dim."""
+    idx = classify(xr.DataArray([0, 1], dims="points"))
+    assert isinstance(idx, Advanced)
+    assert idx.dims == ("points",)
+
+
+def test_variable_indexer_classifies_as_advanced():
+    """An ``xr.Variable`` indexer is advanced indexing too, not a dim-dropping scalar."""
+    assert isinstance(classify(xr.Variable("time", [0, 1])), Advanced)
+
+
+def test_advanced_indexer_is_hashable():
+    """``Advanced`` is hashable where the raw ``DataArray`` is not, so ``Select`` stays hashable.
+
+    Notes
+    -----
+    The array itself is not stored — only its dims — which is what a ``Scalar`` wrapping the
+    raw ``DataArray`` (the pre-fix misclassification) could not offer.
+    """
+    idx = classify(xr.DataArray([0, 1], dims="time"))
+    assert hash(idx) == hash(Advanced(dims=("time",)))
+
+
+def test_advanced_indexer_is_uncomposable():
+    """Two advanced indexers do not compose — its select is a barrier, never composed."""
+    idx = classify(xr.DataArray([0, 1], dims="time"))
+    assert _compose_indexer(idx, idx) is None
 
 
 # --- drops_dim: only a scalar removes its dim ---------------------------------------------
