@@ -904,11 +904,12 @@ def to_opnode(
         ) is not None:
             return Project(name=getitem, args=args, kwargs=kw, variables=variables)
         case SelectSpec() | ElementwiseSpec() | ProjectSpec() | None:
-            # A select carrying an advanced (``DataArray``/``Variable``) indexer, an
-            # elementwise call with an unsafe (data-/per-variable-shaped) argument, a
+            # A select carrying a *vectorized* ``DataArray``/``Variable`` indexer (an
+            # orthogonal one is normalised to plain values upstream and stays a ``Select``),
+            # an elementwise call with an unsafe (data-/per-variable-shaped) argument, a
             # ``__getitem__`` whose key names no variable (a mask, a dict), or a method
             # with no row at all: all are replayed verbatim and never reordered. The select
-            # barriers because its dim effect depends on the indexed dim -- see
+            # barriers because a vectorized indexer drops its dim and mints new ones -- see
             # ``_select_has_advanced``.
             return Opaque(name=name, args=args, kwargs=kw)
         case unreachable:
@@ -968,14 +969,17 @@ def _select_has_advanced(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> bo
 
     Notes
     -----
-    The decision is routed through :func:`~xrexpr.indexers.classify` -- the sole
-    constructor of the value taxonomy -- rather than re-testing the raw shapes here, so
-    "what is an advanced indexer" has one definition. A select barriers because an advanced
-    indexer's dim effect depends on the *indexed dim* (orthogonal keeps it, vectorized
-    drops it and adds new dims), which no single indexer value carries; only an
-    :class:`~xrexpr.ir.Opaque` node can withhold trust in the folded schema (a ``Select``
-    is always inside ``optimize._trusted_prefix``). The shape of an argument deciding the
-    kind has precedent in :func:`_elementwise_safe` and :func:`_projected_names`.
+    Only a **vectorized** advanced indexer reaches here as
+    :class:`~xrexpr.indexers.Advanced`: :func:`_select_indexer` has already normalised the
+    orthogonal ones (a fresh array named after the dim it indexes) to plain ``.values``, so
+    they classify as ordinary positional indexers and their select optimises normally (see
+    :func:`_orthogonal_advanced`). A vectorized indexer drops its dim and mints the array's
+    dims, which no positional indexer expresses and this layer does not model, so its select
+    must barrier -- and only an :class:`~xrexpr.ir.Opaque` node can withhold trust in the
+    folded schema (a ``Select`` is always inside ``optimize._trusted_prefix``). The decision
+    is routed through :func:`~xrexpr.indexers.classify` -- the sole constructor of the value
+    taxonomy -- so "what is an advanced indexer" has one definition; the shape of an argument
+    deciding the kind has precedent in :func:`_elementwise_safe` and :func:`_projected_names`.
     """
     return any(
         isinstance(classify(v), Advanced)
@@ -1103,15 +1107,60 @@ def _select_indexer(
     Returns
     -------
     frozendict
-        The indexed dims and their raw indexer values.
+        The indexed dims and their indexer values, each raw except that an *orthogonal*
+        advanced indexer is normalised to its ``.values`` (see :func:`_orthogonal_advanced`).
+
+    Notes
+    -----
+    The verbatim call is untouched — ``to_opnode`` keeps the original ``args``/``kwargs`` for
+    replay — so this normalisation only shapes the derived ``indexer`` metadata: an
+    orthogonal ``DataArray`` becomes the ``ndarray`` it indexes identically to, and
+    ``Select.__post_init__`` then classifies it as an ordinary positional indexer.
     """
-    indexer: dict[Hashable, Any] = {}
+    raw: dict[Hashable, Any] = {}
     if args and isinstance(args[0], dict):
-        indexer.update(args[0])
+        raw.update(args[0])
     for key, value in kwargs.items():
         if key not in _SELECT_OPTION_KWARGS:
-            indexer[key] = value
-    return frozendict(indexer)
+            raw[key] = value
+    return frozendict(
+        {
+            dim: value.values if _orthogonal_advanced(dim, value) else value
+            for dim, value in raw.items()
+        }
+    )
+
+
+def _orthogonal_advanced(dim: Hashable, value: Any) -> bool:
+    """Whether a ``DataArray``/``Variable`` indexer of ``dim`` is orthogonal, not vectorized.
+
+    Parameters
+    ----------
+    dim : Hashable
+        The dim this value indexes.
+    value : Any
+        The raw indexer for ``dim``.
+
+    Returns
+    -------
+    bool
+        ``True`` when ``value`` is an ``xr.DataArray``/``xr.Variable`` whose own dims are a
+        subset of ``{dim}`` — a 0-d array (scalar-like) or a 1-d array named ``dim``.
+
+    Notes
+    -----
+    Such an indexer introduces no new dim, so ``ds.isel(d=arr)`` is *identical* to
+    ``ds.isel(d=arr.values)`` (verified against xarray 2026.7.0, ``isel`` and ``sel``,
+    integer/boolean/label): the array's values index axis ``d`` exactly as a plain
+    ``ndarray`` would. :func:`_select_indexer` therefore replaces it with ``.values`` so the
+    ordinary taxonomy (:class:`~xrexpr.indexers.Positions`/``Scalar``/``Mask``/``Label``)
+    classifies it — it sizes, composes and reorders like any positional select. A
+    *vectorized* indexer (a fresh dim name, so ``value.dims`` is not a subset of ``{dim}``)
+    is **not** normalised: it drops ``dim`` and mints the array's dims, which no positional
+    indexer expresses, so it stays :class:`~xrexpr.indexers.Advanced` and its select
+    barriers (``_select_has_advanced``).
+    """
+    return isinstance(value, xr.DataArray | xr.Variable) and set(value.dims) <= {dim}
 
 
 def _chunk_spec(

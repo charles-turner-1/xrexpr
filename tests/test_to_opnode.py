@@ -16,7 +16,7 @@ import xarray as xr
 from frozendict import frozendict
 
 from xrexpr.chunks import Auto, SingleSize, classify_chunk
-from xrexpr.indexers import ForwardSlice, Scalar
+from xrexpr.indexers import ForwardSlice, Positions, Scalar
 from xrexpr.ir import (
     ALL_DIMS,
     Elementwise,
@@ -225,30 +225,55 @@ def test_isel_option_kwarg_not_treated_as_dim(schema):
     assert node.kwargs == frozendict({"time": 0, "drop": True})  # verbatim for replay
 
 
-def test_isel_dataarray_indexer_is_opaque(schema):
-    """``isel(time=<DataArray>)`` is advanced indexing, so the whole select demotes to ``Opaque``.
+def test_isel_orthogonal_dataarray_indexer_records_a_positional_select(schema):
+    """An orthogonal ``isel(<DataArray dims=(dim,)>)`` normalises to a positional ``Select``.
 
     Notes
     -----
-    An advanced indexer's dim effect depends on the indexed dim — orthogonal keeps it,
-    vectorized drops it and adds new dims — which no single indexer value carries, and only
-    an ``Opaque`` node can withhold trust in the folded schema. So the guard
+    A same-named ``DataArray`` indexes ``time`` identically to a bare ``ndarray`` of the
+    same positions, so ``_select_indexer`` normalises it to ``.values`` and the ordinary
+    taxonomy classifies it as ``Positions`` — it sizes, composes and reorders like any
+    positional select. The verbatim ``DataArray`` is kept in ``kwargs`` for replay.
+    """
+    node = to_opnode("isel", (), {"time": xr.DataArray([0, 2], dims="time")})
+    assert isinstance(node, Select)
+    assert node.indexer == frozendict({"time": Positions((0, 2))})
+    assert isinstance(node.kwargs["time"], xr.DataArray)  # kept verbatim for replay
+
+
+def test_isel_scalar_dataarray_indexer_drops_its_dim(schema):
+    """A 0-d ``DataArray`` indexes like a scalar, so it normalises to a dim-dropping ``Scalar``."""
+    node = to_opnode("isel", (), {"time": xr.DataArray(0)})
+    assert isinstance(node, Select)
+    assert node.indexer == frozendict({"time": Scalar(0)})
+    assert node.consumes == frozenset({"time"})
+
+
+def test_isel_vectorized_dataarray_indexer_is_opaque(schema):
+    """A vectorized ``isel(<DataArray dims=(new,)>)`` mints a dim, so the select demotes to ``Opaque``.
+
+    Notes
+    -----
+    A fresh-named ``DataArray`` drops ``time`` and mints its own dim — an effect no
+    positional indexer expresses and the schema layer does not model — so the guard
     (``_select_has_advanced``) refuses it and the call replays verbatim, un-reordered.
     """
-    node = to_opnode("isel", (), {"time": xr.DataArray([0, 1], dims="time")})
+    node = to_opnode("isel", (), {"time": xr.DataArray([0, 1], dims="points")})
     assert isinstance(node, Opaque)
     assert node.name == "isel"  # the real name, not remapped
 
 
-def test_sel_dataarray_indexer_is_opaque(schema):
-    """``sel(<DataArray>)`` is advanced indexing too, so it demotes to ``Opaque``."""
+def test_sel_vectorized_dataarray_indexer_is_opaque(schema):
+    """``sel(<DataArray>)`` vectorized indexing demotes to ``Opaque`` too."""
     node = to_opnode("sel", (), {"time": xr.DataArray([0, 1], dims="points")})
     assert isinstance(node, Opaque)
 
 
-def test_isel_scalar_indexers_alongside_a_dataarray_all_demote(schema):
-    """One advanced indexer barriers the whole select, plain indexers included."""
-    node = to_opnode("isel", (), {"lat": 0, "time": xr.DataArray([0, 1], dims="time")})
+def test_scalar_indexers_alongside_a_vectorized_dataarray_all_demote(schema):
+    """One vectorized advanced indexer barriers the whole select, plain indexers included."""
+    node = to_opnode(
+        "isel", (), {"lat": 0, "time": xr.DataArray([0, 1], dims="points")}
+    )
     assert isinstance(node, Opaque)
 
 

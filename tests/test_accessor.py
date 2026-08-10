@@ -346,9 +346,25 @@ def test_fillna_with_dataarray_records_opaque_and_replays_equal(ds):
     assert_equal(chain.collect(), ds.fillna(other))
 
 
-def test_dataarray_indexed_select_records_opaque_and_replays_equal(ds):
-    """A valid ``isel(<DataArray>)`` chain demotes to ``Opaque`` (advanced index) and replays to eager."""
+def test_orthogonal_dataarray_select_records_a_select_and_replays_equal(ds):
+    """An orthogonal ``isel(<DataArray>)`` records a positional ``Select`` (not ``Opaque``) and replays to eager.
+
+    Notes
+    -----
+    The optimisation payoff: the select is no longer a barrier, so ``mean("lat").isel(...)``
+    optimises (the select hops the disjoint reduce — pinned structurally in
+    ``test_optimize``) and still equals the eager chain.
+    """
     idx = xr.DataArray([0, 2], dims="time")
+    chain = ds.plan.mean("lat").isel(time=idx)
+    assert any(isinstance(n, Select) for n in chain._ops)
+    assert not any(isinstance(n, Opaque) for n in chain._ops)
+    assert_equal(chain.collect(), ds.mean("lat").isel(time=idx))
+
+
+def test_vectorized_dataarray_select_records_opaque_and_replays_equal(ds):
+    """A vectorized ``isel(<DataArray>)`` mints a dim, so it demotes to ``Opaque`` and replays verbatim to eager."""
+    idx = xr.DataArray([0, 2], dims="points")
     chain = ds.plan.isel(time=idx).sum("lat")
     assert any(isinstance(n, Opaque) and n.name == "isel" for n in chain._ops)
     assert_equal(chain.collect(), ds.isel(time=idx).sum("lat"))
@@ -361,8 +377,9 @@ def test_invalid_dataarray_select_chain_raises_instead_of_laundering(ds):
     -----
     The bug this fixes: the advanced ``isel`` was misfiled as a dim-dropping ``Scalar``, so
     the bare ``mean()`` understated its ``consumes`` and the trailing ``isel(time=0)`` was
-    swapped in front — returning a value where the eager chain errors. The advanced select
-    is now ``Opaque``, ``time`` survives the fold, and the trailing select is refused.
+    swapped in front — returning a value where the eager chain errors. Now the orthogonal
+    indexer resizes ``time`` rather than dropping it, so ``time`` survives the fold and
+    ``ALL_DIMS`` refuses the trailing select.
     """
     idx = xr.DataArray([0, 2], dims="time")
     with pytest.raises(InvalidExpressionError):
