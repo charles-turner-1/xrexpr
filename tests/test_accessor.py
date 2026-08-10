@@ -435,25 +435,50 @@ def test_merged_projections_keep_the_dataarray_result(ds):
     xr.testing.assert_identical(got, ds[["temperature", "elevation"]]["temperature"])
 
 
-def test_a_projection_naming_a_coord_is_left_and_still_replays(ds):
-    """A projection naming a *coordinate* fails the subset test, is left alone, and replays equal.
+def test_a_projection_feeding_a_coord_is_dropped_and_replays_equal(ds):
+    """A projection whose only consumer names a surviving coordinate is dropped, replaying equal.
 
     Notes
     -----
-    ``ds[["temperature"]]["lat"]`` is valid eagerly, because a projection keeps the coords
-    its variables span. It is *not* a spelling of ``ds["lat"]``: the chain reads ``lat`` as
-    it exists inside ``p1``'s result, which agrees with the base coord only by accident --
-    a select or reduce between the two projections, or a ``p1`` that prunes or resizes it,
-    and they differ. So this asserts the conservative leg, not a missed rewrite.
-
-    There *is* a win here, and it is a different rule: ``p1`` materialises ``temperature``
-    only to discard it, where the optimal plan reads the coord and never touches the data
-    variable. That needs the schema (does ``lat`` survive ``p1`` untouched?), which puts it
-    in ``pushdown_projections``' family rather than the syntactic merge -- filed as #115.
+    ``ds[["temperature"]]["lat"]`` materialises ``temperature`` only to discard it and
+    return the ``lat`` coordinate. ``lat`` survives ``p1`` (``temperature`` spans it), so
+    the optimal plan reads the coord from the base and never touches the data variable --
+    ``eliminate_projection_before_coord`` drops ``p1``. This is the schema-based rewrite
+    #115 asked for, distinct from the syntactic merge: it proves ``lat`` passes through
+    ``p1`` untouched.
     """
     chain = ds.plan[["temperature"]]["lat"]
-    assert [type(n) for n in chain._optimized()] == [Project, Project]
+    assert [type(n) for n in chain._optimized()] == [Project]
     xr.testing.assert_identical(chain.collect(), ds[["temperature"]]["lat"])
+
+
+def test_a_projection_feeding_an_aux_coord_is_dropped_and_replays_equal(ds):
+    """Dropping a projection extends to a non-dimension coordinate the survivor still spans.
+
+    Notes
+    -----
+    ``area`` is an auxiliary ``(lat, lon)`` coordinate; ``temperature`` spans both dims,
+    so ``area`` survives ``p1`` and the pair collapses to reading ``area`` from the base.
+    """
+    chain = ds.plan[["temperature"]]["area"]
+    assert [type(n) for n in chain._optimized()] == [Project]
+    xr.testing.assert_identical(chain.collect(), ds[["temperature"]]["area"])
+
+
+def test_a_projection_feeding_a_coord_across_a_select_is_left(ds):
+    """A select between the two projections un-adjoins them, so the pair is left and replays equal.
+
+    Notes
+    -----
+    With a select in between, ``p1``'s consumer is the select, not the projection, and the
+    two forms genuinely differ (the chain reads ``lat`` from ``p1``'s *selected* result).
+    The rule is adjacency-only, so it declines -- and the plan still replays equal to eager.
+    """
+    chain = ds.plan[["temperature"]].isel(time=0)["lat"]
+    assert [type(n) for n in chain._optimized()].count(Project) == 2
+    xr.testing.assert_identical(
+        chain.collect(), ds[["temperature"]].isel(time=0)["lat"]
+    )
 
 
 def test_merging_projections_skips_an_error_from_a_discarded_name(ds):

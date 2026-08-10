@@ -788,6 +788,90 @@ def merge_adjacent_projects(nodes: Plan, schema: SchemaState) -> Plan | None:
     return None
 
 
+def eliminate_projection_before_coord(nodes: Plan, schema: SchemaState) -> Plan | None:
+    """Drop a projection whose only consumer names coordinates that outlive it.
+
+    Parameters
+    ----------
+    nodes : Plan
+        The plan to rewrite.
+    schema : SchemaState
+        The schema of the dataset the plan starts from. Load-bearing: whether ``p2``'s
+        coordinate survives ``p1`` is a fact only the fold knows.
+
+    Returns
+    -------
+    Plan or None
+        The plan with the first projection of a qualifying pair dropped, or ``None`` when
+        none qualifies.
+
+    Notes
+    -----
+    ``ds[["temperature"]]["lat"]`` records two :class:`~xrexpr.ir.Project` nodes: the
+    first (``p1``) materialises ``temperature``, the second (``p2``) throws it away and
+    returns the ``lat`` *coordinate*. The optimal plan reads ``lat`` from the base and
+    never touches ``temperature``. :func:`merge_adjacent_projects` cannot do this — its
+    subset test ``set(p2) <= set(p1)`` fails, and it must, because that rule is syntactic
+    and ``ds["lat"]`` is a *different expression* from the pair unless the schema proves
+    ``lat`` passes through ``p1`` untouched. Proving that is this rule's whole job, which
+    is why it lives in :func:`pushdown_projections`' family (confined to the trusted
+    prefix, reading the folded schema) rather than in the syntactic merge.
+
+    The pair collapses to ``p2`` alone when, in the schema entering ``p1``:
+
+    - **``p1`` is not** ``single``. A bare-name ``p1`` yields a ``DataArray`` on which
+      ``p2``'s ``__getitem__`` is *indexing*, not projection — the same hard barrier
+      :func:`merge_adjacent_projects` carries.
+    - **every name ``p1`` selects is a tracked data variable**, so ``p1`` is a genuine
+      modelled projection and the dims it spans are known rather than guessed.
+    - **every name ``p2`` selects is a coordinate that survives ``p1``** — its dims are a
+      subset of the dims ``p1``'s selected variables span, which is exactly the survival
+      test :func:`~xrexpr.schema.apply_schema`'s ``Project`` arm applies. A projection
+      never touches a coordinate's *values*, so a surviving coordinate reads identically
+      from ``p1``'s result and from the base, and dropping ``p1`` preserves the answer.
+
+    The survival test is load-bearing, not an optimisation: it fires only when the
+    coordinate is present in ``p1``'s output, i.e. exactly when the eager chain succeeds.
+    Where the coordinate does *not* survive ``p1`` (``ds[["elevation"]]["time"]``, with
+    ``elevation`` lacking ``time``), the eager chain raises and the rule **declines** —
+    never turning that error into a value, the one thing ``planning/roadmap/07-small-wins.md``
+    §8's contract forbids outright. A ``p2`` naming a data variable is left to
+    :func:`merge_adjacent_projects` (its subset case) or is an eager error left alone.
+
+    Dropping ``p1`` cannot orphan a variable downstream: ``p2`` is a coordinate
+    projection, so ``p1``'s data variables are gone after it whether or not ``p1`` ran,
+    and nothing past ``p2`` can read them. The rule shrinks the plan, so the termination
+    measure is satisfied on its first component. One drop per call; :func:`optimize`'s
+    fixpoint composes them.
+    """
+    if not any(isinstance(node, Project) for node in nodes):
+        return None  # nothing to drop: don't fold the schema for a projection-free plan
+
+    limit = _trusted_prefix(nodes)
+    schemas = _schemas(nodes[:limit], schema)
+    for i in range(limit - 1):
+        first, second = nodes[i], nodes[i + 1]
+        if not isinstance(first, Project) or not isinstance(second, Project):
+            continue
+        if first.single:
+            continue  # a bare-name p1 indexes; p2 is not a projection of its result
+
+        entering = schemas[i]
+        if not all(n in entering.data_vars for n in first.variables):
+            continue  # p1 isn't a modelled projection; its spanned dims are a guess
+
+        spanned = {d for n in first.variables for d in entering.variables[n]}
+        survives = all(
+            c in entering.coord_names and set(entering.variables[c]) <= spanned
+            for c in second.variables
+        )
+        if not survives:
+            continue
+
+        return list(nodes[:i]) + list(nodes[i + 1 :])
+    return None
+
+
 def pushdown_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
     """Hop a select left past a preceding node whose dims permit it.
 
@@ -1142,6 +1226,7 @@ def _pushable_rechunk(node: Rechunk) -> bool:
 _RULES: tuple[Rule, ...] = (
     merge_adjacent_selects,
     merge_adjacent_projects,
+    eliminate_projection_before_coord,
     pushdown_selects,
     pushdown_projections,
     pushdown_selects_past_rechunks,

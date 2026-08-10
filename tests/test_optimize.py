@@ -526,15 +526,81 @@ def test_a_single_projection_is_a_merge_barrier(schema):
 
 
 def test_projections_that_are_not_a_subset_are_left_alone(schema):
-    """A second projection naming something the first didn't leaves the pair alone, and does not raise.
+    """A second projection naming a data variable the first didn't leaves the pair alone.
 
     Notes
     -----
-    ``ds[["temperature"]]["lat"]`` is valid eagerly -- projection keeps the coords its
-    variables span -- so the pair is merely un-mergeable, not invalid.
+    ``ds[["temperature"]][["elevation"]]`` is not a subset (merge declines) and ``elevation``
+    is a data variable, not a coordinate (``eliminate_projection_before_coord`` declines).
+    The optimiser leaves the pair -- it has no standing to reject a chain, even though this
+    one raises eagerly.
     """
     plan = [
         _node("__getitem__", ["temperature"]),
+        _node("__getitem__", ["elevation"]),
+    ]
+    assert optimize(plan, schema) == plan
+
+
+def test_projection_feeding_a_surviving_coord_is_dropped(schema):
+    """A projection whose only consumer names a coordinate its variables span is dropped.
+
+    Notes
+    -----
+    ``ds[["temperature"]]["lat"]``: ``temperature`` spans ``lat``, so the coordinate
+    survives ``p1`` and reads identically from the base -- ``p1`` is pure waste.
+    """
+    plan = [
+        _node("__getitem__", ["temperature"]),
+        _node("__getitem__", "lat"),
+    ]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["__getitem__"]
+    assert out[0].variables == ("lat",)
+
+
+def test_projection_feeding_a_dropped_coord_is_left(schema):
+    """A projection is left when its consumer names a coordinate the survivor does not span.
+
+    Notes
+    -----
+    ``ds[["elevation"]]["time"]``: ``elevation`` spans ``lat``/``lon`` only, so ``p1``
+    drops ``time`` and the eager chain raises. The rule declines rather than turn that
+    error into a value.
+    """
+    plan = [
+        _node("__getitem__", ["elevation"]),
+        _node("__getitem__", "time"),
+    ]
+    assert optimize(plan, schema) == plan
+
+
+def test_projection_feeding_a_coord_past_opaque_is_left(schema):
+    """Past an ``Opaque`` the schema is a guess, so the coord-elimination rule declines.
+
+    Notes
+    -----
+    The rule reads the folded schema to prove the coordinate survives, so it confines
+    itself to the trusted prefix exactly as ``pushdown_projections`` does.
+    """
+    plan = [
+        _node("pipe", lambda d: d),
+        _node("__getitem__", ["temperature"]),
+        _node("__getitem__", "lat"),
+    ]
+    assert optimize(plan, schema) == plan
+
+
+def test_projection_feeding_a_coord_after_bare_name_is_left(schema):
+    """A bare-name first projection indexes its result, so the pair is left un-dropped.
+
+    Notes
+    -----
+    After ``ds["temperature"]`` the object is a ``DataArray``, on which ``["lat"]`` is
+    indexing rather than projection -- the same ``single`` barrier the merge rule carries.
+    """
+    plan = [
+        _node("__getitem__", "temperature"),
         _node("__getitem__", "lat"),
     ]
     assert optimize(plan, schema) == plan

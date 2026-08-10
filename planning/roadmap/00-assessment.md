@@ -423,7 +423,17 @@ The optimiser side really was one arm: both pushdowns are generic over `dim_effe
 ### Everything still open
 
 **W7 §2** (merge adjacent `Rechunk`s, #103); the "schema lies" items **#60** (DataArray
-indexers misclassified as scalar), **#115** (coord-only projection, now unblocked), and
-**#117** (model `keepdims=True`); and **W8** (the Rust spike, #106 — ungated, unscheduled).
-Deferred by design: #91 (GroupedMap), #107 (weighted-select rule). No feature workstream
-remains — the roadmap's structural programme is complete.
+indexers misclassified as scalar) and **#117** (model `keepdims=True`); and **W8** (the
+Rust spike, #106 — ungated, unscheduled). Deferred by design: #91 (GroupedMap), #107
+(weighted-select rule). No feature workstream remains — the roadmap's structural
+programme is complete.
+
+## Checkpoint — #115 landed (2026-08-10)
+
+A status entry, not a revision. **#115 is done** —
+`optimize.eliminate_projection_before_coord` (`07-small-wins.md` §10, the follow-up §1
+filed): a projection whose only consumer names a coordinate that survives it is dropped,
+so `ds[["temperature"]]["lat"]` no longer materialises `temperature`. Schema-based and
+confined to the trusted prefix; declines wherever the coordinate does not survive `p1`
+(never turning an eager error into a value). Still open: **W7 §2** (#103), **#60**, **#117**,
+and **W8** (#106). Deferred by design: #91, #107.

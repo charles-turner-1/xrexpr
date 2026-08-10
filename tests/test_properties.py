@@ -53,6 +53,15 @@ the size-exactness one, which builder nodes are entitled to answer "unknown" to 
 A builder chain is a **pair** of calls, so :func:`_builder_pair` draws both at once, and
 each kind constrains its closer differently — see that function for the per-kind facts,
 every one of which was verified against xarray 2026.7.0 rather than assumed.
+
+**Coordinate projections** — a projection naming a *coordinate*, which
+``eliminate_projection_before_coord`` collapses when its input is a projection whose
+variables the coordinate survives — get their own generator, :func:`coord_projection_plans`,
+rather than a widening of ``_calls``. The pair must come last (a coordinate projection
+leaves a coord-only dataset) and its chains cannot feed the schema-exactness property
+(``apply_schema`` over-reports a coordinate projection), so keeping them separate is what
+lets a single dedicated test pin both that the rule fires and that collapsing preserves the
+answer — see :func:`test_a_coord_projection_drops_its_input_and_replays_equal`.
 """
 
 import importlib.util
@@ -75,7 +84,7 @@ from xrexpr.ir import ContextOpen, Opaque, Rechunk, Select
 from xrexpr.lower import Call as Lowered
 from xrexpr.lower import emit, to_lower_ir
 from xrexpr.operations import CONTEXT_METHODS, OP_TABLE, ReduceSpec, ScanSpec
-from xrexpr.optimize import optimize
+from xrexpr.optimize import eliminate_projection_before_coord, optimize
 from xrexpr.schema import SchemaState, apply_schema, to_opnode
 
 # Reductions spelled ``name(dim=...)``: every tabulated reduce except ``reduce``, whose
@@ -942,6 +951,37 @@ def any_plans():
 
 
 @st.composite
+def coord_projection_plans(draw):
+    """A plain chain ending in the pair ``eliminate_projection_before_coord`` targets.
+
+    A list-form data-variable projection ``p1`` followed by a list-form projection ``p2``
+    naming coordinates ``p1``'s variables still span. ``p2`` reads those coordinates
+    identically from the base, so the optimiser drops ``p1``.
+
+    Its own strategy, and **terminal**, for two reasons the inline :func:`_calls` draw
+    could not satisfy. A coordinate projection yields a coord-only dataset, with no data
+    variable left to draw a legal downstream op against -- so the pair must come last. And
+    ``apply_schema``'s ``Project`` arm *declines* (over-reports) a projection naming a
+    coordinate, so a chain carrying one cannot feed :func:`test_tracked_schema_agrees_with_evaluation`;
+    keeping it separate keeps it out of the schema-exactness properties while still driving
+    the value and anti-vacuity check below. The prefix is builder-free, so both projections
+    land in the trusted prefix where the rule looks.
+    """
+    ds = draw(datasets(dated=draw(st.booleans())))
+    calls = draw(_calls(ds))
+    current = _apply(ds, calls)
+    data_vars = sorted(map(str, current.data_vars))
+    assume(bool(data_vars))
+    p1 = draw(st.lists(st.sampled_from(data_vars), min_size=1, unique=True).map(sorted))
+    # Coordinates present *after* ``p1`` are exactly those that survive it, so drawing ``p2``
+    # from them guarantees the rule's survival test passes and it fires.
+    survivors = sorted(map(str, _apply(current, [Call("__getitem__", p1)]).coords))
+    assume(bool(survivors))
+    p2 = draw(st.lists(st.sampled_from(survivors), min_size=1, unique=True).map(sorted))
+    return ds, [*calls, Call("__getitem__", p1), Call("__getitem__", p2)]
+
+
+@st.composite
 def select_runs(draw):
     """A dataset paired with a run of >=2 adjacent same-name selects on distinct dims."""
     ds = draw(datasets())
@@ -1378,3 +1418,27 @@ def test_every_builder_kind_is_generated_and_replays_equal_to_eager(data, kind):
         assert {k: set(v) for k, v in schema.variables.items()} == {
             k: set(v.dims) for k, v in eager.variables.items()
         }
+
+
+@SETTINGS
+@given(coord_projection_plans())
+def test_a_coord_projection_drops_its_input_and_replays_equal(case):
+    """Anti-vacuity plus value: the coord-only projection pair is generated, fires, and preserves the answer.
+
+    ``eliminate_projection_before_coord`` fires on no random chain -- :func:`_calls` draws
+    only data-variable projections -- so it is asked for by name here, the way
+    :func:`test_every_builder_kind_is_generated_and_replays_equal_to_eager` asks for each
+    builder kind. :func:`coord_projection_plans` ends every chain in the ``[[data_vars]]``,
+    ``[[coords]]`` pair the rule collapses, and both facts are pinned: that the rule fires
+    (its own return on the lowered plan is not ``None``, checked order-independently rather
+    than by inferring a drop that :func:`merge_adjacent_projects` could also cause), and
+    that the full optimiser's answer still equals eager.
+    """
+    ds, calls = case
+    plan, _ = _build_plan(ds, calls)
+    lowered = to_lower_ir(plan, _dim_names(ds))
+    assert (
+        eliminate_projection_before_coord(lowered, SchemaState.from_dataset(ds))
+        is not None
+    )
+    _assert_replays_equal(_apply(ds.plan, calls).collect(), _apply(ds, calls))
