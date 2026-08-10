@@ -528,3 +528,18 @@ termination measure holds on its first component, the same footing as §1. Golde
 `test_optimize.py` (collapse, dropped-coord left, past-`Opaque` left, `single`-`p1` left)
 plus equality-vs-eager in `test_accessor.py` (collapse over a dim and an auxiliary coord,
 and the select-between divergence declined).
+
+The soak fires on no random chain — `_calls` draws only data-variable projections — so a
+dedicated `coord_projection_plans` generator plus an anti-vacuity + value test
+(`test_a_coord_projection_drops_its_input_and_replays_equal`) asks for the pair by name.
+It is kept separate rather than folded into `_calls` for two reasons: a coordinate
+projection must be *terminal* (it yields a coord-only dataset with no legal downstream op),
+and its chains cannot feed `test_tracked_schema_agrees_with_evaluation`, because
+`apply_schema`'s `Project` arm over-reports a coordinate projection.
+
+> **Follow-up, not folded in:** that over-report is **#162**. A projection naming a
+> coordinate falls into the `Project` arm's "decline" leg even though the coord is known,
+> so the tracked schema claims a data var survives that evaluation drops. Inert for this
+> rule (it reads only the schema *entering* `p1`), but a schema-lie of the #60/#109 family
+> — and modelling it exactly is what would let the soak generator join `any_plans()`
+> without an `assume`.

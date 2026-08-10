@@ -13,7 +13,7 @@ the plan for what comes after them.)*
 - [x] W4 — chunk-spec taxonomy (closes the W8 Rust gate)
 - [x] W5 — Elementwise + its cross rules
 - [x] W6 — Scan gains its dims
-- [~] W7 — small wins (§1, §3, §5 done; §2 unblocked and the only one left)
+- [~] W7 — small wins (§1, §3, §5, §10 done; §2 the last rule left, §9 modelled as #117)
 - [ ] W8 — PyO3 spike (now ungated; unscheduled)
 - [x] W10 — documentation site
 
@@ -435,5 +435,15 @@ A status entry, not a revision. **#115 is done** —
 filed): a projection whose only consumer names a coordinate that survives it is dropped,
 so `ds[["temperature"]]["lat"]` no longer materialises `temperature`. Schema-based and
 confined to the trusted prefix; declines wherever the coordinate does not survive `p1`
-(never turning an eager error into a value). Still open: **W7 §2** (#103), **#60**, **#117**,
-and **W8** (#106). Deferred by design: #91, #107.
+(never turning an eager error into a value).
+
+Widening the soak for it surfaced one new item, filed in the same pass: **#162** — a
+projection naming a *coordinate* falls into `apply_schema`'s `Project` arm's "decline"
+leg, so the tracked schema over-reports it (claims a data var survives that evaluation
+drops). Inert today (no rule reads the post-projection schema of a coord projection, and
+the new rule reads only the schema *entering* `p1`), but a schema-lie of the #60/#109
+family — and the reason the coord-projection soak generator is kept out of
+`test_tracked_schema_agrees_with_evaluation`.
+
+Still open: **W7 §2** (#103), the "schema lies" items **#60**, **#117** and **#162**, and
+**W8** (#106). Deferred by design: #91, #107.
