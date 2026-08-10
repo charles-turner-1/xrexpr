@@ -609,6 +609,21 @@ weighted reduce are modelled again instead of barriered.
 > rather than a dim's. A bare closer needs no such term: it clears every dim, minted weight
 > dims included, so nothing survives for a coord to be missing from.
 
+> **The select rule's design decision now has a home (2026-08-10): #158.** The obligations
+> above — reading `w.dims` at optimise time, and doing so for a pass that runs *before any
+> compute* — are exactly what #158 proposes to sanction: a second, **coord/index-aware
+> optimisation pass**, separate from the metadata-only core and bound by a written contract
+> that stops short of eager evaluation. So the design decision this section defers — *whether
+> and how to admit rewrites that consult more than dim/schema metadata* — is #158's to make,
+> and **#107 is now a sub-issue of it**. One boundary #107 forces #158 to settle explicitly:
+> the weighted-select hop **transforms a payload** — it subsets `w` (`w.isel(lat=0)`) into
+> the emitted plan — where #158 as written leans toward metadata-informed *symbolic* rewrites
+> and is wary of anything execution-adjacent. Subsetting `w` stays *lazy* (the `isel` defers),
+> so it fits the pass; but #107 is the case that makes #158's contract say out loud whether a
+> rewrite may construct a new (lazy) payload or only reorder metadata. Reading `w.dims` is
+> structural, not a compute, so it is `NeedsCoords`/`NeedsIndexes` evidence rather than
+> #158's more fraught `NeedsValues`.
+
 ## 9. What this retires from W1
 
 [`01-grouped-barrier.md`](./01-grouped-barrier.md) should still land first, unchanged: it
