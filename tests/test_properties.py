@@ -39,6 +39,12 @@ interleavings. The unsafe-argument path (a data- or per-variable-shaped argument
 to :class:`~xrexpr.ir.Opaque`) is left to the hand-written suite; the generator draws only
 the safe forms, so a drawn chain never turns an elementwise op into a barrier by accident.
 
+**Advanced (``DataArray``) indexers** are likewise not drawn: :func:`indexers` produces only
+slices, positions, labels and scalars, so no generated select carries one and none demotes
+to :class:`~xrexpr.ir.Opaque` by advanced indexing. As with the unsafe-elementwise path
+above, that demotion is pinned by the hand-written suite; its dim modelling is still open
+(#60).
+
 **Scattered NaNs** in the float data (see :func:`datasets`) are what give the
 equality-vs-eager property its teeth for the elementwise ops above: ``fillna`` and every
 skipna reduce treat a NaN specially, so a value-level reorder bug changes an answer only

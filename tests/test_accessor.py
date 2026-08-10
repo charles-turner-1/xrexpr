@@ -346,6 +346,29 @@ def test_fillna_with_dataarray_records_opaque_and_replays_equal(ds):
     assert_equal(chain.collect(), ds.fillna(other))
 
 
+def test_dataarray_indexed_select_records_opaque_and_replays_equal(ds):
+    """A valid ``isel(<DataArray>)`` chain demotes to ``Opaque`` (advanced index) and replays to eager."""
+    idx = xr.DataArray([0, 2], dims="time")
+    chain = ds.plan.isel(time=idx).sum("lat")
+    assert any(isinstance(n, Opaque) and n.name == "isel" for n in chain._ops)
+    assert_equal(chain.collect(), ds.isel(time=idx).sum("lat"))
+
+
+def test_invalid_dataarray_select_chain_raises_instead_of_laundering(ds):
+    """An invalid ``isel(<DataArray>).mean().isel(time=0)`` chain is refused, not silently reordered.
+
+    Notes
+    -----
+    The bug this fixes: the advanced ``isel`` was misfiled as a dim-dropping ``Scalar``, so
+    the bare ``mean()`` understated its ``consumes`` and the trailing ``isel(time=0)`` was
+    swapped in front — returning a value where the eager chain errors. The advanced select
+    is now ``Opaque``, ``time`` survives the fold, and the trailing select is refused.
+    """
+    idx = xr.DataArray([0, 2], dims="time")
+    with pytest.raises(InvalidExpressionError):
+        ds.plan.isel(time=idx).mean().isel(time=0).collect()
+
+
 def test_scalar_select_crosses_fillna_matches_eager(ds):
     """A scalar ``isel`` hops in front of a ``fillna`` and a ``mean``, and still equals eager.
 

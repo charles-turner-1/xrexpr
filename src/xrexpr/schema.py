@@ -29,7 +29,7 @@ from frozendict import frozendict
 from packaging.version import Version
 from typing_extensions import assert_never
 
-from xrexpr.indexers import Indexer
+from xrexpr.indexers import Advanced, Indexer, classify
 from xrexpr.ir import (
     ALL_DIMS,
     AllDims,
@@ -870,7 +870,7 @@ def to_opnode(
                 kwargs=kw,
                 consumes=_dim_spec(args, kwargs, position),
             )
-        case SelectSpec(name=select):
+        case SelectSpec(name=select) if not _select_has_advanced(args, kwargs):
             return Select(
                 name=select,
                 args=args,
@@ -903,10 +903,13 @@ def to_opnode(
             variables := _projected_names(args)
         ) is not None:
             return Project(name=getitem, args=args, kwargs=kw, variables=variables)
-        case ElementwiseSpec() | ProjectSpec() | None:
-            # An elementwise call with an unsafe (data-/per-variable-shaped) argument, a
+        case SelectSpec() | ElementwiseSpec() | ProjectSpec() | None:
+            # A select carrying an advanced (``DataArray``/``Variable``) indexer, an
+            # elementwise call with an unsafe (data-/per-variable-shaped) argument, a
             # ``__getitem__`` whose key names no variable (a mask, a dict), or a method
-            # with no row at all: all are replayed verbatim and never reordered.
+            # with no row at all: all are replayed verbatim and never reordered. The select
+            # barriers because its dim effect depends on the indexed dim -- see
+            # ``_select_has_advanced``.
             return Opaque(name=name, args=args, kwargs=kw)
         case unreachable:
             assert_never(unreachable)
@@ -943,6 +946,41 @@ def _elementwise_safe(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> bool:
     """
     unsafe = (xr.DataArray, xr.Dataset, dict, list, tuple, np.ndarray)
     return not any(isinstance(v, unsafe) for v in (*args, *kwargs.values()))
+
+
+def _select_has_advanced(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> bool:
+    """Whether any of a select's indexers is an advanced (``DataArray``) indexer.
+
+    Parameters
+    ----------
+    args : tuple
+        The select's positional arguments.
+    kwargs : Mapping
+        The select's keyword arguments.
+
+    Returns
+    -------
+    bool
+        ``True`` when at least one indexer classifies as
+        :class:`~xrexpr.indexers.Advanced`, so the whole select must record
+        :class:`~xrexpr.ir.Opaque`; ``False`` when every indexer is one the schema layer
+        can evolve exactly.
+
+    Notes
+    -----
+    The decision is routed through :func:`~xrexpr.indexers.classify` -- the sole
+    constructor of the value taxonomy -- rather than re-testing the raw shapes here, so
+    "what is an advanced indexer" has one definition. A select barriers because an advanced
+    indexer's dim effect depends on the *indexed dim* (orthogonal keeps it, vectorized
+    drops it and adds new dims), which no single indexer value carries; only an
+    :class:`~xrexpr.ir.Opaque` node can withhold trust in the folded schema (a ``Select``
+    is always inside ``optimize._trusted_prefix``). The shape of an argument deciding the
+    kind has precedent in :func:`_elementwise_safe` and :func:`_projected_names`.
+    """
+    return any(
+        isinstance(classify(v), Advanced)
+        for v in _select_indexer(args, kwargs).values()
+    )
 
 
 def _projected_names(args: tuple[Any, ...]) -> tuple[Hashable, ...] | None:

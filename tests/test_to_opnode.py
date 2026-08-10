@@ -225,6 +225,33 @@ def test_isel_option_kwarg_not_treated_as_dim(schema):
     assert node.kwargs == frozendict({"time": 0, "drop": True})  # verbatim for replay
 
 
+def test_isel_dataarray_indexer_is_opaque(schema):
+    """``isel(time=<DataArray>)`` is advanced indexing, so the whole select demotes to ``Opaque``.
+
+    Notes
+    -----
+    An advanced indexer's dim effect depends on the indexed dim — orthogonal keeps it,
+    vectorized drops it and adds new dims — which no single indexer value carries, and only
+    an ``Opaque`` node can withhold trust in the folded schema. So the guard
+    (``_select_has_advanced``) refuses it and the call replays verbatim, un-reordered.
+    """
+    node = to_opnode("isel", (), {"time": xr.DataArray([0, 1], dims="time")})
+    assert isinstance(node, Opaque)
+    assert node.name == "isel"  # the real name, not remapped
+
+
+def test_sel_dataarray_indexer_is_opaque(schema):
+    """``sel(<DataArray>)`` is advanced indexing too, so it demotes to ``Opaque``."""
+    node = to_opnode("sel", (), {"time": xr.DataArray([0, 1], dims="points")})
+    assert isinstance(node, Opaque)
+
+
+def test_isel_scalar_indexers_alongside_a_dataarray_all_demote(schema):
+    """One advanced indexer barriers the whole select, plain indexers included."""
+    node = to_opnode("isel", (), {"lat": 0, "time": xr.DataArray([0, 1], dims="time")})
+    assert isinstance(node, Opaque)
+
+
 def test_sel_scalar_label_drops_dim(schema):
     """A scalar ``sel`` label drops its dim, exactly as a scalar ``isel`` position does."""
     node = to_opnode("sel", (), {"lat": 1})

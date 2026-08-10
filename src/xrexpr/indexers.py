@@ -21,12 +21,15 @@ See ``docs/internals/values.md``.
 """
 
 import numbers
+from collections.abc import Hashable
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
 import numpy as np
+import xarray as xr
 
 __all__ = [
+    "Advanced",
     "ForwardSlice",
     "GeneralSlice",
     "Indexer",
@@ -368,9 +371,88 @@ class Label:
         return self.value
 
 
+@dataclass(frozen=True)
+class Advanced:
+    """An ``xr.DataArray``/``xr.Variable`` indexer — xarray's *advanced* indexing.
+
+    Attributes
+    ----------
+    dims : tuple of Hashable
+        The indexer array's own dims. The array itself is *not* stored, so the variant
+        stays hashable (a raw ``DataArray`` is not) and ``Select`` with it stays hashable
+        too.
+    drops_dim : bool
+        Always ``False`` — but this is a placeholder, not the truth. Whether the dim is
+        dropped depends on the *dim being indexed*, which this value does not carry:
+        **orthogonal** indexing (``dims`` contains that dim) keeps it, resized;
+        **vectorized** indexing (``dims`` is a fresh name) drops it and adds the array's
+        dims. That decision needs the dim key, which lives one level up, so it is not
+        modelled here yet.
+
+    Notes
+    -----
+    Every select carrying an :class:`Advanced` records :class:`~xrexpr.ir.Opaque` at
+    ``schema.to_opnode`` (``schema._select_has_advanced``), because a lone indexer cannot
+    move the trust boundary — only an op can — and neither ``drops_dim`` nor a fixed
+    :meth:`size` can honestly describe an effect that depends on the indexed dim. So this
+    variant is never emitted on a live plan: it *represents* the value (the alternative was
+    the ``_scalar`` catch-all silently modelling it as a dim-dropping :class:`Scalar`, which
+    is both wrong and unhashable) and *signals* the demotion. The orthogonal/vectorized
+    modelling that makes it a live ``Select`` again is the follow-up (#60).
+
+    A 0-d ``DataArray`` (``dims == ()``) is scalar-like eagerly but is barriered here too,
+    conservatively; distinguishing it is part of that same follow-up.
+    """
+
+    dims: tuple[Hashable, ...]
+    drops_dim: ClassVar[bool] = False
+
+    def size(self, current: int) -> int:
+        """Never returns: an advanced indexer's size depends on the indexed dim.
+
+        Parameters
+        ----------
+        current : int
+            The dim's current length. Unused.
+
+        Returns
+        -------
+        int
+            Never returned.
+
+        Raises
+        ------
+        AssertionError
+            Always. A select carrying this variant is :class:`~xrexpr.ir.Opaque`, so
+            ``apply_schema`` never sizes it; the effect is dim-dependent and unmodelled.
+        """
+        raise AssertionError(
+            "an advanced indexer is never emitted; its select is Opaque"
+        )
+
+    def to_raw(self) -> Any:
+        """Never returns: the array is not stored, and the op replays as Opaque.
+
+        Returns
+        -------
+        Any
+            Never returned.
+
+        Raises
+        ------
+        AssertionError
+            Always. The verbatim ``DataArray`` lives on the :class:`~xrexpr.ir.Opaque`
+            node's ``args``/``kwargs``, which is what replays; this variant is never on a
+            live plan to be emitted.
+        """
+        raise AssertionError(
+            "an advanced indexer is never emitted; its select is Opaque"
+        )
+
+
 #: One dim's indexer, as a closed sum. ``match`` over this binds the shape the optimiser and
 #: schema layers reason about; :func:`classify` is the sole constructor from raw values.
-Indexer = Scalar | ForwardSlice | GeneralSlice | Positions | Mask | Label
+Indexer = Scalar | ForwardSlice | GeneralSlice | Positions | Mask | Label | Advanced
 
 
 def _is_int(x: Any) -> bool:
@@ -516,4 +598,10 @@ def classify(value: Any) -> Indexer:
         if all(_is_int(x) for x in value):  # pure-bool already handled above
             return Positions(tuple(int(x) for x in value))
         return Label(value)  # a label sequence, or a mixed one
+    if isinstance(value, xr.DataArray | xr.Variable):
+        # A DataArray/Variable indexer is xarray's advanced indexing, whose dim effect
+        # depends on the indexed dim (see ``Advanced``). Represent it rather than letting
+        # it fall to the ``_scalar`` catch-all, which would model it as a dim-dropping
+        # ``Scalar`` -- wrong, and unhashable.
+        return Advanced(dims=tuple(value.dims))
     return _scalar(value)  # anything else drops its dim
