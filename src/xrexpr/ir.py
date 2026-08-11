@@ -93,7 +93,9 @@ class Reduce:
     kwargs : frozendict
         The call's keyword arguments, verbatim.
     consumes : DimSet
-        The dims the reduction removes.
+        The dims the reduction names. What it *does* to them depends on
+        :attr:`keepdims`: an ordinary reduce **removes** them; a ``keepdims=True`` one
+        **resizes** each to 1 and keeps it (see :attr:`keepdims`).
 
     Notes
     -----
@@ -115,6 +117,20 @@ class Reduce:
         object.__setattr__(self, "kwargs", frozendict(self.kwargs))
         if not isinstance(self.consumes, AllDims):
             object.__setattr__(self, "consumes", frozenset(self.consumes))
+
+    @property
+    def keepdims(self) -> bool:
+        """Whether the reduction keeps its named dims at size 1 (``keepdims=True``).
+
+        Returns
+        -------
+        bool
+            ``True`` when the call passed ``keepdims=True`` — the reduce then resizes
+            each dim in :attr:`consumes` to 1 rather than removing it. Derived from the
+            verbatim ``kwargs``, so it cannot disagree with what replay does (the
+            ``Project.single`` precedent).
+        """
+        return bool(self.kwargs.get("keepdims", False))
 
 
 @dataclass(frozen=True)

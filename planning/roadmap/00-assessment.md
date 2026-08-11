@@ -13,7 +13,7 @@ the plan for what comes after them.)*
 - [x] W4 — chunk-spec taxonomy (closes the W8 Rust gate)
 - [x] W5 — Elementwise + its cross rules
 - [x] W6 — Scan gains its dims
-- [~] W7 — small wins (§1, §2, §3, §5, §10 done — the rule strand complete; §9 modelled as #117)
+- [~] W7 — small wins (§1, §2, §3, §5, §9, §10 done — the rule strand complete; §9/#117 modelled `keepdims`)
 - [ ] W8 — PyO3 spike (now ungated; unscheduled)
 - [x] W10 — documentation site
 
@@ -482,3 +482,36 @@ Still open: the "schema lies" items **#60**, **#117** and **#162**, and **W8** (
 Deferred by design: #91, #107. **With §2 landed, W7's small-wins rule strand is
 complete** — what remains across the whole roadmap is the schema-lies bugs and the gated,
 unscheduled Rust spike.
+
+## Checkpoint — W7 §9 / #117 landed (2026-08-11)
+
+A status entry, not a revision. **#117 is done** — `keepdims=True` is *modelled* rather
+than refused (`07-small-wins.md` §9). It was recorded `Opaque` since #96 (the conservative
+fix for the live half); now it records an ordinary `Reduce` and a **derived `Reduce.keepdims`
+property** (the `Project.single` precedent) tells the three dispatch sites the named dims
+are *resized to 1*, not removed. So a `mean(keepdims=True)` no longer barriers the chain: a
+disjoint select hops it, and a select on a kept dim is *left* (an `immovable` `dim_effect`
+mirroring `WindowedReduce`, not the plain reduce's `invalid`) rather than raised.
+
+Two facts the spec (`07-small-wins.md` §9) predated:
+
+- **The coordinate half was underspecified, and it's a drop, not a keep.** Measured against
+  xarray 2026.7.0: `mean("time", keepdims=True)` keeps `time` at size 1 in every data
+  variable but **drops every coordinate spanning it** — the `time` dim-coord *and* a non-dim
+  `ref(time)` both go (a reduced dim has no meaningful label). So `apply_schema` is a hybrid
+  of `_aggregated` (drop spanning coords) and a resize (keep data-var dims, size → 1), and
+  reuses neither — it gets a dedicated `_keepdims_reduced` helper alongside the other two.
+- **The lowering fusion refusal had to land in the same PR, and did.** A modelled `keepdims`
+  closer now *passes* the `isinstance(closer, Reduce)` guard, so each `_fuse_*` gained an
+  `or closer.keepdims` refusal — otherwise `groupby(...).mean(keepdims=True)` would fuse into
+  a `GroupedReduce` whose semantics are wrong. `Opaque` gave this for free before; the guard
+  restores it, and the pair demotes to a verbatim `Opaque` pair exactly as it used to.
+
+The property generator's plain reduce draw now carries `keepdims`, so the size-exactness
+property checks the kept-at-1 dims exactly; the builder-closer refusal is pinned directly in
+`test_lower.py` (all three families) rather than via the soak, where it would only generate
+`Opaque`-demoted chains the tracked-schema property assumes away.
+
+Still open: the "schema lies" items **#162** and, tracked as an *optimisation* now rather
+than a bug, **#166** (#60's vectorized-modelling half — #60 itself closed, correctness having
+shipped in #159); and **W8** (#106). Deferred by design: #91, #107.

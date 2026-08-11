@@ -404,6 +404,16 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
     sizes = dict(schema.sizes)
 
     match node:
+        case Reduce(consumes=consumes) as reduce if reduce.keepdims:
+            # ``keepdims=True`` keeps every named dim at size 1 rather than removing it:
+            # data variables keep their dims, only coordinates spanning a resized dim are
+            # dropped (a mean over ``time`` has no meaningful ``time`` label -- verified
+            # against xarray 2026.7.0). Contrast the plain reduce below, which drops the
+            # dim from the variables outright.
+            over = resolve_dims(consumes, schema.dim_names)
+            variables, coord_names = _keepdims_reduced(variables, coord_names, over)
+            for dim in over:
+                sizes[dim] = 1
         case Reduce(consumes=consumes):
             variables, coord_names = _aggregated(
                 variables, coord_names, resolve_dims(consumes, schema.dim_names)
@@ -618,6 +628,45 @@ def _indexed(
         name: tuple(d for d in var_dims if d not in over)
         for name, var_dims in variables.items()
     }
+
+
+def _keepdims_reduced(
+    variables: dict[Hashable, tuple[Hashable, ...]],
+    coord_names: set[Hashable],
+    over: frozenset[Hashable],
+) -> tuple[dict[Hashable, tuple[Hashable, ...]], set[Hashable]]:
+    """Apply a ``keepdims`` reduction: dims are kept (resized to 1), spanning coords dropped.
+
+    Parameters
+    ----------
+    variables : dict
+        The schema's variables entering the op, name → dims.
+    coord_names : set of Hashable
+        Which of those names are coordinates.
+    over : frozenset of Hashable
+        The dims being reduced and kept at size 1.
+
+    Returns
+    -------
+    tuple of (dict, set)
+        Every variable with its dims **unchanged**, minus the coordinates spanning
+        ``over``, and the coordinate names among the survivors.
+
+    Notes
+    -----
+    ``keepdims=True`` keeps each reduced dim at size 1 rather than removing it, so unlike
+    ``_aggregated`` the data variables keep their dims — the caller resizes the kept dims
+    to 1. Coordinates still go the same way: one spanning a reduced dim is dropped, because
+    its labels have no meaningful value after the reduction (``time`` and a non-dim
+    ``ref(time)`` both go from ``mean("time", keepdims=True)`` — verified against xarray
+    2026.7.0). Compare ``_aggregated``, which additionally strips the dim from variables.
+    """
+    kept = {
+        name: var_dims
+        for name, var_dims in variables.items()
+        if not (name in coord_names and not over.isdisjoint(var_dims))
+    }
+    return kept, coord_names & set(kept)
 
 
 def _minted(
@@ -860,15 +909,9 @@ def to_opnode(
 
     match op_spec(name):
         case ReduceSpec(dim_arg=position):
-            if kwargs.get("keepdims", False):
-                # ``keepdims=True`` *keeps* every reduced dim at size 1, so no ``Reduce``
-                # this function could build would be honest: neither a named ``consumes``
-                # nor ``ALL_DIMS`` describes it, and an empty one is worse than either (it
-                # empties ``blocks``, so a select hops in front and the replay raises).
-                # Refusing is the house posture for a call we don't model;
-                # ``07-small-wins.md`` §9 (#117) specs the modelling, whose shape is
-                # ``WindowedReduce``'s.
-                return Opaque(name=name, args=args, kwargs=kw)
+            # ``keepdims=True`` is modelled, not refused: the named dims are kept at size
+            # 1 rather than removed, which the derived ``Reduce.keepdims`` carries and
+            # ``dim_effect``/``apply_schema`` read off ``consumes`` (the same named dims).
             return Reduce(
                 name=name,
                 args=args,
@@ -1062,9 +1105,10 @@ def _dim_spec(
     ``mean()``: a bare pass over every dim is a bare pass whatever spells it. (``diff``
     makes its dim a required positional, so its bare case can't arise.)
 
-    ``keepdims=True`` is **not** handled here, because there is no answer this function
-    could give: the dims survive at size 1, so neither a named ``consumes`` nor
-    ``ALL_DIMS`` describes the call. :func:`to_opnode` refuses it outright instead.
+    ``keepdims=True`` needs no special case here: the named dims are exactly the same
+    set whether they are removed or kept at size 1, so this returns them unchanged and the
+    derived :attr:`~xrexpr.ir.Reduce.keepdims` tells ``dim_effect``/``apply_schema`` which
+    of the two the reduce does.
     """
     if "dim" in kwargs:
         dim = kwargs["dim"]
