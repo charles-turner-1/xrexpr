@@ -482,3 +482,28 @@ Still open: the "schema lies" items **#60**, **#117** and **#162**, and **W8** (
 Deferred by design: #91, #107. **With §2 landed, W7's small-wins rule strand is
 complete** — what remains across the whole roadmap is the schema-lies bugs and the gated,
 unscheduled Rust spike.
+
+## Checkpoint — #60 closed, its optimisation half refiled (2026-08-11)
+
+A status entry, not a revision. **#60 is closed** — as the *correctness* bug it was filed
+for, which shipped in #159 ("#60 PR 1", 2026-08-10). A `DataArray`/`Variable` indexer no
+longer falls to `classify`'s `_scalar` catch-all: it classifies as the `indexers.Advanced`
+variant (carrying the indexer's own `dims`, hashable), and any select carrying a
+*vectorized* one records `Opaque` via the `schema._select_has_advanced` guard. So the live
+defect — a mis-evolved schema letting a downstream bare `mean()` launder an *invalid* chain
+into a replayable plan — is gone: `ds.plan.isel(time=da).mean().isel(time=0)` now raises
+`InvalidExpressionError`. The **orthogonal** case is modelled exactly (`_orthogonal_advanced`
+normalises it to plain `.values` before classification); the **vectorized** case is a safe
+`Opaque` over-approximation.
+
+That leaves only #60's exact-vectorized-schema bullet, which is pure **optimisation**
+(letting a valid vectorized-indexer chain reorder instead of barriering), not correctness —
+#159's own "PR 2" follow-up. Refiled as a **standalone** issue **#166**, deliberately *not*
+nested under #158: modelling a vectorized indexer is a pass-1, metadata-only job (result
+dims/sizes come from the indexer's shape, not coordinate/index values), so in #158's
+taxonomy today's barrier is `Unmodelled`, which #158's coord/index-aware second pass does
+not target. The only touchpoint is a label move if #158 lands first.
+
+Still open: the "schema lies" items **#117** and **#162** (#60's remainder now tracked as
+the #166 *optimisation*, no longer a schema-lie bug), **#166** itself, and **W8** (#106).
+Deferred by design: #91, #107.
