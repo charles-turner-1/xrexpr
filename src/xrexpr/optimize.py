@@ -1229,9 +1229,107 @@ def _pushable_rechunk(node: Rechunk) -> bool:
     return True
 
 
+def _mergeable_rechunk(node: Rechunk) -> bool:
+    """Report whether ``node`` is a pure mapping-form rechunk two of which may merge.
+
+    Parameters
+    ----------
+    node : Rechunk
+        The rechunk to test.
+
+    Returns
+    -------
+    bool
+        ``True`` when ``node`` names its dims (mapping form) and every spec it carries is
+        one a merge can compose; ``False`` for the uniform, empty and barrier forms.
+
+    Notes
+    -----
+    Two conditions, both load-bearing:
+
+    - **Mapping form** — ``node.uniform is None`` *and* ``node.chunks`` is non-empty. A
+      uniform positional spec (``chunk(100)``, ``chunk("auto")``, ``chunk((100, 400,
+      500))``) rechunks *every* dim and does not compose by dict union, so it cannot merge
+      with a per-dim mapping; and a bare ``chunk()`` names no dim while still touching all
+      of them, so a union cannot capture its effect either. Both are left alone.
+    - **Pushable** — :func:`_pushable_rechunk` holds, reused here as the single policy site.
+      It barriers **option kwargs** (``token``, ...), which a rebuilt node cannot carry —
+      the same faithfulness limit that makes the merged node drop ``kwargs`` — and the
+      **extent-dependent specs** (``BlockSeq``/``Auto``/``ByteSize``/``OpaqueChunk``), so
+      the specs a merge composes are confined to ``SingleSize``/``FullDim``/``NoChange``,
+      whose :meth:`~xrexpr.chunks.SingleSize.to_raw` values round-trip through
+      :func:`~xrexpr.chunks.classify_chunk`.
+    """
+    return node.uniform is None and bool(node.chunks) and _pushable_rechunk(node)
+
+
+def merge_adjacent_rechunks(nodes: Plan, schema: SchemaState) -> Plan | None:
+    """Fuse an adjacent pair of mapping-form ``chunk`` calls into one.
+
+    Parameters
+    ----------
+    nodes : Plan
+        The plan to rewrite.
+    schema : SchemaState
+        The schema entering the plan. Unused — this rule is *syntactic*, deciding on the
+        two nodes' own specs.
+
+    Returns
+    -------
+    Plan or None
+        The plan with one adjacent ``(Rechunk, Rechunk)`` pair replaced by a single merged
+        node, or ``None`` when no pair merges.
+
+    Notes
+    -----
+    ``chunk({"time": 100}).chunk({"lat": 50})`` records two :class:`~xrexpr.ir.Rechunk`
+    nodes where one ``chunk({"time": 100, "lat": 50})`` suffices — shorter, and a strictly
+    better input to :func:`pushdown_selects_past_rechunks` than two adjacent ones. Both
+    nodes must be :func:`_mergeable_rechunk` (mapping form, pushable); uniform, empty and
+    barrier forms are left where they are.
+
+    Dask applies a later ``chunk`` per dim *on top of* an earlier one, so the merge is
+    **later-wins** — with one exception. A later :class:`~xrexpr.chunks.NoChange`
+    (``chunk({dim: None})``, "leave this dim as it is") must **not** override an earlier
+    concrete spec on the same dim: ``chunk({"time": 100}).chunk({"time": None})`` keeps
+    ``time`` at 100-blocks, where a plain ``{**r1, **r2}`` union would drop it to the base's
+    single block (verified against dask). So a later ``NoChange`` fills a dim only when the
+    earlier node left it unspecified, while every concrete later spec wins outright.
+
+    The merged node is rebuilt exactly as :func:`pushdown_selects_past_rechunks` rebuilds a
+    trimmed one — mapping form, ``kwargs`` dropped (safe, since both inputs were pushable
+    and so carried no option kwarg). A leading ``Mapping`` in ``args`` makes
+    ``Rechunk.__post_init__`` derive ``uniform = None``, so the result is again a clean
+    mapping-form node the rule can merge further.
+
+    One merge per call; :func:`optimize`'s fixpoint collapses a run of three. The rewrite
+    replaces two nodes with one, shrinking the plan, so the termination measure holds on its
+    first component — the same footing as :func:`merge_adjacent_projects`.
+    """
+    for i in range(len(nodes) - 1):
+        match nodes[i], nodes[i + 1]:
+            case (Rechunk() as r1, Rechunk() as r2) if _mergeable_rechunk(
+                r1
+            ) and _mergeable_rechunk(r2):
+                merged = dict(r1.chunks)
+                for dim, spec in r2.chunks.items():
+                    if isinstance(spec, NoChange):
+                        merged.setdefault(dim, spec)
+                    else:
+                        merged[dim] = spec
+                node = Rechunk(
+                    name=r1.name,
+                    args=({dim: s.to_raw() for dim, s in merged.items()},),
+                    chunks=frozendict(merged),
+                )
+                return list(nodes[:i]) + [node] + list(nodes[i + 2 :])
+    return None
+
+
 _RULES: tuple[Rule, ...] = (
     merge_adjacent_selects,
     merge_adjacent_projects,
+    merge_adjacent_rechunks,
     eliminate_projection_before_coord,
     pushdown_selects,
     pushdown_projections,

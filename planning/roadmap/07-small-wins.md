@@ -47,6 +47,37 @@ may still be valid eagerly). Shrinks the plan → termination measure
 
 ## 2. Merge adjacent `Rechunk`s
 
+> **Closed (2026-08-11)** as `optimize.merge_adjacent_rechunks`, gated by a
+> `_mergeable_rechunk` predicate (#103). The spec below is what was implemented, plus two
+> facts it did not carry:
+>
+> - **The later-wins union `{**r1.chunks, **r2.chunks}` is subtly wrong for a *later*
+>   `NoChange`.** `chunk({dim: None})` asks nothing of the dim ("leave it as it is"), so
+>   `chunk({"time": 100}).chunk({"time": None})` keeps `time` at 100-blocks where the plain
+>   union would drop it to :class:`~xrexpr.chunks.NoChange` and thus to the base's single
+>   block. Measured against dask, not reasoned. A later `NoChange` is therefore
+>   non-overriding (`setdefault` onto the earlier mapping); every concrete later spec still
+>   wins. The three specs that reach the merge — `SingleSize`/`FullDim`/`NoChange`, all that
+>   `_pushable_rechunk` admits — are exactly the ones this rule has to get right.
+> - **"Pure mapping-form (empty positional `args`)" is really `uniform is None` *and*
+>   non-empty `chunks`.** `_mergeable_rechunk` reads the derived `Rechunk.uniform` rather
+>   than inspecting `args`, so `chunk()` (empty, all-dims default — neither form) is excluded
+>   alongside the uniform positional specs the spec names. Reusing `_pushable_rechunk` as the
+>   second condition folds in the option-kwarg and extent-dependent barriers for free, so the
+>   rule is two predicate calls rather than a restated ladder.
+>
+> **Coverage note the spec did not anticipate.** Two adjacent *mergeable* chunks are too
+> rare for the random soak to fire the rule — instrumented at **0** over 250 examples — so,
+> the `select_runs`/`coord_projection_plans` precedent, a dedicated `rechunk_runs` generator
+> asks for the run by name with an anti-vacuity `len(optimised) == 1`. Its equality half
+> uses a new `_assert_chunking_equal` (replay-without-compute, mirroring `test_accessor`'s
+> `_replayed`) rather than `_assert_replays_equal`: rechunking preserves *values* whatever
+> topology it lands on, so the materialised-value check cannot tell a correct merge from a
+> broken one — only `.chunks` can, and it was confirmed to fail against a naive-union merge.
+> Goldens in `test_optimize.py` (disjoint union, later-wins, `NoChange`-both-directions,
+> uniform/extent-dependent/option-kwarg barriers, run-of-three, idempotence) plus
+> equality-vs-eager in `test_accessor.py`.
+
 `chunk({"time": 100}).chunk({"lat": 50})` → one `chunk({"time": 100, "lat": 50})`:
 dask applies later specs per dim on top of earlier ones, so the merged mapping is
 later-wins (`{**r1.chunks, **r2.chunks}`). Fire only when **both** nodes pass

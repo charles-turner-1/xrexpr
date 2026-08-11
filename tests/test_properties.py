@@ -243,6 +243,29 @@ def _assert_replays_equal(optimised, eager):
     assert_equal(optimised.compute(), eager.compute())
 
 
+def _assert_chunking_equal(proxy, eager):
+    """Assert an optimised ``.plan`` chain replays to the same block topology as eager.
+
+    Parameters
+    ----------
+    proxy : xrexpr.accessor.LazyProxy
+        The uncollected ``.plan`` chain, replayed through the optimiser but *not* computed,
+        so its chunking survives to be inspected.
+    eager : xarray.Dataset or xarray.DataArray
+        The same chain applied eagerly, dask-backed.
+
+    Notes
+    -----
+    :func:`_assert_replays_equal` computes both sides, which materialises the chunking away —
+    right where the claim is a value, useless where it is the topology. A rechunk preserves
+    values whatever blocks it lands on, so only ``.chunks`` can tell a correct merge from one
+    that dropped a spec or resolved a repeated dim the wrong way. Replaying without computing
+    is what keeps ``.chunks`` populated, mirroring ``test_accessor``'s ``_replayed`` helper.
+    """
+    replayed = proxy._replay(emit(proxy._optimized()))
+    assert dict(replayed.chunks) == dict(eager.chunks)
+
+
 def _dim_names(ds):
     """What ``to_lower_ir`` needs of the base dataset: its dim names, and nothing else.
 
@@ -1011,6 +1034,34 @@ def select_runs(draw):
     return ds, calls
 
 
+@st.composite
+def rechunk_runs(draw):
+    """A dataset paired with a run of >=2 adjacent mapping-form ``chunk`` calls that merge.
+
+    Every drawn spec is one :func:`~xrexpr.optimize._pushable_rechunk` admits -- a block
+    size, ``-1`` or ``None`` -- so each node is mapping form *and* pushable, the two
+    conditions :func:`~xrexpr.optimize._mergeable_rechunk` needs. The barrier specs
+    (``"auto"``, byte targets, explicit block sequences) are drawn out, since a run
+    containing one would not fully fold and the anti-vacuity assertion below would fail; the
+    goldens in ``test_optimize.py`` cover the barriers instead.
+    """
+    ds = draw(datasets())
+    dims = sorted(map(str, ds.sizes))
+    n = draw(st.integers(min_value=2, max_value=4))
+    calls = []
+    for _ in range(n):
+        spec = {
+            dim: draw(
+                st.one_of(st.integers(1, ds.sizes[dim]), st.sampled_from([-1, None]))
+            )
+            for dim in draw(st.lists(st.sampled_from(dims), min_size=1, unique=True))
+        }
+        calls.append(
+            Call("chunk", spec) if draw(st.booleans()) else Call("chunk", **spec)
+        )
+    return ds, calls
+
+
 # --------------------------------------------------------------------------- #
 # properties
 # --------------------------------------------------------------------------- #
@@ -1212,6 +1263,29 @@ def test_adjacent_selects_collapse_without_changing_meaning(case):
 
     assert len(optimised) == 1, "a run of selects on distinct dims should fold to one"
     _assert_replays_equal(_apply(ds.plan, calls).collect(), _apply(ds, calls))
+
+
+@pytest.mark.skipif(not HAS_DASK, reason="rechunk replay needs a chunk manager")
+@SETTINGS
+@given(rechunk_runs())
+def test_adjacent_rechunks_fuse_without_changing_the_chunking(case):
+    """A run of mapping-form ``chunk`` calls folds to one node that lands on the eager blocks.
+
+    Two claims, and the second is the load-bearing one: the fold *fires* (so this cannot
+    pass vacuously against a merge that never merged), and the single node reaches the exact
+    block topology dask does by applying each call on top of the last —
+    :func:`_assert_chunking_equal`, not :func:`_assert_replays_equal`, because rechunking
+    preserves values whatever blocks it picks, so only ``.chunks`` can catch a dropped spec
+    or a repeated dim resolved the wrong way.
+    """
+    ds, calls = case
+    plan, _ = _build_plan(ds, calls)
+    optimised = optimize(
+        to_lower_ir(plan, _dim_names(ds)), SchemaState.from_dataset(ds)
+    )
+
+    assert len(optimised) == 1, "a run of mergeable rechunks should fold to one"
+    _assert_chunking_equal(_apply(ds.plan, calls), _apply(ds, calls))
 
 
 @SETTINGS
