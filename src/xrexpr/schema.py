@@ -438,6 +438,11 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
             # it produced exactly the phantom-dim state deriving exists to forbid. Declining
             # the whole projection over-reports in the same direction it used to, and stays
             # constructible.
+            #
+            # A projection naming a *coordinate* falls into that "decline" leg even though
+            # the coord is known, so the tracked schema over-reports it (claims a data var
+            # survives that evaluation drops). Safe -- no rule reads the post-projection
+            # schema of a coord projection -- but not exact; modelling it is #162.
             if all(n in schema.data_vars for n in names):
                 kept = {n: variables[n] for n in names}
                 # xarray prunes coordinates to those the *selected* variables still span,
