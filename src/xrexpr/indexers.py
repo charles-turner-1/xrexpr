@@ -391,17 +391,22 @@ class Advanced:
 
     Notes
     -----
-    Every select carrying an :class:`Advanced` records :class:`~xrexpr.ir.Opaque` at
-    ``schema.to_opnode`` (``schema._select_has_advanced``), because a lone indexer cannot
-    move the trust boundary — only an op can — and neither ``drops_dim`` nor a fixed
-    :meth:`size` can honestly describe an effect that depends on the indexed dim. So this
-    variant is never emitted on a live plan: it *represents* the value (the alternative was
-    the ``_scalar`` catch-all silently modelling it as a dim-dropping :class:`Scalar`, which
-    is both wrong and unhashable) and *signals* the demotion. The orthogonal/vectorized
-    modelling that makes it a live ``Select`` again is the follow-up (#60).
+    In practice this variant represents a **vectorized** indexer only. ``classify`` is
+    dim-blind, so it mints an :class:`Advanced` for *any* ``DataArray``/``Variable``; but
+    before a select's indexers reach it, ``schema._select_indexer`` normalises the
+    *orthogonal* ones — a 0-d array (scalar) or a 1-d array named after the dim it indexes —
+    to their plain ``.values``, since those index identically to a bare ``ndarray`` (see
+    ``schema._orthogonal_advanced``). What remains an :class:`Advanced` is an indexer that
+    drops its dim and mints the array's dims, which no positional indexer expresses.
 
-    A 0-d ``DataArray`` (``dims == ()``) is scalar-like eagerly but is barriered here too,
-    conservatively; distinguishing it is part of that same follow-up.
+    Every select carrying one records :class:`~xrexpr.ir.Opaque` at ``schema.to_opnode``
+    (``schema._select_has_advanced``): a lone indexer cannot move the trust boundary — only
+    an op can — and neither ``drops_dim`` nor a fixed :meth:`size` can honestly describe an
+    effect that mints dims. So this variant is never emitted on a live plan: it *represents*
+    the value (the alternative was the ``_scalar`` catch-all silently modelling it as a
+    dim-dropping :class:`Scalar`, both wrong and unhashable) and *signals* the demotion. The
+    full vectorized modelling that would make it a live ``Select`` is a further follow-up
+    (#60).
     """
 
     dims: tuple[Hashable, ...]

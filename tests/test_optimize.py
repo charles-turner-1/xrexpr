@@ -159,16 +159,31 @@ def test_bare_mean_then_select_raises_empty_dim_bug(schema):
         optimize(plan, schema)
 
 
-def test_a_select_does_not_cross_a_dataarray_select_barrier(schema):
-    """A ``DataArray``-indexed select is ``Opaque``, so a following select cannot hop it.
+def test_an_orthogonal_dataarray_select_hops_past_a_disjoint_reduce(schema):
+    """An orthogonal ``DataArray`` select is positional, so it reorders like any other select.
+
+    Notes
+    -----
+    ``isel(time=<DataArray dims=(time,)>)`` normalises to ``Positions``, so the select hops
+    past a disjoint ``mean("lat")`` exactly as a plain-list select would — the payoff of
+    modelling it rather than barriering it.
+    """
+    da = xr.DataArray([0, 2], dims="time")
+    plan = [_node("mean", "lat"), _node("isel", time=da)]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["isel", "mean"]
+
+
+def test_a_vectorized_dataarray_select_does_not_cross_a_following_select(schema):
+    """A vectorized ``DataArray`` select is ``Opaque``, so a following select cannot hop it.
 
     Notes
     -----
     A plain ``reduce("lat")`` in the first position would let ``isel(lon=0)`` hop to the
-    front (disjoint dims); the advanced-indexer ``Opaque`` blocks it instead, which is the
-    conservative barrier that keeps the mis-modelled schema from being trusted across it.
+    front (disjoint dims); the vectorized-indexer ``Opaque`` blocks it instead, the
+    conservative barrier that keeps the unmodelled dim-mint from being trusted across it.
     """
-    da = xr.DataArray([0, 1], dims="time")
+    da = xr.DataArray([0, 1], dims="points")
     plan = [_node("isel", time=da), _node("isel", lon=0)]
     out = optimize(plan, schema)
     assert [type(n).__name__ for n in out] == ["Opaque", "Select"]
@@ -181,10 +196,10 @@ def test_dataarray_select_then_bare_mean_then_select_raises(schema):
     -----
     ``isel(time=da)`` used to be misfiled as a dim-dropping ``Scalar``, dropping ``time``
     from the schema; the bare ``mean()`` then understated ``consumes`` and the trailing
-    ``isel(time=0)`` was silently swapped in front. Now the advanced select is ``Opaque``,
-    ``time`` survives the fold, and ``ALL_DIMS`` rejects the trailing select outright.
+    ``isel(time=0)`` was silently swapped in front. Now ``time`` survives the select (the
+    orthogonal indexer resizes it), and ``ALL_DIMS`` rejects the trailing select outright.
     """
-    da = xr.DataArray([0, 1], dims="points")
+    da = xr.DataArray([0, 2], dims="time")
     plan = [_node("isel", time=da), _node("mean"), _node("isel", time=0)]
     with pytest.raises(InvalidExpressionError):
         optimize(plan, schema)

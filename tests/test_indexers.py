@@ -217,8 +217,16 @@ def test_multidimensional_bool_array_is_not_a_mask():
     assert isinstance(classify(np.array([[True, False], [True, False]])), Label)
 
 
-def test_orthogonal_dataarray_indexer_classifies_as_advanced():
-    """A same-named ``DataArray`` indexer is ``Advanced``, carrying the indexed dim."""
+def test_dataarray_indexer_classifies_as_advanced():
+    """Any ``DataArray`` indexer is ``Advanced`` — ``classify`` is dim-blind.
+
+    Notes
+    -----
+    ``classify`` sees only the value, not the dim it indexes, so it cannot tell an
+    orthogonal indexer (which the schema layer normalises to plain values) from a vectorized
+    one; both land here. The orthogonal/vectorized split is ``schema``'s, made where the dim
+    key is known.
+    """
     idx = classify(xr.DataArray([0, 1], dims="time"))
     assert isinstance(idx, Advanced)
     assert idx.dims == ("time",)
