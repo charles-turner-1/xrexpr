@@ -836,6 +836,39 @@ def test_rechunk_and_reduce_pushdown_compose(chunky_ds):
     )
 
 
+@requires_dask
+def test_adjacent_rechunks_merge_to_one_op_matching_eager(chunky_ds):
+    """Two ``chunk`` calls over disjoint dims fuse to a single ``chunk`` op that matches eager.
+
+    Notes
+    -----
+    ``chunk({"time": 100}).chunk({"lat": 50})`` is one request written in two calls; the
+    merged node applies both at once, landing on the same topology dask reaches by applying
+    the later call on top of the earlier.
+    """
+    ds = chunky_ds
+    chain = ds.plan.chunk({"time": 100}).chunk({"lat": 2})
+    eager = ds.chunk({"time": 100}).chunk({"lat": 2})
+
+    assert_equal(chain.collect(), eager.compute())
+    assert chain.explain().count("Rechunk") == 1  # two calls, one op
+    replayed = _replayed(chain)
+    assert replayed.chunks["time"] == eager.chunks["time"]
+    assert replayed.chunks["lat"] == eager.chunks["lat"]
+
+
+@requires_dask
+def test_adjacent_rechunks_on_one_dim_are_later_wins_against_eager(chunky_ds):
+    """A repeated dim across two ``chunk`` calls lands on the later spec's topology, matching eager."""
+    ds = chunky_ds
+    chain = ds.plan.chunk({"time": 100}).chunk({"time": 250})
+    eager = ds.chunk({"time": 100}).chunk({"time": 250})
+
+    assert_equal(chain.collect(), eager.compute())
+    assert chain.explain().count("Rechunk") == 1
+    assert _replayed(chain).chunks["time"] == eager.chunks["time"]  # later 250 wins
+
+
 def test_compute_is_alias_for_collect(ds):
     """``.compute()`` is a synonym for ``.collect()``, not a recorded op: it returns the materialised result, not a proxy.
 

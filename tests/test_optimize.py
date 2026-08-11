@@ -21,7 +21,7 @@ import pytest
 import xarray as xr
 from frozendict import frozendict
 
-from xrexpr.chunks import SingleSize
+from xrexpr.chunks import NoChange, SingleSize
 from xrexpr.exceptions import InvalidExpressionError
 from xrexpr.indexers import classify
 from xrexpr.ir import ALL_DIMS, GroupedReduce, WeightedReduce, WindowedReduce
@@ -861,6 +861,116 @@ def test_rechunk_pushdown_is_idempotent(schema):
     plan = [
         _node("chunk", {"time": 100, "lat": 50}),
         _node("isel", time=0),
+    ]
+    once = optimize(plan, schema)
+    assert optimize(once, schema) == once
+
+
+def test_adjacent_rechunks_over_disjoint_dims_merge(schema):
+    """Two mapping-form ``chunk`` calls over disjoint dims fuse into one union node."""
+    plan = [
+        _node("chunk", {"time": 100}),
+        _node("chunk", {"lat": 50}),
+    ]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["chunk"]
+    assert out[0].chunks == frozendict({"time": SingleSize(100), "lat": SingleSize(50)})
+    assert out[0].args == ({"time": 100, "lat": 50},)  # replayable mapping form
+
+
+def test_adjacent_rechunks_on_one_dim_are_later_wins(schema):
+    """A repeated dim across two ``chunk`` calls takes the later spec, as dask applies it on top."""
+    plan = [
+        _node("chunk", {"time": 100}),
+        _node("chunk", {"time": 50}),
+    ]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["chunk"]
+    assert out[0].chunks == frozendict({"time": SingleSize(50)})
+
+
+def test_a_later_no_change_does_not_override_an_earlier_spec(schema):
+    """A later ``chunk({dim: None})`` leaves an earlier concrete spec on that dim in place.
+
+    Notes
+    -----
+    ``None`` asks nothing of the dim ("leave it as it is"), so ``chunk({"time": 100})``
+    followed by ``chunk({"time": None})`` keeps ``time`` at 100 -- a plain ``{**r1, **r2}``
+    union would wrongly drop it to :class:`~xrexpr.chunks.NoChange` (verified against dask).
+    """
+    plan = [
+        _node("chunk", {"time": 100}),
+        _node("chunk", {"time": None}),
+    ]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["chunk"]
+    assert out[0].chunks == frozendict({"time": SingleSize(100)})
+
+
+def test_a_leading_no_change_survives_when_the_dim_is_unspecified_earlier(schema):
+    """A ``NoChange`` on a dim no earlier node names is carried into the merged node."""
+    plan = [
+        _node("chunk", {"time": 100}),
+        _node("chunk", {"lat": None}),
+    ]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["chunk"]
+    assert out[0].chunks == frozendict({"time": SingleSize(100), "lat": NoChange()})
+
+
+def test_a_uniform_rechunk_in_either_position_blocks_the_merge(schema):
+    """A uniform positional ``chunk(100)`` next to a mapping-form ``chunk`` leaves the pair alone.
+
+    Notes
+    -----
+    A uniform spec rechunks *every* dim and does not compose by dict union, so neither
+    ordering may fuse -- the same taxonomy line
+    :func:`test_uniform_rechunk_forms_push_and_are_kept` draws for pushdown.
+    """
+    for plan in (
+        [_node("chunk", 100), _node("chunk", {"time": 50})],
+        [_node("chunk", {"time": 50}), _node("chunk", 100)],
+    ):
+        assert [n.name for n in optimize(plan, schema)] == ["chunk", "chunk"]
+
+
+def test_an_extent_dependent_rechunk_blocks_the_merge(schema):
+    """An ``"auto"`` spec in either node barriers the merge, as it does the select pushdown."""
+    for plan in (
+        [_node("chunk", {"time": "auto"}), _node("chunk", {"lat": 50})],
+        [_node("chunk", {"time": 100}), _node("chunk", {"lat": "auto"})],
+    ):
+        assert [n.name for n in optimize(plan, schema)] == ["chunk", "chunk"]
+
+
+def test_a_rechunk_option_kwarg_blocks_the_merge(schema):
+    """A rechunk carrying an option kwarg cannot merge, since the rebuilt node drops it."""
+    plan = [
+        _node("chunk", {"time": 100}, chunked_array_type="dask"),
+        _node("chunk", {"lat": 50}),
+    ]
+    assert [n.name for n in optimize(plan, schema)] == ["chunk", "chunk"]
+
+
+def test_a_run_of_three_rechunks_collapses_to_one(schema):
+    """The fixpoint fuses a run of three adjacent mapping-form ``chunk`` calls into a single node."""
+    plan = [
+        _node("chunk", {"time": 100}),
+        _node("chunk", {"lat": 50}),
+        _node("chunk", {"lon": 25}),
+    ]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["chunk"]
+    assert out[0].chunks == frozendict(
+        {"time": SingleSize(100), "lat": SingleSize(50), "lon": SingleSize(25)}
+    )
+
+
+def test_rechunk_merge_is_idempotent(schema):
+    """Merging adjacent rechunks is idempotent: a second pass over the merged plan changes nothing."""
+    plan = [
+        _node("chunk", {"time": 100}),
+        _node("chunk", {"lat": 50}),
     ]
     once = optimize(plan, schema)
     assert optimize(once, schema) == once

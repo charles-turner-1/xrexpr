@@ -13,7 +13,7 @@ the plan for what comes after them.)*
 - [x] W4 — chunk-spec taxonomy (closes the W8 Rust gate)
 - [x] W5 — Elementwise + its cross rules
 - [x] W6 — Scan gains its dims
-- [~] W7 — small wins (§1, §3, §5, §10 done; §2 the last rule left, §9 modelled as #117)
+- [~] W7 — small wins (§1, §2, §3, §5, §10 done — the rule strand complete; §9 modelled as #117)
 - [ ] W8 — PyO3 spike (now ungated; unscheduled)
 - [x] W10 — documentation site
 
@@ -449,3 +449,36 @@ family — and the reason the coord-projection soak generator is kept out of
 
 Still open: **W7 §2** (#103), the "schema lies" items **#60**, **#117** and **#162**, and
 **W8** (#106). Deferred by design: #91, #107.
+
+## Checkpoint — W7 §2 landed (2026-08-11)
+
+A status entry, not a revision. **W7 §2 is done** — `optimize.merge_adjacent_rechunks`
+(with the `_mergeable_rechunk` predicate; #103): an adjacent pair of mapping-form,
+`_pushable_rechunk` `chunk` calls fuses into one `chunk({...})` node, later-wins per dim.
+Syntactic (no schema read), registered after the other merge rules, and it shrinks the
+plan — so the termination measure holds on its first component, the same footing as
+`merge_adjacent_projects` — while handing `pushdown_selects_past_rechunks` a single better
+input than two adjacent nodes.
+
+Two facts the spec (`07-small-wins.md` §2) predated:
+
+- **The spec's naive `{**r1.chunks, **r2.chunks}` union is wrong for a *later* `NoChange`.**
+  `chunk({dim: None})` means "leave this dim as it is", so
+  `chunk({"time": 100}).chunk({"time": None})` keeps `time` at 100-blocks where a plain
+  union would drop it to the base's single block — measured against dask, not reasoned. A
+  later `NoChange` is therefore non-overriding (`setdefault`); every concrete later spec
+  wins outright.
+- **The random soak does not reach it, so it gets a dedicated generator.** Two adjacent
+  *mergeable* chunks are too rare to fire the rule over 250 examples (instrumented: 0), so
+  — the `select_runs`/`coord_projection_plans` precedent — `rechunk_runs` asks for the run
+  by name, with an anti-vacuity `len(optimised) == 1`. And it asserts the merged *chunking*
+  through a new `_assert_chunking_equal` (replay-without-compute, mirroring
+  `test_accessor`'s `_replayed`), **not** `_assert_replays_equal`: a rechunk preserves
+  values whatever blocks it lands on, so the materialised-value check passes vacuously and
+  only `.chunks` catches a dropped spec or a repeated dim resolved the wrong way — confirmed
+  to fail against a naive-union merge.
+
+Still open: the "schema lies" items **#60**, **#117** and **#162**, and **W8** (#106).
+Deferred by design: #91, #107. **With §2 landed, W7's small-wins rule strand is
+complete** — what remains across the whole roadmap is the schema-lies bugs and the gated,
+unscheduled Rust spike.
