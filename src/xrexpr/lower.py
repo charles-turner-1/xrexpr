@@ -234,7 +234,15 @@ def _fuse_grouped(
             kind = opener.name
         case _:
             return None
-    if not isinstance(closer, Reduce):
+    if not isinstance(closer, Reduce) or closer.keepdims:
+        # A ``keepdims=True`` grouped reduce *retains the group dim* (sized to the group
+        # count, and left without a coordinate) instead of minting ``new_dim``:
+        # ``groupby("time.month").mean(keepdims=True)`` keeps a coordinate-less ``time`` and
+        # never mints ``month`` (pydata/xarray#11519). That is the opposite of what
+        # ``GroupedReduce`` models (remove the group dim, mint ``new_dim``), so fusing it
+        # would misdescribe it: refuse and let the pair replay verbatim, exactly as an opaque
+        # closer did before #117. (Unlike a plain reduce, the kept dim is size = group count,
+        # not 1.)
         return None
 
     grouped = _grouper_dims(opener, dim_names)
@@ -301,7 +309,13 @@ def _fuse_windowed(opener: ContextOpen, closer: FluentOp) -> WindowedReduce | No
             kind = opener.name
         case _:
             return None
-    if not isinstance(closer, Reduce) or not isinstance(closer.consumes, AllDims):
+    if (
+        not isinstance(closer, Reduce)
+        or not isinstance(closer.consumes, AllDims)
+        or closer.keepdims
+    ):
+        # A ``keepdims=True`` closer keeps its dims at size 1, which no ``WindowedReduce``
+        # describes, so it refuses alongside a closer that named a dim.
         return None
 
     window = _window_spec(opener)
@@ -389,7 +403,10 @@ def _fuse_weighted(opener: ContextOpen, closer: FluentOp) -> WeightedReduce | No
     are not in ``OP_TABLE``, and ``quantile`` in particular takes ``q`` first positionally,
     which a reduce's dim-spec parse would misread.
     """
-    if opener.name != "weighted" or not isinstance(closer, Reduce):
+    if opener.name != "weighted" or not isinstance(closer, Reduce) or closer.keepdims:
+        # A ``keepdims=True`` closer keeps its dims at size 1: fusing it into a
+        # ``WeightedReduce`` (which removes the weighted dims) would misdescribe it, so
+        # refuse and replay verbatim.
         return None
 
     weight_dims = _weight_dims(opener)

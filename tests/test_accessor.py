@@ -224,19 +224,25 @@ def test_bare_reduce_method_then_select_raises(ds):
         ds.plan.reduce(np.mean).isel(time=0).collect()
 
 
-def test_keepdims_reduce_then_select_matches_eager(ds):
-    """A ``keepdims=True`` reduce keeps its dim, so a select on that dim must replay, not raise.
+def test_keepdims_reduce_then_select_on_kept_dim_matches_eager(ds):
+    """A ``keepdims=True`` reduce keeps its dim at size 1, so a select on that dim replays, not raises.
 
     Notes
     -----
     The regression this pins was **live**: ``keepdims=True`` keeps ``time`` at size 1, but
-    the node claimed ``consumes={"time"}``, so ``pushdown_selects`` classified the select
-    as indexing a reduced-away dim and raised ``InvalidExpressionError`` on a chain that
-    works eagerly. Recording ``Opaque`` makes the reduce a barrier instead -- unoptimised,
-    which is the house's answer for a call it cannot model, and correct.
+    the node once claimed ``consumes={"time"}`` as if it removed it, so ``pushdown_selects``
+    classified the select as indexing a reduced-away dim and raised on a chain that works
+    eagerly. Now modelled (#117): the ``immovable`` dim effect leaves the select in place,
+    so it replays equal.
     """
     got = ds.plan.mean("time", keepdims=True).isel(time=0).collect()
     assert_equal(got, ds.mean("time", keepdims=True).isel(time=0))
+
+
+def test_keepdims_reduce_then_disjoint_select_matches_eager(ds):
+    """A disjoint select behind a ``keepdims=True`` reduce reorders under the hood yet replays equal."""
+    got = ds.plan.mean("time", keepdims=True).isel(lat=0).collect()
+    assert_equal(got, ds.mean("time", keepdims=True).isel(lat=0))
 
 
 def test_isel_merge_equal(ds):

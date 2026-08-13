@@ -255,6 +255,13 @@ def dim_effect(node: LoweredOp) -> DimEffect:
     fields. What is no longer available is taking it *by accident*.
     """
     match node:
+        case Reduce(consumes=consumes) as reduce if reduce.keepdims:
+            # ``keepdims=True`` removes nothing: it keeps every named dim at size 1, so a
+            # later select on one is valid but must not reorder across (fill-then-slice on
+            # a size-1 dim is not slice-then-fill). Same shape as ``WindowedReduce`` -- the
+            # dims are both blocked and required, and the default ``immovable`` leaves the
+            # chain rather than rejecting it.
+            return DimEffect(blocks=consumes, requires=consumes)
         case Reduce(consumes=consumes):
             # A reduce removes exactly what it names, so a later select on one of those
             # dims can never replay -- the empty-dim reorder bug, and the one case where

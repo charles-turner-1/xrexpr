@@ -927,14 +927,21 @@ def _calls(draw, ds, max_ops=4, builders=False):
                 current, (*REDUCE_NAMES, "reduce"), dims=dims, reduced=set(dims)
             )
             name = draw(st.sampled_from(names))
+            # ``keepdims=True`` keeps the named dims at size 1 rather than removing them
+            # (#117). The reduce stays a ``Reduce`` and its chains optimise, so the tracked
+            # schema must report those dims at size 1 exactly -- which the size-exactness
+            # property is where a wrong arm would surface. The same xarray limitations still
+            # apply (``max`` over an empty dim raises with or without ``keepdims``), so the
+            # ``_drawable_reduces`` filter above needs no adjustment.
+            extra = {"keepdims": True} if draw(st.booleans()) else {}
             # ``.reduce`` is spelled ``reduce(func, dim)``, and generated **positionally**
             # on purpose: that is the shape #96 fixed, where the function used to be read
             # as the dim spec. The kwarg spelling was never affected and is pinned by the
             # hand-written suite instead.
             call = (
-                Call(name, REDUCE_METHOD_FUNC, dims)
+                Call(name, REDUCE_METHOD_FUNC, dims, **extra)
                 if name == "reduce"
-                else Call(name, dim=dims)
+                else Call(name, dim=dims, **extra)
             )
         else:
             # No dim is indexed twice anywhere in the chain — not merely twice in a row.

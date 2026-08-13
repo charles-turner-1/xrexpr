@@ -95,6 +95,42 @@ def test_reduce_removes_dim_and_its_coord(ds):
     assert after.coords == {"time", "lon"}
 
 
+def test_keepdims_reduce_keeps_dim_at_size_one_and_drops_its_coord(ds):
+    """A ``keepdims=True`` reduce keeps its named dim at size 1 and the data vars, but drops the coord over it.
+
+    Notes
+    -----
+    Verified against xarray 2026.7.0: ``ds.mean("lat", keepdims=True)`` keeps ``lat`` at
+    size 1 in every variable that had it, yet drops the ``lat`` coordinate — a reduced dim
+    has no meaningful label. Contrast :func:`test_reduce_removes_dim_and_its_coord`, where a
+    plain reduce removes the dim outright.
+    """
+    schema = SchemaState.from_dataset(ds)
+    node = Reduce(
+        name="mean", args=("lat",), kwargs={"keepdims": True}, consumes=["lat"]
+    )
+    after = apply_schema(schema, node)
+    assert after.sizes == {"time": 4, "lat": 1, "lon": 5}
+    assert after.coords == {"time", "lon"}  # the ``lat`` coordinate is dropped
+    assert after.data_vars["temperature"] == (
+        "time",
+        "lat",
+        "lon",
+    )  # dim kept, not removed
+    assert after.data_vars["elevation"] == ("lat", "lon")
+
+
+def test_bare_keepdims_reduce_keeps_every_dim_at_size_one(ds):
+    """A bare ``keepdims=True`` reduce keeps every dim at size 1 and drops every coord, variables' dims intact."""
+    schema = SchemaState.from_dataset(ds)
+    node = Reduce(name="mean", kwargs={"keepdims": True}, consumes=ALL_DIMS)
+    after = apply_schema(schema, node)
+    assert after.sizes == {"time": 1, "lat": 1, "lon": 1}
+    assert after.coords == set()
+    assert after.data_vars["temperature"] == ("time", "lat", "lon")
+    assert after.data_vars["elevation"] == ("lat", "lon")
+
+
 def test_bare_reduce_removes_every_dim_and_coord(ds):
     """A bare reduce clears every dim, every coordinate and every variable's dims.
 

@@ -159,20 +159,22 @@ def test_bare_reduce_method_consumes_all_dims_symbolically(schema):
 # --- ``keepdims=True`` keeps the dims it "reduces" --------------------------------
 
 
-def test_keepdims_records_opaque(schema):
-    """``mean("lat", keepdims=True)`` records ``Opaque``: the dim survives, so no ``consumes`` is true.
+def test_keepdims_records_a_reduce_carrying_the_flag(schema):
+    """``mean("lat", keepdims=True)`` records a ``Reduce`` whose derived ``keepdims`` is ``True``.
 
     Notes
     -----
-    Verified against xarray 2026.7.0: ``ds.mean("time", keepdims=True)`` keeps ``time`` at
-    size 1. Recorded as a ``Reduce`` it claimed ``consumes={"time"}``, which made
-    ``dim_effect`` classify a following select as *invalid* and the optimiser **reject a
-    valid chain** -- see ``test_accessor.test_keepdims_reduce_then_select_matches_eager``.
-    ``consumes=frozenset()`` would be honest about the dims but leave the schema claiming
-    the dim's original *size*, so the conservative variant is the right answer.
+    Verified against xarray 2026.7.0: ``ds.mean("lat", keepdims=True)`` keeps ``lat`` at
+    size 1. ``consumes`` still names the dim -- what differs is that :attr:`Reduce.keepdims`
+    tells ``dim_effect``/``apply_schema`` the dim is *resized to 1* rather than removed, so
+    a valid chain optimises (#117, ``07-small-wins.md`` §9). Before this it recorded
+    ``Opaque`` (the conservative #96 fix); the correctness that fix protected is now carried
+    by the ``immovable`` dim effect instead of a full barrier.
     """
     node = to_opnode("mean", ("lat",), {"keepdims": True})
-    assert isinstance(node, Opaque)
+    assert isinstance(node, Reduce)
+    assert node.keepdims is True
+    assert node.consumes == frozenset({"lat"})
     assert node.kwargs == frozendict({"keepdims": True})  # verbatim, for replay
 
 
@@ -180,13 +182,16 @@ def test_keepdims_false_is_an_ordinary_reduce(schema):
     """An explicit ``keepdims=False`` is the default, so it records an ordinary ``Reduce``."""
     node = to_opnode("mean", ("lat",), {"keepdims": False})
     assert isinstance(node, Reduce)
+    assert node.keepdims is False
     assert node.consumes == frozenset({"lat"})
 
 
-def test_keepdims_guard_covers_the_reduce_method_too(schema):
-    """``.reduce(func, "lat", keepdims=True)`` is refused on the same grounds as any other reduction."""
+def test_keepdims_is_modelled_for_the_reduce_method_too(schema):
+    """``.reduce(func, "lat", keepdims=True)`` records a ``Reduce`` with ``keepdims``, like any reduction."""
     node = to_opnode("reduce", (sum, "lat"), {"keepdims": True})
-    assert isinstance(node, Opaque)
+    assert isinstance(node, Reduce)
+    assert node.keepdims is True
+    assert node.consumes == frozenset({"lat"})
 
 
 def test_isel_scalar_kwarg_drops_dim(schema):

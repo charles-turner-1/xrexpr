@@ -461,6 +461,28 @@ def test_non_string_grouper_does_not_fuse():
 @pytest.mark.parametrize(
     "opener",
     [
+        ("groupby", ("lat",), {}),
+        ("rolling", (), {"time": 3}),
+        ("weighted", (_weights("lat"),), {}),
+    ],
+)
+def test_a_keepdims_closer_refuses_to_fuse(opener):
+    """A ``keepdims=True`` closer never fuses: each builder family demotes to a verbatim opaque pair.
+
+    Notes
+    -----
+    ``keepdims=True`` keeps the reduced dims at size 1, so a fused node (which removes them)
+    would misdescribe it — the same reason a within-group map refuses. Recording ``Opaque``
+    for the closer gave this for free before #117 modelled ``keepdims`` as a live ``Reduce``;
+    the ``closer.keepdims`` guard in each ``_fuse_*`` restores it.
+    """
+    lowered = _lower(opener, ("mean", (), {"keepdims": True}))
+    assert [type(n) for n in lowered] == [Opaque, Opaque]
+
+
+@pytest.mark.parametrize(
+    "opener",
+    [
         # issue #90: each of these reads a plausible ``group_dim`` off the call, and each
         # reading is wrong -- the dim actually consumed is whichever one the *coordinate*
         # is defined on, which the call does not say. Refusing is the fix.

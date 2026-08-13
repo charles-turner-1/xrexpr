@@ -147,6 +147,44 @@ def test_select_on_reduced_dim_raises(schema):
         optimize(plan, schema)
 
 
+def test_keepdims_reduce_admits_a_disjoint_select(schema):
+    """A disjoint ``isel`` hops in front of a ``keepdims=True`` reduce, just as it does past a plain one."""
+    plan = [_node("mean", "lat", keepdims=True), _node("isel", time=0)]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["isel", "mean"]
+    assert out[0].indexer == _ix(time=0)
+
+
+def test_keepdims_reduce_leaves_a_select_on_a_kept_dim(schema):
+    """A ``keepdims=True`` reduce keeps its dim at size 1, so a select on it is valid but *left*, not raised.
+
+    Notes
+    -----
+    The contrast with :func:`test_select_on_reduced_dim_raises` is the whole point of
+    ``keepdims``: a plain ``mean("lat")`` removes ``lat`` so the select is invalid, but
+    ``mean("lat", keepdims=True)`` keeps it, so the chain replays -- the ``immovable``
+    dim effect leaves the order untouched rather than rejecting it.
+    """
+    plan = [_node("mean", "lat", keepdims=True), _node("isel", lat=0)]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["mean", "isel"]
+
+
+def test_keepdims_dim_effect_blocks_its_dims_immovably(schema):
+    """A ``keepdims`` reduce's ``dim_effect`` blocks and requires its named dims, ``immovable`` not ``invalid``.
+
+    Notes
+    -----
+    Mirrors ``WindowedReduce``: the dims survive (resized to 1), so a select on one must
+    not reorder but the chain is valid. Contrast a plain reduce, whose arm is ``invalid``.
+    """
+    kept = dim_effect(_node("mean", "lat", keepdims=True))
+    assert kept.blocks == frozenset({"lat"})
+    assert kept.requires == frozenset({"lat"})
+    assert kept.on_conflict == "immovable"
+    assert dim_effect(_node("mean", "lat")).on_conflict == "invalid"
+
+
 def test_bare_mean_then_select_raises_empty_dim_bug(schema):
     """A bare ``mean()`` consumes every dim, so a following ``isel`` is invalid and must raise.
 

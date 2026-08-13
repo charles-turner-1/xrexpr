@@ -109,6 +109,12 @@ def _annotate(node: LoweredOp) -> str:
     and the answer most kinds take; taking it silently is what this prevents.
     """
     match node:
+        case Reduce(consumes=consumes) as reduce if reduce.keepdims:
+            # ``keepdims=True`` keeps its named dims at size 1 rather than removing them,
+            # so the ``consumes`` framing below would read backwards.
+            if isinstance(consumes, AllDims):
+                return "keeps every dim at size 1"
+            return f"keeps {_braced(consumes)} at size 1" if consumes else ""
         case Reduce(consumes=consumes):
             # A bare ``.mean()`` reads as if it did nothing to the dims.
             return _dim_set("consumes", consumes)
