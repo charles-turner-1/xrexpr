@@ -1393,17 +1393,18 @@ def test_coarsen_matches_eager(ds, boundary):
     )
 
 
-def test_rolling_closer_that_looks_like_a_dim_spec_still_matches_eager(ds):
-    """A rolling closer whose positional arg looks like a dim name refuses to fuse and still matches eager.
+def test_rolling_closer_that_looks_like_a_dim_spec_fuses_and_matches_eager(ds):
+    """A rolling closer whose positional arg looks like a dim name fuses, and still matches eager.
 
     Notes
     -----
     ``DatasetRolling.mean`` takes no dim argument, so this passes ``"lat"`` as *keep_attrs*
-    and reduces nothing. Lowering refuses to fuse it, and the verbatim pair replays as xarray
-    reads it -- which is the whole point of refusing.
+    and reduces nothing. The parsed dim is inert, so lowering fuses the pair into a single
+    ``WindowedReduce`` (dropping the ``to_opnode`` misparse) rather than leaving an ``Opaque``
+    barrier, and the verbatim replay still matches xarray exactly.
     """
     chain = ds.plan.rolling(time=2).mean("lat")
-    assert [type(n) for n in chain._optimized()] == [Opaque, Opaque]
+    assert [type(n) for n in chain._optimized()] == [WindowedReduce]
     assert_equal(chain.collect(), ds.rolling(time=2).mean("lat"))
 
 

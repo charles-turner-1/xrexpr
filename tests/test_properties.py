@@ -547,11 +547,17 @@ def _builder_pair(draw, obj, kind=None):
       valid range``, which is a fact about the *call*, not about the rewrites.
     - **``coarsen``'s default ``boundary="exact"`` requires divisibility**, so it is only
       offered when the window divides; ``trim`` and ``pad`` always are.
-    - **``rolling``/``coarsen`` closers must be bare.** ``DatasetRolling.mean`` is
-      ``(keep_attrs=None, **kwargs)`` — no dim argument at all — so a ``dim=`` would be
-      swallowed as ``keep_attrs``. That is the misparse lowering refuses to fuse, and it is
-      pinned by example in ``test_lower.py``; generating it here would only re-test the
-      fallback.
+    - **``rolling``/``coarsen`` closers are drawn bare.** ``DatasetRolling.mean`` is
+      ``(keep_attrs=None, **kwargs)`` — no dim parameter at all. A *positional*
+      (``mean("lat")``) binds to ``keep_attrs``; a ``dim=`` *keyword* falls into ``**kwargs``
+      and is ignored (with a warning). Either way no dim is reduced. Lowering now *fuses* such
+      a closer (the inert dim is dropped, see ``test_lower.py`` / ``test_accessor.py``). It is
+      not drawn here because the ``WindowedReduce`` schema and dim effects read only
+      ``window`` and ignore ``reduce_args``, so a named-dim closer exercises the same schema
+      arm as a bare one, and carrying ``reduce_args`` verbatim through replay is already
+      covered — no new path. (The node is *not* identical to the bare case: its
+      ``reduce_args`` differ, and a truthy positional ``keep_attrs="lat"`` can even keep attrs
+      a bare ``mean()`` would drop.)
     - **a grouped closer may name dims or not**, and the two mean different things: bare or
       naming the group dim is an aggregation (which fuses), naming *other* dims is a
       per-group map (which does not). Both are legal — for ``resample`` as much as for

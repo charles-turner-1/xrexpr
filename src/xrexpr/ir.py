@@ -591,9 +591,12 @@ class WindowedReduce:
 
     A windowed closer takes **no dim argument** at all — ``DatasetRolling.mean`` is
     ``(keep_attrs=None, **kwargs)`` — so ``ds.rolling(time=3).mean("lat")`` passes
-    ``"lat"`` as ``keep_attrs`` and reduces nothing. Only a closer that named no dim is
-    fused (see :func:`~xrexpr.lower.to_lower_ir`), which is what keeps that trap out of
-    this node: if a dim spec was parsed, it was never a dim spec.
+    ``"lat"`` as ``keep_attrs`` and reduces nothing. Such a closer *is* fused (see
+    :func:`~xrexpr.lower.to_lower_ir`): because the parsed dim is inert, ``closer.consumes``
+    — a ``to_opnode`` misparse — is dropped rather than carried, and this node reads neither
+    it nor ``reduce_args``. ``reduce_args`` is kept verbatim only for faithful replay, which
+    preserves the ``keep_attrs`` truthiness. If a dim spec was parsed, it was never a dim
+    spec.
     """
 
     name: Literal["rolling", "coarsen"]  # closed set → Literal

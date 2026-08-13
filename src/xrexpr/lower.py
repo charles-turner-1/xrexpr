@@ -310,13 +310,20 @@ def _fuse_windowed(opener: ContextOpen, closer: FluentOp) -> WindowedReduce | No
             kind = opener.name
         case _:
             return None
-    if (
-        not isinstance(closer, Reduce)
-        or not isinstance(closer.consumes, AllDims)
-        or closer.keepdims
-    ):
-        # A ``keepdims=True`` closer keeps its dims at size 1, which no ``WindowedReduce``
-        # describes, so it refuses alongside a closer that named a dim.
+    if not isinstance(closer, Reduce) or closer.keepdims:
+        # ``keepdims=True`` still refuses: ``coarsen.mean(keepdims=True)`` raises
+        # ``TypeError`` and rolling's is an inert no-op -- neither a size effect a
+        # ``WindowedReduce`` describes -- so both stay ``Opaque`` to replay verbatim.
+        #
+        # A closer that *named a dim* no longer refuses. A windowed reduce has no dim
+        # parameter (``mean(keep_attrs=None, **kwargs)``): a positional (``mean("lat")``)
+        # binds to ``keep_attrs``, a ``dim=`` keyword falls into ``**kwargs`` and is ignored
+        # (with a warning). Either way the closer reduces no dim, so ``rolling(time=12)
+        # .mean("lat")`` reduces the same dims as ``.mean()`` (differing only in attrs). The
+        # ``to_opnode`` misparse in ``closer.consumes`` is dropped here rather than carried,
+        # and the node reads neither it nor ``reduce_args`` -- its schema and dim effects
+        # depend only on ``window``. ``reduce_args`` rides along verbatim, so replay
+        # reproduces the closer (``keep_attrs`` truthiness included) exactly.
         return None
 
     window = _window_spec(opener)
