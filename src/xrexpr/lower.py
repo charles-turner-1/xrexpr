@@ -235,9 +235,13 @@ def _fuse_grouped(
         case _:
             return None
     if not isinstance(closer, Reduce) or closer.keepdims:
-        # A ``keepdims=True`` closer keeps its dims at size 1, so fusing it into a
-        # ``GroupedReduce`` (which removes the group dim) would misdescribe it: refuse and
-        # let the pair replay verbatim, exactly as an opaque closer did before #117.
+        # A ``keepdims=True`` grouped reduce *retains the group dim* (sized to the group
+        # count) instead of minting ``new_dim``: ``groupby("time.month").mean(keepdims=True)``
+        # keeps ``time`` and never mints ``month``. That is the opposite of what
+        # ``GroupedReduce`` models (remove the group dim, mint ``new_dim``), so fusing it
+        # would misdescribe it: refuse and let the pair replay verbatim, exactly as an opaque
+        # closer did before #117. (Unlike a plain reduce, the kept dim is size = group count,
+        # not 1.)
         return None
 
     grouped = _grouper_dims(opener, dim_names)
