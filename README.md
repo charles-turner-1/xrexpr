@@ -186,8 +186,8 @@ on it.
 This isn't the optimiser playing fast and loose. The invariant, stated precisely:
 
 > `optimize` preserves the **values** of everything the plan asks for. It may additionally
-> avoid an error raised by a computation whose result the plan discards. It may never
-> change a value, nor introduce an error.
+> avoid an error raised while computing or validating a part of the chain that cannot
+> affect those values. It may never change a value, nor introduce an error.
 
 ## Under the hood
 
