@@ -534,11 +534,22 @@ def test_a_drop_then_projecting_the_dropped_name_is_left_alone(schema):
     assert [n.name for n in out] == ["drop_vars", "__getitem__"]
 
 
-def test_a_drop_of_an_absent_name_before_a_projection_is_left_alone(schema):
-    """A ``drop_vars`` naming something absent raises eagerly, so the rule declines rather than eliding it."""
+def test_a_drop_of_an_absent_name_before_a_projection_is_elided(schema):
+    """A ``drop_vars`` naming something absent is elided when the projection excludes it."""
     plan = [_node("drop_vars", ["nope"]), _node("__getitem__", ["temperature"])]
     out = optimize(plan, schema)
-    assert [n.name for n in out] == ["drop_vars", "__getitem__"]
+    assert [n.name for n in out] == ["__getitem__"]
+
+
+def test_a_mixed_absent_drop_is_trimmed_to_its_surviving_coords():
+    """Absent dropped names disappear, while retained coordinates still hop behind the projection."""
+    plan = [
+        _node("drop_vars", ["nope", "area"]),
+        _node("__getitem__", ["temperature"]),
+    ]
+    out = optimize(plan, _AUX_SCHEMA)
+    assert [n.name for n in out] == ["__getitem__", "drop_vars"]
+    assert out[1].variables == ("area",)
 
 
 def test_a_single_name_projection_does_not_absorb_a_drop(schema):

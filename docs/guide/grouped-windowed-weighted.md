@@ -191,7 +191,8 @@ stations.plan.weighted(weights).mean("time")[["temperature"]].collect()
 ```
 
 This is the same licence the [invariant](rewrites.md#the-invariant) grants: skip a
-computation whose result the plan discards, and change nothing else.
+failure from a part of the chain that cannot affect the requested values, and change
+nothing else.
 
 ## Pairs it doesn't recognise
 

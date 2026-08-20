@@ -76,8 +76,8 @@ Two consequences worth internalising:
 The precise version of the promise, which the rest of the guide leans on:
 
 > `optimize` preserves the **values** of everything the plan asks for. It may
-> additionally avoid an error raised by a computation whose result the plan discards. It
-> may never change a value, nor introduce an error.
+> additionally avoid an error raised while computing or validating a part of the chain
+> that cannot affect those values. It may never change a value, nor introduce an error.
 
 That middle clause is not a loophole. It's a feature, and
 [a chain that stops failing](rewrites.md#it-can-also-make-a-chain-stop-failing) shows why.
