@@ -376,11 +376,12 @@ evaluation, and pinned by `test_projection_pushdown_skips_an_error_from_a_discar
 The crown-jewel invariant is usually stated as *optimised equals eager*. Strictly it is:
 
 > `optimize` preserves the **values** of everything the plan asks for. It may additionally
-> avoid an error raised by a computation whose result the plan discards. It may never
-> change a value, nor introduce an error.
+> avoid an error raised while computing or validating a part of the chain that cannot
+> affect those values. It may never change a value, nor introduce an error.
 
-Only `pushdown_projections` exercises the middle clause today. A new rule may rely on the
-first and third; it may not rely on failures being preserved.
+`pushdown_projections` exercises the computation half of the middle clause;
+`push_projection_past_drop` exercises the validation half for absent `drop_vars` names.
+A new rule may rely on the first and third; it may not rely on failures being preserved.
 
 The third clause has been violated exactly once, and it is worth recording because the
 clause is what made it a bug rather than a preference. `pushdown_selects_past_rechunks`

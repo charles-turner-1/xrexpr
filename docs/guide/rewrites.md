@@ -181,13 +181,14 @@ This is not the optimiser playing fast and loose. Stated precisely:
 
 :::{important}
 `optimize` preserves the **values** of everything the plan asks for. It may additionally
-avoid an error raised by a computation whose result the plan discards. It may never
-change a value, nor introduce an error.
+avoid an error raised while computing or validating a part of the chain that cannot
+affect those values. It may never change a value, nor introduce an error.
 :::
 
 The middle clause is exactly the licence the section above needs, and it is bounded:
-`xrexpr` may skip a computation whose result you discard, and it may not do anything
-else. It cannot turn a working chain into a failing one, and it cannot change a number.
+`xrexpr` may skip work or validation whose only observable result would be discarded, and
+it may not do anything else. It cannot turn a working chain into a failing one, and it
+cannot change a number.
 
 Two of the rewrites above deserve a page of their own, because what moves past them is
 less obvious than "do the dims overlap?":
