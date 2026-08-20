@@ -39,6 +39,7 @@ from xrexpr.ir import (
     Project,
     Rechunk,
     Reduce,
+    Rename,
     Scan,
     Select,
     WeightedReduce,
@@ -627,6 +628,7 @@ def _emit_node(node: LoweredOp) -> tuple[Call, ...]:
             | Elementwise()
             | Project()
             | Drop()
+            | Rename()
             | Rechunk()
             | Opaque()
         ):
