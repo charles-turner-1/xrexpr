@@ -389,6 +389,59 @@ def test_generic_pushdown_does_not_cross_a_drop():
     assert dim_effect(_node("drop_vars", ["elevation"])).requires is None
 
 
+def test_select_on_an_untouched_dim_hops_a_rename(schema):
+    """A select on a dim the rename leaves alone commutes with it: untouched dims stay transparent."""
+    plan = [_node("rename", {"time": "t"}), _node("isel", lat=0)]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["isel", "rename"]
+
+
+def test_select_on_a_renamed_dim_is_left_behind_a_rename(schema):
+    """A select on the *renamed* dim does not hop the rename -- above it the dim has its old name.
+
+    Notes
+    -----
+    ``rename({"time": "t"}).isel(t=0)`` names ``t``, which does not exist before the rename,
+    so the select is left where it is. The dim survives (merely relabelled), so this is
+    ``immovable`` -- left, never raised.
+    """
+    plan = [_node("rename", {"time": "t"}), _node("isel", t=0)]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["rename", "isel"]
+
+
+def test_generic_pushdown_does_not_cross_a_rename():
+    """``Rename`` answers ``requires=None``: the generic projection pushdown never hops it.
+
+    Notes
+    -----
+    The hazard is a *variable*-key rename -- a projection naming a renamed variable cannot
+    precede the rename that mints its new name -- which the dim-keyed pushdown cannot see, so
+    no projection crosses via the generic rule. A schema-aware rename/projection rule and the
+    name-translating select cross (``11-relabel-rename-drop.md`` §4) are follow-ups.
+    """
+    assert dim_effect(_node("rename", {"tas": "temp"})).requires is None
+
+
+def test_projection_hops_a_reduce_behind_a_rename(schema):
+    """Modelling ``rename`` re-opens the trusted prefix, so a projection still hops a reduce behind it.
+
+    Notes
+    -----
+    As an ``Opaque`` a rename was a trust boundary that blacked out the projection rules for
+    the rest of the plan; as a modelled ``Rename`` the prefix spans it, so the projection
+    reaches the front past the ``mean`` -- the payoff W11 exists for.
+    """
+    plan = [
+        _node("rename", {"time": "t"}),
+        _node("mean", "lat"),
+        _node("__getitem__", ["temperature"]),
+    ]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["rename", "__getitem__", "mean"]
+    assert out[1].variables == ("temperature",)
+
+
 def test_projection_hops_a_reduce_behind_a_drop(schema):
     """Modelling ``drop_vars`` re-opens the trusted prefix, so a projection still hops a reduce behind it.
 
@@ -1641,6 +1694,7 @@ def test_dim_effect_covers_every_lowered_variant():
             _node("fillna", 0),
             _node("__getitem__", ["temperature"]),
             _node("drop_vars", ["region"]),
+            _node("rename", {"time": "t"}),
             _node("chunk", {"time": 2}),
             _node("where", "cond"),
             _grouped(),

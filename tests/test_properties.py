@@ -126,7 +126,12 @@ HAS_DASK = importlib.util.find_spec("dask") is not None
 #: zero-length dim), and a chain that raises *in xarray* tests nothing here. Selects and
 #: projections are exactly what the rechunk rules are about, so nothing under test is lost —
 #: and a reduce or builder *before* a chunk is still drawn freely.
-AFTER_CHUNK = ["isel", "sel", "project", "elementwise", "drop_vars", "chunk"]
+AFTER_CHUNK = ["isel", "sel", "project", "elementwise", "drop_vars", "rename", "chunk"]
+
+#: Fresh names a generated ``rename`` may relabel a variable to. Disjoint from every name
+#: :func:`datasets` produces, so a rename never collides with an existing variable or dim
+#: (which xarray would reject); a handful, since a short chain renames at most a few times.
+RENAME_TARGETS = ("v_a", "v_b", "v_c", "v_d", "v_e", "v_f")
 
 #: Reductions with no identity element, which numpy refuses to apply to an empty axis
 #: ("zero-size array to reduction operation fmax which has no identity"). An empty
@@ -826,9 +831,16 @@ def _calls(draw, ds, max_ops=4, builders=False):
 
     # "builder" twice, so the ``assume`` in ``builder_plans`` discards fewer examples —
     # a chain with no builder pair in it is just a plain chain, already covered.
-    kinds = ["isel", "sel", "reduce", "scan", "project", "elementwise", "drop_vars"] + (
-        ["builder"] * 2 if builders else []
-    )
+    kinds = [
+        "isel",
+        "sel",
+        "reduce",
+        "scan",
+        "project",
+        "elementwise",
+        "drop_vars",
+        "rename",
+    ] + (["builder"] * 2 if builders else [])
     if HAS_DASK:
         kinds.append("chunk")
 
@@ -893,6 +905,30 @@ def _calls(draw, ds, max_ops=4, builders=False):
                 )
             )
             call = Call("drop_vars", names)
+            current = _apply(current, [call])
+            calls.append(call)
+            continue
+
+        if kind == "rename":
+            # Rename only *variables* (data vars and auxiliary coords), never a dimension or
+            # dim-coord: relabelling a dim mid-chain changes dim names, which the
+            # ``selected_dims`` bookkeeping and a later ``sel``'s coordinate read would have
+            # to track. The dim and dim-coord rename paths -- where ``_relabelled`` also moves
+            # ``sizes`` and rewrites dim tuples -- are pinned by the hand-written suite.
+            renameable = sorted(
+                str(n) for n in current.variables if n not in current.dims
+            )
+            fresh = [
+                n
+                for n in RENAME_TARGETS
+                if n not in current.variables and n not in current.dims
+            ]
+            if not renameable or not fresh:
+                continue
+            call = Call(
+                "rename",
+                {draw(st.sampled_from(renameable)): draw(st.sampled_from(fresh))},
+            )
             current = _apply(current, [call])
             calls.append(call)
             continue

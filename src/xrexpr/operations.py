@@ -35,6 +35,7 @@ __all__ = [
     "ProjectSpec",
     "RechunkSpec",
     "ReduceSpec",
+    "RenameSpec",
     "ScanSpec",
     "SelectSpec",
     "spec",
@@ -167,6 +168,19 @@ class ProjectSpec:
 
 
 @dataclass(frozen=True)
+class RenameSpec:
+    """A ``rename`` call: relabels dims/variables/coordinates, changing no value.
+
+    Attributes
+    ----------
+    name : {"rename"}
+        Always ``"rename"``. A closed set, so a ``Literal``.
+    """
+
+    name: Literal["rename"] = "rename"
+
+
+@dataclass(frozen=True)
 class DropSpec:
     """A ``drop_vars`` call: removes named variables/coordinates, changing no dim or value.
 
@@ -213,6 +227,7 @@ OpSpec = (
     | SelectSpec
     | RechunkSpec
     | ProjectSpec
+    | RenameSpec
     | DropSpec
     | ContextSpec
 )
@@ -254,6 +269,7 @@ _SPECS: tuple[OpSpec, ...] = (
     SelectSpec("sel"),
     RechunkSpec("chunk"),
     ProjectSpec(),
+    RenameSpec(),
     DropSpec(),
     *(ContextSpec(name) for name in _CONTEXTS),
 )

@@ -44,6 +44,7 @@ from xrexpr.ir import (
     Project,
     Rechunk,
     Reduce,
+    Rename,
     Scan,
     Select,
     WeightedReduce,
@@ -56,6 +57,7 @@ from xrexpr.operations import (
     ProjectSpec,
     RechunkSpec,
     ReduceSpec,
+    RenameSpec,
     ScanSpec,
     SelectSpec,
 )
@@ -551,6 +553,13 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
             dropped = {c for c in coord_names if not over.isdisjoint(variables[c])}
             coord_names -= dropped
             variables = {k: v for k, v in variables.items() if k not in dropped}
+        case Rename(mapping=renames):
+            # ``rename`` relabels a dim, a variable/coordinate, or -- for a dimension
+            # coordinate -- both at once. ``_relabelled`` applies it as a single
+            # shape-preserving relabel, so it is exact, coordinates included.
+            variables, coord_names, sizes = _relabelled(
+                variables, coord_names, sizes, renames
+            )
         case Drop(variables=names):
             # ``drop_vars`` removes named variables/coordinates by *key* -- not by dim, so
             # this is not ``_aggregated``. A dimension left spanned by nothing afterwards
@@ -734,6 +743,75 @@ def _minted(
         )
         for name, var_dims in variables.items()
     }
+
+
+def _relabelled(
+    variables: dict[Hashable, tuple[Hashable, ...]],
+    coord_names: set[Hashable],
+    sizes: dict[Hashable, int | None],
+    mapping: Mapping[Hashable, Hashable],
+) -> tuple[
+    dict[Hashable, tuple[Hashable, ...]], set[Hashable], dict[Hashable, int | None]
+]:
+    """Apply a ``rename``: relabel dims and/or variable keys, preserving every shape.
+
+    Parameters
+    ----------
+    variables : dict
+        The schema's variables entering the op, name → dims.
+    coord_names : set of Hashable
+        Which of those names are coordinates.
+    sizes : dict
+        The dim extents entering the op, dim → size or ``None``.
+    mapping : Mapping
+        The ``{old: new}`` relabelling as ``rename`` was called.
+
+    Returns
+    -------
+    tuple of (dict, set, dict)
+        The variables, coordinate names and sizes after the relabel.
+
+    Notes
+    -----
+    Rename is the third schema primitive beside :func:`_aggregated` (drop) and
+    :func:`_minted` (mint), and the first to touch the **keys** of ``variables`` /
+    ``coord_names`` rather than only the dim tuples -- which is why it is one primitive and
+    not those two composed (``_minted`` broadcasts a new dim onto every data variable and
+    ``_aggregated`` drops the coord, so ``drop(x) + mint(y)`` is not a rename). Expressed as
+    a single relabel it reads the source label's shape and reassigns it, so "shape in =
+    shape out" holds by construction rather than by a test keeping two copies of the shape
+    equal.
+
+    A rename can hit three targets, and a **dimension coordinate** is all three at once
+    (verified against xarray 2026.7.0):
+
+    - a **dim** (``old`` spans some variable): rewrite ``old -> new`` in every variable's
+      dims tuple and move ``sizes[old] -> sizes[new]``, carrying an unknown (``None``)
+      through unchanged -- never inventing an extent, which
+      ``test_rewrites_survive_unknown_dim_sizes`` pins.
+    - a **variable / coordinate** (``old in variables``): rekey it, and its ``coord_names``
+      membership with it.
+    - a **dimension coordinate**: both, since its name is a dim *and* a variable, so
+      ``rename({month: time})`` yields ``time`` as a dimension coordinate.
+
+    The rewrite is computed in one pass through a translation ``old -> new`` rather than
+    applied entry by entry, so a chained or swapping mapping (``{a: b, b: c}``) cannot see a
+    half-renamed intermediate. Only mapping entries whose key is an actual dim translate
+    dims; a variable-only rename (an auxiliary coordinate) leaves every dim tuple untouched.
+    """
+    dim_names = {d for var_dims in variables.values() for d in var_dims}
+    dim_renames = {old: new for old, new in mapping.items() if old in dim_names}
+
+    def _rename_dims(var_dims: tuple[Hashable, ...]) -> tuple[Hashable, ...]:
+        return tuple(dim_renames.get(d, d) for d in var_dims)
+
+    relabelled = {
+        mapping.get(name, name): _rename_dims(var_dims)
+        for name, var_dims in variables.items()
+    }
+    coords = {mapping.get(c, c) for c in coord_names}
+    resized = {dim_renames.get(d, d): s for d, s in sizes.items()}
+    return relabelled, coords, resized
 
 
 def _windowed_size(
@@ -951,6 +1029,16 @@ def to_opnode(
                 kwargs=kw,
                 chunks=_chunk_spec(args, kwargs),
             )
+        case RenameSpec(name=rename):
+            # ``rename`` relabels dims/variables -- modelled, not ``Opaque``, so the schema
+            # fold stays exact past it. ``_rename_map`` gathers the ``{old: new}`` mapping
+            # from the positional dict and/or the name kwargs.
+            return Rename(
+                name=rename,
+                args=args,
+                kwargs=kw,
+                mapping=frozendict(_rename_map(args, kwargs)),
+            )
         case DropSpec(name=drop):
             # ``drop_vars`` removes named variables/coords -- modelled, not ``Opaque``, so
             # the schema fold stays exact past it (``_dropped_names`` splits its argument
@@ -1056,6 +1144,40 @@ def _select_has_advanced(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> bo
         isinstance(classify(v), Advanced)
         for v in _select_indexer(args, kwargs).values()
     )
+
+
+def _rename_map(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> dict[Hashable, Hashable]:
+    """Gather a ``rename`` call's ``{old: new}`` mapping from its positional dict and kwargs.
+
+    Parameters
+    ----------
+    args : tuple
+        The ``rename`` call's positional arguments — a ``{old: new}`` dict, if given
+        positionally.
+    kwargs : Mapping
+        The call's keyword arguments — name mappings given as ``old=new``.
+
+    Returns
+    -------
+    dict
+        The merged ``{old: new}`` relabelling.
+
+    Notes
+    -----
+    ``Dataset.rename`` is ``rename(name_dict=None, **names)``, so a call spells the mapping
+    positionally (``rename({"month": "time"})``), as kwargs (``rename(month="time")``), or
+    conceivably both; every keyword is a name mapping, since ``rename`` carries no option
+    kwargs. Taken verbatim -- whether each ``old`` is a dim, a variable or both is decided
+    by :func:`_relabelled` against the schema, not here.
+    """
+    mapping: dict[Hashable, Hashable] = {}
+    if args and isinstance(args[0], Mapping):
+        mapping.update(args[0])
+    for old, new in kwargs.items():  # str keys widen to Hashable one at a time
+        mapping[old] = new
+    return mapping
 
 
 def _dropped_names(

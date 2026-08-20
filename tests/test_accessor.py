@@ -28,12 +28,13 @@ from xrexpr.ir import (
     Opaque,
     Project,
     Reduce,
+    Rename,
     Select,
     WeightedReduce,
     WindowedReduce,
 )
 from xrexpr.lower import emit
-from xrexpr.optimize import _schemas
+from xrexpr.optimize import _schemas, optimize
 from xrexpr.schema import SchemaState
 
 #: xrexpr itself never needs dask, but replaying a ``chunk()`` call does -- without a
@@ -392,6 +393,45 @@ def test_select_commutes_with_a_drop_and_replays_equal(ds):
     """A select hopped in front of a ``drop_vars`` (pinned structurally in ``test_optimize``) still equals eager."""
     got = ds.plan.drop_vars("elevation").isel(time=0).collect()
     assert_equal(got, ds.drop_vars("elevation").isel(time=0))
+
+
+def test_rename_records_a_rename_node(ds):
+    """``rename`` records a ``Rename`` node, not an ``Opaque`` barrier, with the mapping gathered."""
+    chain = ds.plan.rename({"time": "t"})
+    (node,) = chain._ops
+    assert isinstance(node, Rename)
+    assert dict(node.mapping) == {"time": "t"}
+    assert not any(isinstance(n, Opaque) for n in chain._ops)
+
+
+def test_rename_kwargs_form_records_a_rename_node(ds):
+    """The keyword spelling ``rename(time="t")`` records the same ``Rename`` mapping as the dict form."""
+    (node,) = ds.plan.rename(time="t")._ops
+    assert isinstance(node, Rename) and dict(node.mapping) == {"time": "t"}
+
+
+def test_rename_dimension_coord_replays_equal(ds):
+    """Renaming a dimension coordinate (``time`` -> ``t``) collects to the eager result, coords included."""
+    got = ds.plan.rename({"time": "t"}).mean("lat")[["temperature"]].collect()
+    assert_equal(got, ds.rename({"time": "t"}).mean("lat")[["temperature"]])
+
+
+def test_rename_data_var_replays_equal(ds):
+    """Renaming a data variable collects to the eager result."""
+    got = ds.plan.rename({"temperature": "temp"}).mean("time").collect()
+    assert_equal(got, ds.rename({"temperature": "temp"}).mean("time"))
+
+
+def test_rename_auxiliary_coord_replays_equal(ds):
+    """Renaming a non-dimension coordinate (``area`` -> ``cell``) collects to the eager result."""
+    got = ds.plan.rename({"area": "cell"}).mean("time").collect()
+    assert_equal(got, ds.rename({"area": "cell"}).mean("time"))
+
+
+def test_select_on_renamed_dim_after_rename_replays_equal(ds):
+    """A ``sel`` on the renamed dim is left behind the rename (pinned in ``test_optimize``) and still equals eager."""
+    got = ds.plan.rename({"time": "t"}).isel(t=0).collect()
+    assert_equal(got, ds.rename({"time": "t"}).isel(t=0))
 
 
 def test_orthogonal_dataarray_select_records_a_select_and_replays_equal(ds):
@@ -1819,15 +1859,41 @@ def test_getitem_after_a_dataset_valued_opaque_is_demoted_too(ds):
     Notes
     -----
     The acknowledged cost of reading ``Opaque`` as receiver-unknown, pinned as intended
-    rather than left to surprise. ``rename`` returns a ``Dataset``, so these two list-form
+    rather than left to surprise. ``transpose`` returns a ``Dataset``, so these two list-form
     projections would merge safely -- but that is only knowable from the opaque's *name*,
     and a table of Dataset-preserving names would rot as xarray grows. Projection pushdown
     loses nothing, since :func:`~xrexpr.optimize._trusted_prefix` already stops it at the
     first ``Opaque``; ``merge_adjacent_projects`` is the whole of what is forfeited.
+
+    (``rename`` used to stand here, but it is a modelled :class:`~xrexpr.ir.Rename` now --
+    W11 -- so the merge across it *does* fire; ``transpose`` is an unmodelled op that still
+    demonstrates the demotion.)
     """
-    chain = ds.plan.rename({"temperature": "t2m"})[["t2m", "elevation"]][["t2m"]]
+    chain = ds.plan.transpose()[["temperature", "elevation"]][["temperature"]]
 
     assert [type(n) for n in chain._ops] == [Opaque, Opaque, Opaque]
+    assert_equal(
+        chain.collect(),
+        ds.transpose()[["temperature", "elevation"]][["temperature"]],
+    )
+
+
+def test_projections_merge_across_a_modelled_rename(ds):
+    """Two list-form projections merge across a modelled ``Rename``, the merge a rename-as-``Opaque`` forfeited.
+
+    Notes
+    -----
+    The flip side of ``test_getitem_after_a_dataset_valued_opaque_is_demoted_too``: because
+    ``rename`` is a modelled :class:`~xrexpr.ir.Rename` (not an ``Opaque`` receiver-unknown
+    barrier), the ``__getitem__``s after it stay :class:`~xrexpr.ir.Project`, so
+    ``merge_adjacent_projects`` collapses the redundant pair -- exactly the W11 payoff.
+    """
+    chain = ds.plan.rename({"temperature": "t2m"})[["t2m", "elevation"]][["t2m"]]
+    assert [type(n) for n in chain._ops] == [Rename, Project, Project]
+
+    optimised = optimize(list(chain._ops), chain._base_schema())
+    assert [type(n) for n in optimised] == [Rename, Project]
+    assert optimised[1].variables == ("t2m",)
     assert_equal(
         chain.collect(),
         ds.rename({"temperature": "t2m"})[["t2m", "elevation"]][["t2m"]],
