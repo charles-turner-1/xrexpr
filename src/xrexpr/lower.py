@@ -235,14 +235,15 @@ def _fuse_grouped(
         case _:
             return None
     if not isinstance(closer, Reduce) or closer.keepdims:
-        # A ``keepdims=True`` grouped reduce *retains the group dim* (sized to the group
-        # count, and left without a coordinate) instead of minting ``new_dim``:
-        # ``groupby("time.month").mean(keepdims=True)`` keeps a coordinate-less ``time`` and
-        # never mints ``month`` (pydata/xarray#11519). That is the opposite of what
-        # ``GroupedReduce`` models (remove the group dim, mint ``new_dim``), so fusing it
-        # would misdescribe it: refuse and let the pair replay verbatim, exactly as an opaque
-        # closer did before #117. (Unlike a plain reduce, the kept dim is size = group count,
-        # not 1.)
+        # A grouped ``keepdims=True`` reduce is nothing ``GroupedReduce`` models. Before
+        # pydata/xarray#11521 it *retained the group dim* (sized to the group count, and
+        # left without a coordinate) instead of minting ``new_dim`` --
+        # ``groupby("time.month").mean(keepdims=True)`` kept a coordinate-less ``time`` and
+        # never minted ``month`` (pydata/xarray#11519); #11521 stops groupby/resample
+        # honouring ``keepdims`` at all, so it now raises instead. ``GroupedReduce``
+        # describes neither (it removes the group dim and mints ``new_dim``), so fusing
+        # would misdescribe it: refuse and let the pair replay verbatim, exactly as an
+        # opaque closer did before #117.
         return None
 
     grouped = _grouper_dims(opener, dim_names)
