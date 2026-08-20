@@ -61,6 +61,7 @@ from xrexpr.ir import (
     Project,
     Rechunk,
     Reduce,
+    Rename,
     Scan,
     Select,
     WeightedReduce,
@@ -325,6 +326,22 @@ def dim_effect(node: LoweredOp) -> DimEffect:
             # ``schema._elementwise_safe``. ``apply_schema`` is exact for the node too, so
             # the trusted prefix rightly spans it with no change to ``_trusted_prefix``.
             return DimEffect(blocks=frozenset(), requires=frozenset())
+        case Rename(mapping=mapping):
+            # A rename relabels dim *names* mid-plan, and the name-keyed pushdowns do not
+            # translate keys across it. So a select on a renamed dim must not hop -- above
+            # the rename that dim has its old name -- while a select on an *untouched* dim
+            # still commutes. ``blocks`` is the set of new names: a select names dims by
+            # their current (post-rename) name, so blocking those keeps a renamed-dim select
+            # put (``immovable``: the dim survives, so leave the chain, never reject it) and
+            # lets an untouched-dim select through. Variable renames in the set are inert --
+            # a select never names a variable. ``requires=None``: the projection pushdown is
+            # dim-keyed, but the hazard here is a *variable*-key rename (a projection naming
+            # a renamed variable cannot precede the rename that mints its new name), which
+            # that machinery cannot see, so no projection crosses via the generic rule. A
+            # schema-aware rename/projection rule, and the name-translating select cross
+            # (``11-relabel-rename-drop.md`` §4), are follow-ups. The schema is exact for the
+            # node regardless, which is what re-opens the trusted prefix past it.
+            return DimEffect(blocks=frozenset(mapping.values()), requires=None)
         case Drop():
             # ``drop_vars`` remaps no dim, so a select commutes with it freely (empty
             # ``blocks`` -- every select is disjoint). But a *projection* may not cross it

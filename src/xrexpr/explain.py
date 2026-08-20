@@ -35,6 +35,7 @@ from xrexpr.ir import (
     Project,
     Rechunk,
     Reduce,
+    Rename,
     Scan,
     Select,
     WeightedReduce,
@@ -137,13 +138,15 @@ def _annotate(node: LoweredOp) -> str:
             Select()
             | Project()
             | Drop()
+            | Rename()
             | Rechunk()
             | Scan()
             | Elementwise()
             | WindowedReduce()
         ):
-            # ``drop_vars(["region"])`` already names what it drops, so annotating it would
-            # restate the call -- the same reason ``Project`` and ``Select`` add nothing.
+            # ``drop_vars(["region"])`` and ``rename({"month": "time"})`` already name what
+            # they do, so annotating them would restate the call -- the same reason
+            # ``Project`` and ``Select`` add nothing.
             return ""
         case _:
             assert_never(node)
