@@ -381,23 +381,27 @@ def test_generic_pushdown_does_not_cross_a_drop():
     Notes
     -----
     A projection moved before a drop could strip the very name ``drop_vars`` targets, turning
-    a valid chain into a ``KeyError`` -- unsafe as a blind swap, so the generic rule refuses.
-    The *profitable* rewrites next to it (a projection excluding the dropped data vars makes
-    the drop redundant; a projection retaining a dropped coord may hop it) turn on the folded
-    schema and want a dedicated trusted-prefix rule -- filed as #176, deliberately not v1.
+    a valid chain into a ``KeyError`` -- unsafe as a blind swap, so the *generic* rule refuses.
+    The profitable rewrites next to it (a projection excluding the dropped data vars makes the
+    drop redundant; a projection retaining a dropped coord may hop it) turn on the folded
+    schema, so they live in the dedicated :func:`~xrexpr.optimize.push_projection_past_drop`
+    rule (#176), not in ``dim_effect``.
     """
     assert dim_effect(_node("drop_vars", ["elevation"])).requires is None
 
 
-def test_projection_hops_a_reduce_behind_a_drop(schema):
-    """Modelling ``drop_vars`` re-opens the trusted prefix, so a projection still hops a reduce behind it.
+def test_projection_hops_a_reduce_behind_a_drop_and_the_drop_is_eliminated(schema):
+    """Modelling ``drop_vars`` re-opens the trusted prefix; the projection hops the reduce and the redundant drop goes.
 
     Notes
     -----
     When ``drop_vars`` recorded ``Opaque`` it was a trust boundary: ``_trusted_prefix``
     returned its index and the schema-reading projection rules went dark on everything after
     it. As a modelled ``Drop`` the prefix spans it, so the projection reaches the front past
-    the ``mean`` exactly as it would with no drop present -- the payoff W11 exists for.
+    the ``mean`` (the payoff W11 exists for) -- and once it sits ahead of the drop,
+    :func:`~xrexpr.optimize.push_projection_past_drop` removes the drop of ``elevation``,
+    which the projection excludes anyway. So the whole ``drop_vars("elevation").mean("time")
+    [["temperature"]]`` collapses to ``[["temperature"]].mean("time")``.
     """
     plan = [
         _node("drop_vars", ["elevation"]),
@@ -405,8 +409,90 @@ def test_projection_hops_a_reduce_behind_a_drop(schema):
         _node("__getitem__", ["temperature"]),
     ]
     out = optimize(plan, schema)
-    assert [n.name for n in out] == ["drop_vars", "__getitem__", "mean"]
-    assert out[1].variables == ("temperature",)
+    assert [n.name for n in out] == ["__getitem__", "mean"]
+    assert out[0].variables == ("temperature",)
+
+
+_AUX_SCHEMA = SchemaState(
+    variables={
+        "temperature": ("time", "lat", "lon"),
+        "elevation": ("lat", "lon"),
+        "time": ("time",),
+        "lat": ("lat",),
+        "lon": ("lon",),
+        "area": ("lat", "lon"),
+    },
+    coord_names=frozenset({"time", "lat", "lon", "area"}),
+    sizes={"time": 4, "lat": 3, "lon": 5},
+)
+
+
+def test_a_redundant_drop_is_eliminated_by_a_projection(schema):
+    """A ``drop_vars`` of a data variable the following projection excludes anyway is removed."""
+    plan = [_node("drop_vars", ["elevation"]), _node("__getitem__", ["temperature"])]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["__getitem__"]
+    assert out[0].variables == ("temperature",)
+
+
+def test_a_drop_of_a_surviving_coord_hops_the_projection():
+    """A projection hops in front of a ``drop_vars`` of a coord it retains; the drop stays after it.
+
+    Notes
+    -----
+    ``area`` is a coordinate ``temperature`` still spans, so it survives ``[["temperature"]]``
+    -- the projection may go first and the ``drop_vars("area")`` follow it, same values.
+    """
+    plan = [_node("drop_vars", ["area"]), _node("__getitem__", ["temperature"])]
+    out = optimize(plan, _AUX_SCHEMA)
+    assert [n.name for n in out] == ["__getitem__", "drop_vars"]
+    assert out[0].variables == ("temperature",)
+    assert out[1].variables == ("area",)
+
+
+def test_a_mixed_drop_is_trimmed_to_its_surviving_coords():
+    """A ``drop_vars`` of a redundant data var *and* a surviving coord hops the projection, trimmed to the coord.
+
+    Notes
+    -----
+    ``elevation`` (a data variable the projection excludes) is redundant and drops out;
+    ``area`` (a retained coordinate) survives, so the hopped plan keeps ``drop_vars("area")``
+    -- and ``elevation`` is never computed.
+    """
+    plan = [
+        _node("drop_vars", ["elevation", "area"]),
+        _node("__getitem__", ["temperature"]),
+    ]
+    out = optimize(plan, _AUX_SCHEMA)
+    assert [n.name for n in out] == ["__getitem__", "drop_vars"]
+    assert out[1].variables == ("area",)
+
+
+def test_a_drop_then_projecting_the_dropped_name_is_left_alone(schema):
+    """A chain that drops a variable and then projects it is an eager error, so the rule declines.
+
+    Notes
+    -----
+    ``drop_vars("temperature")[["temperature"]]`` raises eagerly; rewriting it to run the
+    projection first would launder that error into a value, which the rule must never do.
+    """
+    plan = [_node("drop_vars", ["temperature"]), _node("__getitem__", ["temperature"])]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["drop_vars", "__getitem__"]
+
+
+def test_a_drop_of_an_absent_name_before_a_projection_is_left_alone(schema):
+    """A ``drop_vars`` naming something absent raises eagerly, so the rule declines rather than eliding it."""
+    plan = [_node("drop_vars", ["nope"]), _node("__getitem__", ["temperature"])]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["drop_vars", "__getitem__"]
+
+
+def test_a_single_name_projection_does_not_absorb_a_drop(schema):
+    """A bare-name projection (a ``DataArray``) is out of scope, so a preceding drop is left alone."""
+    plan = [_node("drop_vars", ["elevation"]), _node("__getitem__", "temperature")]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["drop_vars", "__getitem__"]
 
 
 def test_nothing_reorders_around_an_unsafe_elementwise(schema):

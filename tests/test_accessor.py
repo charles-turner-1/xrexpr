@@ -33,7 +33,7 @@ from xrexpr.ir import (
     WindowedReduce,
 )
 from xrexpr.lower import emit
-from xrexpr.optimize import _schemas
+from xrexpr.optimize import _schemas, optimize
 from xrexpr.schema import SchemaState
 
 #: xrexpr itself never needs dask, but replaying a ``chunk()`` call does -- without a
@@ -386,6 +386,30 @@ def test_drop_dimension_coord_keeps_the_dim_and_replays_equal(ds):
     """
     got = ds.plan.drop_vars("time").isel(time=0).collect()
     assert_equal(got, ds.drop_vars("time").isel(time=0))
+
+
+def test_a_redundant_drop_is_eliminated_and_replays_equal(ds):
+    """A ``drop_vars`` of a data var the projection excludes is removed entirely, and the plan still equals eager.
+
+    Notes
+    -----
+    ``drop_vars("elevation")[["temperature"]]`` collapses to ``[["temperature"]]`` --
+    ``elevation`` is never computed -- via :func:`~xrexpr.optimize.push_projection_past_drop`
+    (#176). The value must still match the eager chain.
+    """
+    chain = ds.plan.drop_vars("elevation")[["temperature"]]
+    optimised = optimize(list(chain._ops), chain._base_schema())
+    assert [type(n).__name__ for n in optimised] == ["Project"]
+    assert_equal(chain.collect(), ds.drop_vars("elevation")[["temperature"]])
+
+
+def test_a_surviving_coord_drop_hops_the_projection_and_replays_equal(ds):
+    """A ``drop_vars`` of a retained coordinate hops behind the projection, trimmed, and still equals eager."""
+    chain = ds.plan.drop_vars(["elevation", "area"])[["temperature"]]
+    optimised = optimize(list(chain._ops), chain._base_schema())
+    assert [type(n).__name__ for n in optimised] == ["Project", "Drop"]
+    assert optimised[1].variables == ("area",)
+    assert_equal(chain.collect(), ds.drop_vars(["elevation", "area"])[["temperature"]])
 
 
 def test_select_commutes_with_a_drop_and_replays_equal(ds):

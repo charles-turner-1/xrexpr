@@ -897,6 +897,106 @@ def eliminate_projection_before_coord(nodes: Plan, schema: SchemaState) -> Plan 
     return None
 
 
+def push_projection_past_drop(nodes: Plan, schema: SchemaState) -> Plan | None:
+    """Hop a projection in front of a preceding ``drop_vars``, trimming the drop to survivors.
+
+    Parameters
+    ----------
+    nodes : Plan
+        The plan to rewrite.
+    schema : SchemaState
+        The schema of the dataset the plan starts from. Load-bearing: which dropped names
+        *survive* the projection is a fact only the fold knows.
+
+    Returns
+    -------
+    Plan or None
+        The plan with one ``(Drop, Project)`` pair rewritten, or ``None`` when none
+        qualifies.
+
+    Notes
+    -----
+    ``ds.drop_vars("elevation")[["temperature"]]`` drops a variable and then projects a
+    disjoint one — so the drop is *redundant*, the projection removes ``elevation`` anyway,
+    and the optimal plan is ``ds[["temperature"]]``, which never touches ``elevation``.
+    ``ds.drop_vars("area")[["temperature"]]``, with ``area`` a coordinate ``temperature``
+    still spans, is the other half: ``area`` *survives* the projection, so the projection may
+    go first and the ``drop_vars("area")`` stay after it, same values. Both are the one
+    rewrite: for a ``(Drop(names), Project(keep))`` pair, put the projection first and keep a
+    ``Drop`` of only the names that survive it —
+
+    ``[Drop(names), Project(keep)] -> [Project(keep), Drop(names & survivors)]`` (the trailing
+    ``Drop`` dropped entirely when nothing survives).
+
+    A **survivor** is a dropped name a projection would keep: a coordinate whose dims the kept
+    variables still span (a projection keeps the coords its selected variables span). A
+    dropped **data variable** is never a survivor — the projection excludes it — so it is the
+    redundant case that shrinks the plan. The pair rewrites when, in the schema entering the
+    ``Drop``:
+
+    - the projection is **list-form** (``not single``): a bare-name projection yields a
+      ``DataArray``, whose ``drop_vars`` drops coordinates with different reach; kept in
+      Dataset land, as the other projection rules are.
+    - **every name the projection keeps is a tracked data variable**, so it is a genuine
+      modelled projection and its spanned dims are known, and it **names nothing the drop
+      removes** (a chain that drops then projects the same name is an eager ``KeyError`` this
+      rule must not launder into a value).
+    - **every dropped name is present** in the schema, so the eager ``drop_vars`` succeeds:
+      dropping an absent name raises (``errors="raise"``), and eliding it here would turn that
+      error into a value -- the one thing ``planning/roadmap/07-small-wins.md`` §8 forbids.
+      With every name present the drop's ``errors`` kwarg is moot, so the trimmed ``Drop`` is
+      rebuilt from the survivors without it.
+
+    **This rule may skip an error, and that is the same §8 licence** :func:`pushdown_projections`
+    runs on: the dropped data variables are never computed, so a chain that would raise while
+    building one it discards (``ds.drop_vars("elevation")`` after an op that errors on
+    ``elevation``) returns the projection-first answer instead. No surviving value moves.
+
+    Confined to the trusted prefix, so the receiver is a known ``Dataset`` and the fold is
+    exact. The elimination case shrinks the plan; the hop case moves the projection one left
+    (and a ``Drop`` is neither a ``Select`` nor a ``Project``, so it does not enter the
+    measure) -- either way the termination measure strictly decreases. One rewrite per call;
+    :func:`optimize`'s fixpoint composes them. Issue #176.
+    """
+    if not any(isinstance(node, Drop) for node in nodes):
+        return None  # nothing to rewrite: don't fold the schema for a drop-free plan
+
+    limit = _trusted_prefix(nodes)
+    schemas = _schemas(nodes[:limit], schema)
+    for i in range(limit - 1):
+        first, second = nodes[i], nodes[i + 1]
+        if not isinstance(first, Drop) or not isinstance(second, Project):
+            continue
+        if second.single:
+            continue  # a bare-name projection is DataArray indexing, out of scope
+
+        entering = schemas[i]
+        dropped = set(first.variables)
+        if not dropped <= set(entering.variables):
+            continue  # a name the drop names is absent; the eager drop_vars would raise
+        keep = second.variables
+        if not all(n in entering.data_vars for n in keep) or dropped & set(keep):
+            continue  # projection isn't a modelled data-var projection, or drops-then-keeps
+
+        spanned = {d for n in keep for d in entering.variables[n]}
+        survivors = tuple(
+            n
+            for n in first.variables
+            if n in entering.coord_names and set(entering.variables[n]) <= spanned
+        )
+        moved: Plan = [second]
+        if survivors:
+            moved.append(
+                Drop(
+                    name=first.name,
+                    args=(list(survivors),),
+                    variables=survivors,
+                )
+            )
+        return list(nodes[:i]) + moved + list(nodes[i + 2 :])
+    return None
+
+
 def pushdown_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
     """Hop a select left past a preceding node whose dims permit it.
 
@@ -1350,6 +1450,7 @@ _RULES: tuple[Rule, ...] = (
     merge_adjacent_projects,
     merge_adjacent_rechunks,
     eliminate_projection_before_coord,
+    push_projection_past_drop,
     pushdown_selects,
     pushdown_projections,
     pushdown_selects_past_rechunks,
