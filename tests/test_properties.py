@@ -882,11 +882,15 @@ def _calls(draw, ds, max_ops=4, builders=False):
             # which a later generated ``sel`` cannot draw a label (``indexers`` reads the
             # coord's values during generation). That case -- and the dim-survives-its-coord
             # schema fact it exercises -- is pinned by the hand-written suite instead.
-            droppable = sorted(str(n) for n in current.variables if n not in current.dims)
+            droppable = sorted(
+                str(n) for n in current.variables if n not in current.dims
+            )
             if not droppable:
                 continue
             names = draw(
-                st.lists(st.sampled_from(droppable), min_size=1, unique=True).map(sorted)
+                st.lists(st.sampled_from(droppable), min_size=1, unique=True).map(
+                    sorted
+                )
             )
             call = Call("drop_vars", names)
             current = _apply(current, [call])
