@@ -957,6 +957,10 @@ def push_projection_past_drop(nodes: Plan, schema: SchemaState) -> Plan | None:
     (and a ``Drop`` is neither a ``Select`` nor a ``Project``, so it does not enter the
     measure) -- either way the termination measure strictly decreases. One rewrite per call;
     :func:`optimize`'s fixpoint composes them. Issue #176.
+
+    ``drop_vars`` is a metadata-only op, so eliminating it saves little *runtime*; whether
+    this rule earns the schema fold it triggers is a cost/benefit question to be profiled,
+    tracked in #180 (it is confined and correct either way).
     """
     if not any(isinstance(node, Drop) for node in nodes):
         return None  # nothing to rewrite: don't fold the schema for a drop-free plan
