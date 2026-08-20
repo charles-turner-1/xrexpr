@@ -35,6 +35,7 @@ __all__ = [
     "ContextOpen",
     "ContextOpenName",
     "DimSet",
+    "Drop",
     "Elementwise",
     "FluentOp",
     "GroupedReduce",
@@ -431,6 +432,45 @@ class Opaque:
 
 
 @dataclass(frozen=True)
+class Drop:
+    """A ``drop_vars`` call — ``ds.drop_vars("region")`` or ``ds.drop_vars(["a", "b"])``.
+
+    Attributes
+    ----------
+    name : {"drop_vars"}
+        Always ``"drop_vars"``. A closed set, so a ``Literal``.
+    args : tuple
+        The call's positional arguments, verbatim — the key itself.
+    kwargs : frozendict
+        The call's keyword arguments, verbatim.
+    variables : tuple of Hashable
+        The names being dropped, in order.
+
+    Notes
+    -----
+    Modelled rather than :class:`Opaque` so the schema fold stays exact across it: the
+    named variables and coordinates leave the schema, and any dimension left spanned by
+    nothing is pruned by :class:`~xrexpr.schema.SchemaState`. Replay is a verbatim
+    ``drop_vars`` — the only thing the modelling buys is that the optimiser can see past
+    it, which is what ``planning/roadmap/11-relabel-rename-drop.md`` (W11) exists for.
+
+    Dim-transparent: unlike :class:`Rename` it remaps no dim name, so a select commutes
+    with it freely. A *projection* may not cross it, though — moving one earlier could
+    drop the very name ``drop_vars`` targets, turning a valid chain into a ``KeyError``.
+    """
+
+    name: Literal["drop_vars"]  # closed set → Literal
+    args: tuple[Any, ...] = ()
+    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    variables: tuple[Hashable, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "args", tuple(self.args))
+        object.__setattr__(self, "kwargs", frozendict(self.kwargs))
+        object.__setattr__(self, "variables", tuple(self.variables))
+
+
+@dataclass(frozen=True)
 class ContextOpen:
     """A builder-returning call — ``groupby``/``rolling``/``weighted``/... .
 
@@ -702,7 +742,7 @@ class WeightedReduce:
 #: The optimiser's IR node — a sum over the structural op *kinds*. ``match`` over this
 #: binds different fields per arm; ``typing.assert_never`` on the ``case _`` arm makes
 #: the union exhaustive (adding a variant fails type-check at every unhandled site).
-Op = Reduce | Select | Scan | Elementwise | Project | Rechunk | Opaque
+Op = Reduce | Select | Scan | Elementwise | Project | Drop | Rechunk | Opaque
 
 #: What the recorder produces — one node per call, as the fluent API spelled it —
 #: including the half-operations (:class:`ContextOpen`) that only mean something paired.

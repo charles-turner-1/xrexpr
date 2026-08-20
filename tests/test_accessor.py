@@ -22,6 +22,7 @@ from xrexpr.exceptions import InvalidExpressionError
 from xrexpr.ir import (
     ALL_DIMS,
     ContextOpen,
+    Drop,
     Elementwise,
     GroupedReduce,
     Opaque,
@@ -350,6 +351,47 @@ def test_fillna_with_dataarray_records_opaque_and_replays_equal(ds):
     chain = ds.plan.fillna(other)
     assert any(isinstance(n, Opaque) and n.name == "fillna" for n in chain._ops)
     assert_equal(chain.collect(), ds.fillna(other))
+
+
+def test_drop_vars_records_a_drop_node(ds):
+    """``drop_vars`` records a ``Drop`` node, not an ``Opaque`` barrier, with the names in order."""
+    chain = ds.plan.drop_vars(["elevation", "area"])
+    (node,) = chain._ops
+    assert isinstance(node, Drop)
+    assert node.variables == ("elevation", "area")
+    assert not any(isinstance(n, Opaque) for n in chain._ops)
+
+
+def test_drop_data_var_in_a_chain_replays_equal(ds):
+    """A chain dropping a data variable collects to the eager result, auxiliary coords included."""
+    got = ds.plan.drop_vars("elevation").mean("time")[["temperature"]].collect()
+    assert_equal(got, ds.drop_vars("elevation").mean("time")[["temperature"]])
+
+
+def test_drop_auxiliary_coord_replays_equal(ds):
+    """Dropping a non-dimension coordinate (``area``) collects to the eager result."""
+    got = ds.plan.drop_vars("area").mean("lat").collect()
+    assert_equal(got, ds.drop_vars("area").mean("lat"))
+
+
+def test_drop_dimension_coord_keeps_the_dim_and_replays_equal(ds):
+    """Dropping a *dimension* coordinate keeps the dim (a data var still spans it) and replays to eager.
+
+    Notes
+    -----
+    ``drop_vars("time")`` removes the ``time`` coordinate but leaves ``time`` a dimension
+    without coordinates, since ``temperature`` still spans it -- the schema edge that is not
+    a plain ``_aggregated`` drop, and the case the property generator holds out (a
+    coordinate-less dim breaks a later generated ``sel``).
+    """
+    got = ds.plan.drop_vars("time").isel(time=0).collect()
+    assert_equal(got, ds.drop_vars("time").isel(time=0))
+
+
+def test_select_commutes_with_a_drop_and_replays_equal(ds):
+    """A select hopped in front of a ``drop_vars`` (pinned structurally in ``test_optimize``) still equals eager."""
+    got = ds.plan.drop_vars("elevation").isel(time=0).collect()
+    assert_equal(got, ds.drop_vars("elevation").isel(time=0))
 
 
 def test_orthogonal_dataarray_select_records_a_select_and_replays_equal(ds):

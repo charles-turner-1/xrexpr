@@ -126,7 +126,7 @@ HAS_DASK = importlib.util.find_spec("dask") is not None
 #: zero-length dim), and a chain that raises *in xarray* tests nothing here. Selects and
 #: projections are exactly what the rechunk rules are about, so nothing under test is lost —
 #: and a reduce or builder *before* a chunk is still drawn freely.
-AFTER_CHUNK = ["isel", "sel", "project", "elementwise", "chunk"]
+AFTER_CHUNK = ["isel", "sel", "project", "elementwise", "drop_vars", "chunk"]
 
 #: Reductions with no identity element, which numpy refuses to apply to an empty axis
 #: ("zero-size array to reduction operation fmax which has no identity"). An empty
@@ -826,7 +826,7 @@ def _calls(draw, ds, max_ops=4, builders=False):
 
     # "builder" twice, so the ``assume`` in ``builder_plans`` discards fewer examples —
     # a chain with no builder pair in it is just a plain chain, already covered.
-    kinds = ["isel", "sel", "reduce", "scan", "project", "elementwise"] + (
+    kinds = ["isel", "sel", "reduce", "scan", "project", "elementwise", "drop_vars"] + (
         ["builder"] * 2 if builders else []
     )
     if HAS_DASK:
@@ -872,6 +872,27 @@ def _calls(draw, ds, max_ops=4, builders=False):
                     )
                 ),
             )
+            current = _apply(current, [call])
+            calls.append(call)
+            continue
+
+        if kind == "drop_vars":
+            # ``drop_vars`` removes named variables by key. Draw only names that are *not*
+            # dimension coordinates: dropping a dim-coord leaves a coordinate-less dim, on
+            # which a later generated ``sel`` cannot draw a label (``indexers`` reads the
+            # coord's values during generation). That case -- and the dim-survives-its-coord
+            # schema fact it exercises -- is pinned by the hand-written suite instead.
+            droppable = sorted(
+                str(n) for n in current.variables if n not in current.dims
+            )
+            if not droppable:
+                continue
+            names = draw(
+                st.lists(st.sampled_from(droppable), min_size=1, unique=True).map(
+                    sorted
+                )
+            )
+            call = Call("drop_vars", names)
             current = _apply(current, [call])
             calls.append(call)
             continue
