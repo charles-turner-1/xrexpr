@@ -35,6 +35,7 @@ from xrexpr.ir import (
     AllDims,
     ContextOpen,
     DimSet,
+    Drop,
     Elementwise,
     FluentOp,
     GroupedReduce,
@@ -50,6 +51,7 @@ from xrexpr.ir import (
 )
 from xrexpr.operations import (
     ContextSpec,
+    DropSpec,
     ElementwiseSpec,
     ProjectSpec,
     RechunkSpec,
@@ -549,6 +551,17 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
             dropped = {c for c in coord_names if not over.isdisjoint(variables[c])}
             coord_names -= dropped
             variables = {k: v for k, v in variables.items() if k not in dropped}
+        case Drop(variables=names):
+            # ``drop_vars`` removes named variables/coordinates by *key* -- not by dim, so
+            # this is not ``_aggregated``. A dimension left spanned by nothing afterwards
+            # (its last variable dropped, no coordinate holding it) is pruned by
+            # ``SchemaState.__post_init__``; a dim-coordinate's dim survives while a data
+            # variable still spans it, exactly as xarray leaves a dimension without
+            # coordinates. Verified against xarray 2026.7.0 for a data var, an auxiliary
+            # coordinate and a dimension coordinate.
+            dropped = set(names)
+            variables = {k: v for k, v in variables.items() if k not in dropped}
+            coord_names -= dropped
         case Elementwise() | Scan() | Rechunk() | Opaque():
             pass
         case _:
@@ -938,6 +951,16 @@ def to_opnode(
                 kwargs=kw,
                 chunks=_chunk_spec(args, kwargs),
             )
+        case DropSpec(name=drop):
+            # ``drop_vars`` removes named variables/coords -- modelled, not ``Opaque``, so
+            # the schema fold stays exact past it (``_dropped_names`` splits its argument
+            # exactly as xarray does).
+            return Drop(
+                name=drop,
+                args=args,
+                kwargs=kw,
+                variables=_dropped_names(args, kwargs),
+            )
         case ContextSpec(name=opener):
             # Decidable per-call even though what it *means* is not: a builder-returning
             # method opens a context whatever follows it. Pairing is lowering's job.
@@ -1033,6 +1056,37 @@ def _select_has_advanced(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> bo
         isinstance(classify(v), Advanced)
         for v in _select_indexer(args, kwargs).values()
     )
+
+
+def _dropped_names(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> tuple[Hashable, ...]:
+    """Return the names a ``drop_vars`` call removes, in order.
+
+    Parameters
+    ----------
+    args : tuple
+        The ``drop_vars`` call's positional arguments — the names, if given positionally.
+    kwargs : Mapping
+        The call's keyword arguments — the names may be passed as ``names=`` instead.
+
+    Returns
+    -------
+    tuple of Hashable
+        The names being dropped.
+
+    Notes
+    -----
+    Split exactly where ``Dataset.drop_vars`` splits its own argument: a **str** or any
+    other **non-iterable** is one name (``drop_vars("region")``), while any other iterable
+    is a sequence of them (``drop_vars(["a", "b"])``). This differs from
+    :func:`_projected_names`, which follows ``__getitem__``'s rule instead — a bare tuple
+    is one name there but several here — so the two are deliberately not shared.
+    """
+    names = args[0] if args else kwargs["names"]
+    if isinstance(names, str) or not isinstance(names, Iterable):
+        return (names,)
+    return tuple(names)
 
 
 def _projected_names(args: tuple[Any, ...]) -> tuple[Hashable, ...] | None:

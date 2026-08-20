@@ -53,6 +53,7 @@ from xrexpr.ir import (
     ALL_DIMS,
     AllDims,
     DimSet,
+    Drop,
     Elementwise,
     GroupedReduce,
     LoweredOp,
@@ -324,6 +325,17 @@ def dim_effect(node: LoweredOp) -> DimEffect:
             # ``schema._elementwise_safe``. ``apply_schema`` is exact for the node too, so
             # the trusted prefix rightly spans it with no change to ``_trusted_prefix``.
             return DimEffect(blocks=frozenset(), requires=frozenset())
+        case Drop():
+            # ``drop_vars`` remaps no dim, so a select commutes with it freely (empty
+            # ``blocks`` -- every select is disjoint). But a *projection* may not cross it
+            # blindly: moved before the drop it could remove the very name ``drop_vars``
+            # targets, turning a valid chain into a ``KeyError`` -- so ``requires=None``. The
+            # profitable schema-aware rewrites next to it (a projection excluding the dropped
+            # data vars makes the drop redundant; one retaining a dropped coord may hop it)
+            # want a dedicated trusted-prefix rule -- issue #176. The schema is exact for the
+            # node regardless (``apply_schema``), which is what re-opens the trusted prefix
+            # past it; crossability is the secondary question.
+            return DimEffect(blocks=frozenset(), requires=None)
         case Project() | Rechunk() | Opaque():
             return _OPAQUE_EFFECT
         case _:

@@ -27,6 +27,7 @@ from typing_extensions import assert_never
 from xrexpr.ir import (
     AllDims,
     DimSet,
+    Drop,
     Elementwise,
     GroupedReduce,
     LoweredOp,
@@ -133,8 +134,16 @@ def _annotate(node: LoweredOp) -> str:
         case Opaque():
             return "not modelled -- nothing crosses it"
         case (
-            Select() | Project() | Rechunk() | Scan() | Elementwise() | WindowedReduce()
+            Select()
+            | Project()
+            | Drop()
+            | Rechunk()
+            | Scan()
+            | Elementwise()
+            | WindowedReduce()
         ):
+            # ``drop_vars(["region"])`` already names what it drops, so annotating it would
+            # restate the call -- the same reason ``Project`` and ``Select`` add nothing.
             return ""
         case _:
             assert_never(node)

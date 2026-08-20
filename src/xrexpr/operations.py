@@ -29,6 +29,7 @@ __all__ = [
     "CONTEXT_METHODS",
     "OP_TABLE",
     "ContextSpec",
+    "DropSpec",
     "ElementwiseSpec",
     "OpSpec",
     "ProjectSpec",
@@ -166,6 +167,19 @@ class ProjectSpec:
 
 
 @dataclass(frozen=True)
+class DropSpec:
+    """A ``drop_vars`` call: removes named variables/coordinates, changing no dim or value.
+
+    Attributes
+    ----------
+    name : {"drop_vars"}
+        Always ``"drop_vars"``. A closed set, so a ``Literal``.
+    """
+
+    name: Literal["drop_vars"] = "drop_vars"
+
+
+@dataclass(frozen=True)
 class ContextSpec:
     """A builder-returning call — ``groupby``/``rolling``/``weighted``/... .
 
@@ -199,6 +213,7 @@ OpSpec = (
     | SelectSpec
     | RechunkSpec
     | ProjectSpec
+    | DropSpec
     | ContextSpec
 )
 
@@ -239,6 +254,7 @@ _SPECS: tuple[OpSpec, ...] = (
     SelectSpec("sel"),
     RechunkSpec("chunk"),
     ProjectSpec(),
+    DropSpec(),
     *(ContextSpec(name) for name in _CONTEXTS),
 )
 

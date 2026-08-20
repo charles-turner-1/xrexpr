@@ -368,6 +368,47 @@ def test_projection_composes_past_an_elementwise_and_a_reduce(schema):
     assert [n.name for n in out] == ["__getitem__", "mean", "astype"]
 
 
+def test_select_hops_past_a_drop(schema):
+    """A select hops in front of a ``drop_vars``: dropping a variable and selecting commute."""
+    plan = [_node("drop_vars", ["elevation"]), _node("isel", time=0)]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["isel", "drop_vars"]
+
+
+def test_generic_pushdown_does_not_cross_a_drop():
+    """``Drop`` answers ``requires=None``, so the generic projection pushdown never hops it.
+
+    Notes
+    -----
+    A projection moved before a drop could strip the very name ``drop_vars`` targets, turning
+    a valid chain into a ``KeyError`` -- unsafe as a blind swap, so the generic rule refuses.
+    The *profitable* rewrites next to it (a projection excluding the dropped data vars makes
+    the drop redundant; a projection retaining a dropped coord may hop it) turn on the folded
+    schema and want a dedicated trusted-prefix rule -- filed as #176, deliberately not v1.
+    """
+    assert dim_effect(_node("drop_vars", ["elevation"])).requires is None
+
+
+def test_projection_hops_a_reduce_behind_a_drop(schema):
+    """Modelling ``drop_vars`` re-opens the trusted prefix, so a projection still hops a reduce behind it.
+
+    Notes
+    -----
+    When ``drop_vars`` recorded ``Opaque`` it was a trust boundary: ``_trusted_prefix``
+    returned its index and the schema-reading projection rules went dark on everything after
+    it. As a modelled ``Drop`` the prefix spans it, so the projection reaches the front past
+    the ``mean`` exactly as it would with no drop present -- the payoff W11 exists for.
+    """
+    plan = [
+        _node("drop_vars", ["elevation"]),
+        _node("mean", "time"),
+        _node("__getitem__", ["temperature"]),
+    ]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["drop_vars", "__getitem__", "mean"]
+    assert out[1].variables == ("temperature",)
+
+
 def test_nothing_reorders_around_an_unsafe_elementwise(schema):
     """A ``fillna`` with a per-variable ``dict`` records ``Opaque``, so the select stays put behind it.
 
@@ -1599,6 +1640,7 @@ def test_dim_effect_covers_every_lowered_variant():
             _node("cumsum", "time"),
             _node("fillna", 0),
             _node("__getitem__", ["temperature"]),
+            _node("drop_vars", ["region"]),
             _node("chunk", {"time": 2}),
             _node("where", "cond"),
             _grouped(),
