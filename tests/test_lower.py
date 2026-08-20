@@ -281,18 +281,23 @@ def test_window_spec_is_read_off_the_opener(opener, window):
     assert node.reduce == "mean"
 
 
-def test_a_windowed_closer_with_a_parsed_dim_spec_does_not_fuse():
-    """``rolling(time=3).mean("lat")`` refuses to fuse, because the dim spec is a misparse.
+def test_a_windowed_closer_with_a_parsed_dim_spec_still_fuses():
+    """``rolling(time=3).mean("lat")`` fuses: the parsed dim spec is a provably inert misparse.
 
     Notes
     -----
-    The trap: ``DatasetRolling.mean`` is ``(keep_attrs=None, **kwargs)`` — it takes no dim
-    argument, so this passes ``"lat"`` as *keep_attrs* and reduces nothing. ``to_opnode``
-    cannot know that and records ``consumes={"lat"}``. Fusing would import a dim effect
-    invented by a misparse.
+    ``DatasetRolling.mean`` is ``(keep_attrs=None, **kwargs)`` — it takes no dim argument,
+    so this passes ``"lat"`` as *keep_attrs* and reduces nothing
+    (``rolling(time=3).mean("lat")`` == ``.mean()``). ``to_opnode`` cannot know that and
+    records ``consumes={"lat"}``, but a ``WindowedReduce`` drops that misparse and reads
+    only ``window``, so the pair fuses rather than falling to ``Opaque``. ``reduce_args``
+    rides along verbatim so replay preserves the ``keep_attrs`` truthiness.
     """
-    lowered = _lower(("rolling", (), {"time": 3}), ("mean", ("lat",), {}))
-    assert [type(n) for n in lowered] == [Opaque, Opaque]
+    (node,) = _lower(("rolling", (), {"time": 3}), ("mean", ("lat",), {}))
+    assert isinstance(node, WindowedReduce)
+    assert dict(node.window) == {"time": 3}
+    assert node.reduce == "mean"
+    assert node.reduce_args == ("lat",)
 
 
 def test_windowed_option_kwargs_are_not_windows():
@@ -362,14 +367,15 @@ def test_weighted_pair_fuses_with_a_bare_closer():
 
 
 def test_weighted_closer_keeps_the_dims_it_named():
-    """A weighted closer that named dims fuses and carries them over, unlike a windowed one.
+    """A weighted closer that named dims carries them over, unlike an inert windowed one.
 
     Notes
     -----
     The asymmetry with ``rolling``, and a fact about the two signatures rather than a
     judgement: ``DatasetWeighted.mean`` is ``(dim=None, *, skipna, keep_attrs)`` — it
-    really does take a dim — while ``DatasetRolling.mean`` takes none, which is what makes
-    ``rolling(time=3).mean("lat")`` a misparse that must not fuse.
+    really does take a dim, so its ``consumes`` is real and is carried into the node — while
+    ``DatasetRolling.mean`` takes none, so ``rolling(time=3).mean("lat")`` fuses too but
+    *drops* the inert dim rather than consuming it.
     """
     (node,) = _lower(("weighted", (_weights("lat"),), {}), ("mean", (["lat"],), {}))
     assert node.consumes == frozenset({"lat"})
