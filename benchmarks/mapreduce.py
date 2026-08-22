@@ -44,9 +44,10 @@ def _():
     import dask.array as da
     import matplotlib.pyplot as plt
     import numpy as np
+    import pytest
     import xarray as xr
 
-    return da, np, plt, time, xr
+    return da, np, plt, pytest, time, xr
 
 
 @app.cell
@@ -631,7 +632,7 @@ def _(da, da_x, np):
 
 
 @app.cell
-def _(grafted, mapreduce_array, mo, np, template):
+def assert_graft_correct(grafted, mapreduce_array, mo, np, template):
     # 1. Same answer as the naive path (value correctness).
     _grafted_val = float(np.asarray(grafted.compute()))
     _naive_val = float(np.asarray(template.compute()))
@@ -732,6 +733,127 @@ def _(graft_speed_rows, graft_speedup, mo):
             mo.ui.table(graft_speed_rows, selection=None),
         ]
     )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Toward library code: the graft as three functions
+
+    Everything the notebook did by hand, pulled into functions with no notebook state
+    behind them. This is the shape the logic would take inside xrexpr's `map_blocks`
+    emitter: a per-block kernel, a builder for the bare map-reduce dask array, and the
+    graft that borrows xarray's metadata. Read these plus the test cell below and you have
+    the whole feature, ready to lift out.
+    """)
+    return
+
+
+@app.cell
+def library_candidate(da, np, xr):
+    from collections.abc import Callable
+
+    # The per-block kernel, split into its two parts. `f` is the elementwise transform
+    # (the swappable bit — the whole elementwise chain the IR would fuse); everything
+    # around it is the fixed map-reduce scaffolding: apply f in-register, collapse the
+    # block to (sum, count), reshape so it tiles back. Leading axis holds the two
+    # partials; one length-1 axis per input dim gives the (2, 1, 1, ...) block output.
+    def _block_stats(block: np.ndarray, f: Callable[[np.ndarray], np.ndarray]) -> np.ndarray:
+        mapped = f(block)
+        return np.array(
+            [mapped.sum(dtype=np.float64), mapped.size], dtype=np.float64
+        ).reshape((2,) + (1,) * block.ndim)
+
+    # Build the bare map-reduce dask array for mean(f(x)): a scalar graph with no
+    # dims/coords/attrs. Emitter's job — produce correct *values*, wear no labels yet.
+    # `f` is the elementwise transform applied inside each block before the collapse.
+    def mapreduce_mean(data: xr.DataArray, f: Callable[[np.ndarray], np.ndarray]):
+        # Output chunk grid, derived from the input's: axis 0 is the length-2 partials as
+        # one chunk, then one length-1 chunk per input chunk along every original axis.
+        stats_chunks = ((2,),) + tuple(
+            tuple(1 for _ in axis_chunks) for axis_chunks in data.data.chunks
+        )
+        partials = da.map_blocks(
+            _block_stats, data.data, f, dtype=np.float64, chunks=stats_chunks, new_axis=0
+        )
+        return partials[0].sum() / partials[1].sum()
+
+    # Graft the fast array onto xarray's own reduction shell. xarray computes the
+    # metadata (the template); copy(data=...) swaps in our graph and validates the shape.
+    # Returns the template too, so callers can check the graft preserved it. The C->F
+    # transform is just the elementwise lambda handed to mapreduce_mean.
+    def grafted_mean(data: xr.DataArray):
+        f = lambda x: x * 1.8 + 32
+        template = ((data * 1.8) + 32).mean()
+        array = mapreduce_mean(data, f)
+        return template.copy(data=array), template, array
+
+    return (grafted_mean,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Tests
+
+    The correctness claims the notebook makes above, pinned as `pytest` tests over the
+    functions just extracted. marimo collects the `test_*` functions in the cell below, so
+    `pytest benchmarks/mapreduce.py` runs them without executing the whole notebook. The
+    fixtures build their own data, so the cell is self-contained: read it top to bottom and
+    it reads like a test module for library code. The cell takes `grafted_mean`, `da` and
+    `xr` (and `pytest`) as parameters; marimo's DAG wires them in.
+    """)
+    return
+
+
+@app.cell
+def _(da, grafted_mean, pytest, xr):
+    @pytest.fixture
+    def data():
+        # A small chunked cube built on the fly — the fixtures own the input, so the
+        # tests don't lean on any notebook global. 200³ in 100³ chunks = 8 blocks.
+        return xr.DataArray(
+            da.random.random((200, 200, 200), chunks=(100, 100, 100)),
+            dims=("time", "y", "x"),
+            name="temperature_c",
+        ).persist()
+
+    @pytest.fixture
+    def graft(data):
+        # Everything under test, constructed from the data fixture via the extracted
+        # function. Returns (grafted, template, mapreduce_array).
+        return grafted_mean(data)
+
+    def test_graft_matches_naive_value(graft):
+        # The grafted map-reduce graph and the naive template compute the same scalar.
+        import numpy as np
+
+        grafted, template, _ = graft
+        assert np.allclose(
+            float(np.asarray(grafted.compute())),
+            float(np.asarray(template.compute())),
+            rtol=1e-6,
+        )
+
+    def test_graft_preserves_metadata(graft):
+        # copy(data=...) keeps xarray's shell: grafted must be indistinguishable from the
+        # un-fused template in every piece of metadata a consumer can observe.
+        grafted, template, _ = graft
+        assert grafted.dims == template.dims
+        assert grafted.shape == template.shape
+        assert grafted.name == template.name
+        assert grafted.attrs == template.attrs
+        assert list(grafted.coords) == list(template.coords)
+
+    def test_graft_carries_our_graph(graft):
+        # The shell points at our dask array, and its graph is not the template's:
+        # a real substitution, not a relabel of xarray's own reduction. (Task count is
+        # deliberately not asserted; see "Reading the map".)
+        grafted, template, array = graft
+        assert grafted.data is array
+        assert grafted.data.__dask_graph__() is not template.data.__dask_graph__()
+
     return
 
 

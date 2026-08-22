@@ -145,3 +145,5 @@ scratch/
 
 # Sample/scratch datasets
 *.nc
+
+__marimo__/
