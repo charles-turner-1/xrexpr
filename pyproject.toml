@@ -11,10 +11,10 @@ description = "Rewrite chained expressions on xarray datasets to improve perform
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
-  { name = "Charle Turner", email = "charles.turner@anu.edu.au"},
+  { name = "Charles Turner", email = "charles.turner@anu.edu.au"},
 ]
 maintainers = [
-  { name = "Charle Turner", email = "charles.turner@anu.edu.au"},
+  { name = "Charles Turner", email = "charles.turner@anu.edu.au"},
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
