@@ -201,6 +201,7 @@ xrexpr = {editable = true, path = "."}
 
 [tool.pixi.environments]
 default = { features = ["dev", "test", "numbagg"], solve-group = "default" }
+bench = { features = ["dev", "test", "marimo"] }
 test-py310 = { features = ["py310", "test", "numbagg"] }
 test-py311 = { features = ["py311", "test", "numbagg"] }
 test-py312 = { features = ["py312", "test", "numbagg"] }
@@ -223,6 +224,10 @@ dask = "*"
 
 [tool.pixi.feature.numbagg.dependencies]
 numbagg = "*"
+
+[tool.pixi.feature.marimo.dependencies]
+marimo = ">=0.24"
+matplotlib = "*"  # benchmark notebooks render speedup heatmaps
 
 [tool.pixi.feature.test.tasks]
 test = { cmd = "pytest tests", description = "Run tests" }
