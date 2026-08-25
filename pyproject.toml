@@ -228,6 +228,7 @@ numbagg = "*"
 [tool.pixi.feature.marimo.dependencies]
 marimo = ">=0.24"
 matplotlib = "*"  # benchmark notebooks render speedup heatmaps
+graphviz = ">=14.1.2,<15"
 
 [tool.pixi.feature.test.tasks]
 test = { cmd = "pytest tests", description = "Run tests" }

@@ -89,10 +89,17 @@ def _(chunk_edge, da, n, xr):
 
 
 @app.cell
-def _(da_x):
+def naive(da_x):
     naive = ((da_x * 1.8) + 32).mean()
     naive.compute()
     return (naive,)
+
+
+@app.cell
+def naive_numpy(da_x, np):
+    naive_maybe_numpy_elided = (da_x * np.float64(1.8) + np.int64(32)).mean()
+    naive_maybe_numpy_elided.compute()
+    return (naive_maybe_numpy_elided,)
 
 
 @app.cell
@@ -126,10 +133,84 @@ def block_init(da, da_x, np):
 
 
 @app.cell
-def _(da_x):
+def def_algebraic(da_x):
     algebraic = da_x.mean() * 1.8 + 32  # control: valid only because mean is linear
     algebraic.compute()
     return (algebraic,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Deepak's angle: in-place rewriting
+
+    On the tracking issue, Deepak pointed at a different lever for `x*1.8+32`:
+
+    ```python
+    res = ds["temperature"]
+    res *= 1.8
+    res += 32
+    ```
+
+    > which dask could totally do.
+
+    The idea is memory *allocation*, not memory *bandwidth*: `x*1.8` allocates a whole
+    new array, then `+32` allocates another. Rewriting to augmented assignment reuses one
+    buffer, so the transform costs one write pass into an existing array instead of
+    minting two throwaway ones.
+
+    There is a wrinkle worth being honest about. At the **dask/xarray expression level**
+    this rewrite is a no-op *today*: dask arrays are lazy and functional, so `res *= 1.8`
+    just builds a new lazy node — the graph is byte-for-byte identical to `res = res * 1.8`
+    (same task count, same result). Deepak's "*dask could totally do*" is the point: dask
+    *could* fuse the chain and run it in place inside each block, but out of the box it
+    doesn't rewrite the elementwise chain that way. So the honest place to realise the win
+    is exactly where chunk-local lives — **inside the per-block kernel**, doing the affine
+    map in place on the materialised chunk before collapsing to `(sum, count)`.
+
+    Below builds both: the literal dask-expression form (to show it *is* the same graph as
+    naive), and the in-place block kernel (the version that actually saves the
+    allocations). Only the kernel form joins the timing tables.
+    """)
+    return
+
+
+@app.cell
+def def_inplace(da, da_x, np):
+    # (a) Deepak's snippet, verbatim, at the dask/xarray expression level. Augmented
+    #     assignment on a lazy dask array is functional: this builds the SAME graph as
+    #     naive (see the assert below), so it can't save memory as written today.
+    _res = da_x.copy()
+    _res *= 1.8
+    _res += 32
+    _inplace_expr = _res.mean()
+    # Proof it's a no-op rewrite for now: identical task count to the naive graph.
+    inplace_expr_tasks = len(_inplace_expr.__dask_graph__())
+
+    # (b) The version that realises the win: do the affine map IN PLACE on each
+    #     materialised block, then collapse to (sum, count) like chunk-local. `.copy()`
+    #     guards the persisted input from mutation (the one allocation we can't dodge);
+    #     the *=/+= then reuse that single buffer instead of minting two intermediates.
+    def _inplace_stats(block: np.ndarray) -> np.ndarray:
+        _f = block.copy()
+        _f *= 1.8
+        _f += 32
+        return np.array([_f.sum(dtype=np.float64), _f.size], dtype=np.float64).reshape(
+            2, 1, 1, 1
+        )
+
+    _stats_chunks = (
+        (2,),
+        tuple(1 for _ in da_x.data.chunks[0]),
+        tuple(1 for _ in da_x.data.chunks[1]),
+        tuple(1 for _ in da_x.data.chunks[2]),
+    )
+    _stats = da.map_blocks(
+        _inplace_stats, da_x.data, dtype=np.float64, chunks=_stats_chunks, new_axis=0
+    )
+    inplace = _stats[0].sum() / _stats[1].sum()
+    inplace.compute()
+    return inplace, inplace_expr_tasks
 
 
 @app.cell
@@ -153,13 +234,33 @@ def _(np, time):
 
 
 @app.cell
-def _(algebraic, benchmark, blockwise_mean, naive, np, repeats):
+def _(
+    algebraic,
+    benchmark,
+    blockwise_mean,
+    inplace,
+    inplace_expr_tasks,
+    naive,
+    naive_maybe_numpy_elided,
+    np,
+    repeats,
+):
+    # The dask-expression form of Deepak's rewrite really is the naive graph today:
+    # same task count, so it earns no timing row of its own — only the block kernel does.
+    assert inplace_expr_tasks == len(naive.__dask_graph__()), (
+        inplace_expr_tasks,
+        len(naive.__dask_graph__()),
+    )
     rows = [
         benchmark("naive", naive, repeats.value),
+        # numpy-backed, single-machine: whatever temp elision buys is baked into this.
+        # Not a dask row — it's the eager-numpy point of comparison for the naive shape.
+        benchmark("naive (numpy elide)", naive_maybe_numpy_elided, repeats.value),
         benchmark("chunk-local", blockwise_mean, repeats.value),
+        benchmark("inplace (block kernel)", inplace, repeats.value),
         benchmark("algebraic (control)", algebraic, repeats.value),
     ]
-    # All three strategies must agree to 1e-6, else a "faster" number is meaningless.
+    # All strategies must agree to 1e-6, else a "faster" number is meaningless.
     _r = [x["result"] for x in rows]
     assert np.allclose(_r, _r[0], rtol=1e-6), _r
     # rows[0] is naive, the baseline every speedup is measured against.
@@ -169,7 +270,7 @@ def _(algebraic, benchmark, blockwise_mean, naive, np, repeats):
 
 
 @app.cell
-def _(mo, rows):
+def benchmark_table(mo, rows):
     mo.ui.table(rows, selection=None)
     return
 
@@ -186,7 +287,7 @@ def _(mo):
     So chunk size (`c³·8` bytes) and chunk count (`k`) move separately, and array size is
     just `k × chunk_bytes`.
 
-    We benchmark all three cases 10× per point and take the **median speedup vs naive**;
+    We benchmark all four cases 10× per point and take the **median speedup vs naive**;
     the naive panel (always 1.0) is omitted. Points whose peak working set would exceed
     the RAM budget are skipped and drawn blank.
     """)
@@ -252,7 +353,9 @@ def _(
     time,
     xr,
 ):
-    mo.stop(not run_sweep.value, mo.md("*Press ‘Run parameter sweep’ to compute the map.*"))
+    mo.stop(
+        not run_sweep.value, mo.md("*Press ‘Run parameter sweep’ to compute the map.*")
+    )
 
     # Median (not best) here: the sweep runs many points unattended, so we want the
     # typical run, robust to the odd GC pause, rather than the luckiest one.
@@ -265,8 +368,15 @@ def _(
         return float(np.median(_times))
 
     def _cases(data):
-        # Rebuild the three expressions for an arbitrary chunked DataArray.
+        # Rebuild the four expressions for an arbitrary chunked DataArray.
         _naive = ((data * 1.8) + 32).mean()
+
+        _stats_chunks = (
+            (2,),
+            tuple(1 for _ in data.data.chunks[0]),
+            tuple(1 for _ in data.data.chunks[1]),
+            tuple(1 for _ in data.data.chunks[2]),
+        )
 
         # Same per-block (sum, count) collapse as block_init; see there for the shape.
         def _stats(block: np.ndarray) -> np.ndarray:
@@ -275,22 +385,37 @@ def _(
                 [_f.sum(dtype=np.float64), _f.size], dtype=np.float64
             ).reshape(2, 1, 1, 1)
 
-        _stats_chunks = (
-            (2,),
-            tuple(1 for _ in data.data.chunks[0]),
-            tuple(1 for _ in data.data.chunks[1]),
-            tuple(1 for _ in data.data.chunks[2]),
-        )
         _s = da.map_blocks(
             _stats, data.data, dtype=np.float64, chunks=_stats_chunks, new_axis=0
         )
         _chunk_local = _s[0].sum() / _s[1].sum()
+
+        # Deepak's in-place variant: same collapse, but the affine map runs *=/+= on the
+        # materialised block. See def_inplace for why the win lives in the kernel.
+        def _stats_inplace(block: np.ndarray) -> np.ndarray:
+            _f = block.copy()
+            _f *= 1.8
+            _f += 32
+            return np.array(
+                [_f.sum(dtype=np.float64), _f.size], dtype=np.float64
+            ).reshape(2, 1, 1, 1)
+
+        _si = da.map_blocks(
+            _stats_inplace,
+            data.data,
+            dtype=np.float64,
+            chunks=_stats_chunks,
+            new_axis=0,
+        )
+        _inplace = _si[0].sum() / _si[1].sum()
+
         _algebraic = data.mean() * 1.8 + 32
-        return _naive, _chunk_local, _algebraic
+        return _naive, _chunk_local, _inplace, _algebraic
 
     # Speedup grids: rows = chunk size (edge c), cols = number of chunks (k). NaN marks
     # skipped points. The two 1-D arrays are the axis tick values (MB per chunk, and k).
     sweep_chunk_local = np.full((len(sweep_chunk_edges), len(sweep_chunks)), np.nan)
+    sweep_inplace = np.full_like(sweep_chunk_local, np.nan)
     sweep_algebraic = np.full_like(sweep_chunk_local, np.nan)
     sweep_chunk_mb = np.array([c**3 * 8 / 1e6 for c in sweep_chunk_edges])
     sweep_total_chunks = np.array(sweep_chunks)
@@ -306,16 +431,18 @@ def _(
                 name="temperature_c",
             ).persist()
             _x.compute()
-            _naive_e, _chunk_e, _alg_e = _cases(_x)
+            _naive_e, _chunk_e, _inplace_e, _alg_e = _cases(_x)
             # Speedup = naive time / this-strategy time, so >1 means faster than naive.
             _t_naive = _median_time(_naive_e, sweep_runs)
             sweep_chunk_local[_i, _j] = _t_naive / _median_time(_chunk_e, sweep_runs)
+            sweep_inplace[_i, _j] = _t_naive / _median_time(_inplace_e, sweep_runs)
             sweep_algebraic[_i, _j] = _t_naive / _median_time(_alg_e, sweep_runs)
             del _x  # free this point's persisted array before building the next
     return (
         sweep_algebraic,
         sweep_chunk_local,
         sweep_chunk_mb,
+        sweep_inplace,
         sweep_total_chunks,
     )
 
@@ -327,20 +454,30 @@ def benchmark_heatmap(
     sweep_algebraic,
     sweep_chunk_local,
     sweep_chunk_mb,
+    sweep_inplace,
     sweep_total_chunks,
 ):
     _speedup_panels = [
         ("chunk-local", sweep_chunk_local),
+        ("inplace (block kernel)", sweep_inplace),
         ("algebraic (control)", sweep_algebraic),
     ]
-    # Shared colour scale across the two speedup panels so they're directly comparable.
-    _vmin = min(np.nanmin(sweep_chunk_local), np.nanmin(sweep_algebraic))
-    _vmax = max(np.nanmax(sweep_chunk_local), np.nanmax(sweep_algebraic))
+    # Shared colour scale across the three speedup panels so they're directly comparable.
+    _vmin = min(
+        np.nanmin(sweep_chunk_local),
+        np.nanmin(sweep_inplace),
+        np.nanmin(sweep_algebraic),
+    )
+    _vmax = max(
+        np.nanmax(sweep_chunk_local),
+        np.nanmax(sweep_inplace),
+        np.nanmax(sweep_algebraic),
+    )
 
-    # 3rd panel: algebraic ÷ chunk-local. Both are speedups vs naive, so their ratio
-    # shows how the linear-algebra shortcut compares to the general map-reduce strategy
-    # at each grid point (>1 favours algebraic, <1 favours chunk-local).
-    _ratio = sweep_algebraic / sweep_chunk_local
+    # 4th panel: inplace ÷ chunk-local. Both are block-kernel map-reductions vs naive, so
+    # their ratio isolates the cost of the in-place `.copy()` + `*=/+=` against the
+    # out-of-place `block*1.8+32` (>1 favours inplace, <1 favours chunk-local).
+    _ratio = sweep_inplace / sweep_chunk_local
     # Symmetric log scale centred on 1.0 so both directions read equally.
     _rmax = max(np.nanmax(_ratio), 1.0 / np.nanmin(_ratio))
 
@@ -350,11 +487,15 @@ def benchmark_heatmap(
     _cmap_r = plt.get_cmap("RdBu_r").copy()
     _cmap_r.set_bad("0.9")
 
-    _fig, _axes = plt.subplots(1, 3, figsize=(16, 4.5), constrained_layout=True)
+    _fig, _axes = plt.subplots(1, 4, figsize=(21, 4.5), constrained_layout=True)
     for _ax, (_title, _grid) in zip(_axes, _speedup_panels):
         _im = _ax.imshow(
-            np.ma.masked_invalid(_grid), origin="lower", aspect="auto", cmap=_cmap,
-            vmin=_vmin, vmax=_vmax,
+            np.ma.masked_invalid(_grid),
+            origin="lower",
+            aspect="auto",
+            cmap=_cmap,
+            vmin=_vmin,
+            vmax=_vmax,
         )
         _ax.set_title(f"{_title}\nmedian speedup vs naive")
         _ax.set_xlabel("number of chunks (k)")
@@ -368,17 +509,27 @@ def benchmark_heatmap(
                 if np.isnan(_grid[_i, _j]):
                     continue
                 _ax.text(
-                    _j, _i, f"{_grid[_i, _j]:.2f}", ha="center", va="center",
-                    color="white", fontsize=8,
+                    _j,
+                    _i,
+                    f"{_grid[_i, _j]:.2f}",
+                    ha="center",
+                    va="center",
+                    color="white",
+                    fontsize=8,
                 )
-    _fig.colorbar(_im, ax=_axes[:2], label="speedup ×")
+    _fig.colorbar(_im, ax=_axes[:3], label="speedup ×")
 
-    _ax_ratio = _axes[2]
+    _ax_ratio = _axes[3]
     _im_ratio = _ax_ratio.imshow(
-        np.ma.masked_invalid(_ratio), origin="lower", aspect="auto", cmap=_cmap_r,
-        vmin=1.0 / _rmax, vmax=_rmax, norm="log",
+        np.ma.masked_invalid(_ratio),
+        origin="lower",
+        aspect="auto",
+        cmap=_cmap_r,
+        vmin=1.0 / _rmax,
+        vmax=_rmax,
+        norm="log",
     )
-    _ax_ratio.set_title("algebraic ÷ chunk-local\n>1 favours algebraic")
+    _ax_ratio.set_title("inplace ÷ chunk-local\n>1 favours inplace")
     _ax_ratio.set_xlabel("number of chunks (k)")
     _ax_ratio.set_ylabel("chunk size (MB)")
     _ax_ratio.set_xticks(range(len(sweep_total_chunks)))
@@ -390,8 +541,13 @@ def benchmark_heatmap(
             if np.isnan(_ratio[_i, _j]):
                 continue
             _ax_ratio.text(
-                _j, _i, f"{_ratio[_i, _j]:.2f}", ha="center", va="center",
-                color="black", fontsize=8,
+                _j,
+                _i,
+                f"{_ratio[_i, _j]:.2f}",
+                ha="center",
+                va="center",
+                color="black",
+                fontsize=8,
             )
     _fig.colorbar(_im_ratio, ax=_ax_ratio, label="ratio ×")
     plt.gca()
@@ -421,6 +577,12 @@ def _(mo):
     - **chunk-local** -- transform inside the block, collapse to `(sum, count)` before
       the value ever leaves the chunk. The transformed element is born, summed, and
       discarded in-register: **read N, write ~0**. Output is `2k` floats total.
+    - **inplace** -- Deepak's variant. Same block-local collapse, but the affine map runs
+      `*=/+=` on the materialised chunk rather than `block*1.8+32`. It still clears naive
+      by about the same 2x (same **read N, write ~0** memory class), but it lands a notch
+      *below* chunk-local, not alongside: the `.copy()` it needs to protect the persisted
+      input is a full-size allocation numpy's fused `block*1.8+32` never pays for, so the
+      buffer reuse it was meant to buy is more than eaten by the copy.
     - **algebraic** -- `mean(x)*1.8+32`. Dask's tree reduction reads each element once
       into a running partial sum: **read N, write ~0**. The `*1.8+32` runs once, on a
       scalar.
@@ -436,25 +598,33 @@ def _(mo):
 
     ### How the ratio moves across the grid
 
-    The 3rd panel is `algebraic / chunk-local` (both are speedups vs naive). Two
-    independent trends, and the data supports each on its own axis:
+    The 4th panel is `inplace / chunk-local` (both are speedups vs naive). These two are
+    the *same* map-reduce shape — identical `map_blocks` scaffolding, identical
+    `(2,1,1,1)` collapse, identical tree reduce — differing only in how each block does
+    the affine map: chunk-local writes `block*1.8+32` into a fresh array, inplace does
+    `.copy()` then `*=/+=` into that one buffer. So the ratio isolates a single thing:
+    the block-kernel allocation pattern, with everything else held fixed.
 
-    - **more chunks (across a row):** ratio rises -- algebraic gains relative to
-      chunk-local (positive slope in `log k` in every row).
-    - **smaller chunks (up a column):** ratio rises -- same direction (negative slope
-      in `log(chunk MB)` in every column).
+    That makes the panel the honest test of Deepak's lever, and the answer it gives is
+    **no**: inplace is a small but consistent *loss* against chunk-local. Almost every
+    cell sits below 1.0 (roughly 0.80–0.95), and it only pokes above 1.0 at `k=1` — a
+    single chunk, where there is barely any reduction to speak of. The cause is the
+    `.copy()` that guards the persisted input: it is itself a full-size allocation, the
+    very cost the rewrite was meant to dodge, and it buys nothing because numpy already
+    fuses the out-of-place `block*1.8+32` into an efficient single pass. So the in-place
+    kernel pays for a copy the out-of-place one never makes.
 
-    Both are the *same underlying cause seen from two sides*: chunk-local carries a
-    fixed per-chunk cost (one `map_blocks` task emitting a tiny `(2,1,1,1)` stats array,
-    then a reduction over those). More chunks means more of those little tasks; smaller
-    chunks means less real compute to amortize each one against. Algebraic rides dask's
-    built-in, lighter tree reduction, so it degrades less. In both moves it is
-    **chunk-local slipping, not algebraic improving** -- algebraic's own speedup panel is
-    comparatively flat (about 1.4 to 2.2x throughout).
+    The one visible trend is down the columns: **larger chunks push the ratio lower**
+    (the bottom row lands around 0.80–0.87). Bigger blocks mean the `.copy()` moves more
+    bytes in absolute terms, so its fixed overhead bites harder exactly where real
+    out-of-core work lives.
 
-    The corner where this bites (small, numerous chunks) reaches ratio about 1.0: the two
-    strategies tie. Everywhere else -- and especially in the large-chunk regime that
-    matters for real out-of-core work -- chunk-local wins outright (ratio 0.6 to 0.75).
+    The reading for xrexpr: at the expression level the in-place rewrite is a no-op today
+    (same graph as naive), and pushed into the kernel it actively *underperforms* the
+    plain chunk-local map. The memory-bandwidth win was already banked by *fusing the
+    transform into the reduction at all*; trying to also reuse the block's buffer only
+    adds a copy. Deepak's lever is worth knowing about, but on this workload it is not the
+    thing that pays — the fusion is.
 
     ### What this says for xrexpr
 
@@ -607,9 +777,9 @@ def _(da, da_x, np):
     # Per-block (sum, count) collapse, same as block_init (see there for the (2,1,1,1)).
     def _fahrenheit_stats(block: np.ndarray) -> np.ndarray:
         _f = block * 1.8 + 32
-        return np.array(
-            [_f.sum(dtype=np.float64), _f.size], dtype=np.float64
-        ).reshape(2, 1, 1, 1)
+        return np.array([_f.sum(dtype=np.float64), _f.size], dtype=np.float64).reshape(
+            2, 1, 1, 1
+        )
 
     _stats_chunks = (
         (2,),
@@ -629,6 +799,18 @@ def _(da, da_x, np):
     grafted = template.copy(data=mapreduce_array)
     grafted
     return grafted, mapreduce_array, template
+
+
+@app.cell
+def _(template):
+    template.__dask_graph__()
+    return
+
+
+@app.cell
+def _(grafted):
+    grafted.data.visualize()
+    return
 
 
 @app.cell
@@ -693,9 +875,9 @@ def _(benchmark, da, np, repeats, xr):
     # Per-block (sum, count) collapse, same as block_init (see there for the (2,1,1,1)).
     def _stats(block: np.ndarray) -> np.ndarray:
         _f = block * 1.8 + 32
-        return np.array(
-            [_f.sum(dtype=np.float64), _f.size], dtype=np.float64
-        ).reshape(2, 1, 1, 1)
+        return np.array([_f.sum(dtype=np.float64), _f.size], dtype=np.float64).reshape(
+            2, 1, 1, 1
+        )
 
     _stats_chunks = (
         (2,),
@@ -759,7 +941,9 @@ def library_candidate(da, np, xr):
     # around it is the fixed map-reduce scaffolding: apply f in-register, collapse the
     # block to (sum, count), reshape so it tiles back. Leading axis holds the two
     # partials; one length-1 axis per input dim gives the (2, 1, 1, ...) block output.
-    def _block_stats(block: np.ndarray, f: Callable[[np.ndarray], np.ndarray]) -> np.ndarray:
+    def _block_stats(
+        block: np.ndarray, f: Callable[[np.ndarray], np.ndarray]
+    ) -> np.ndarray:
         mapped = f(block)
         return np.array(
             [mapped.sum(dtype=np.float64), mapped.size], dtype=np.float64
@@ -775,7 +959,12 @@ def library_candidate(da, np, xr):
             tuple(1 for _ in axis_chunks) for axis_chunks in data.data.chunks
         )
         partials = da.map_blocks(
-            _block_stats, data.data, f, dtype=np.float64, chunks=stats_chunks, new_axis=0
+            _block_stats,
+            data.data,
+            f,
+            dtype=np.float64,
+            chunks=stats_chunks,
+            new_axis=0,
         )
         return partials[0].sum() / partials[1].sum()
 
