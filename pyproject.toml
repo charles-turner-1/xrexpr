@@ -27,7 +27,8 @@ dependencies = [
    "frozendict",
    "packaging",  # Version() gates the pre-2026.4.0 scan-coord bug in schema.py
    "typing_extensions",  # assert_never on the 3.10 floor (typing.assert_never is 3.11+)
-   "xarray"
+   "xarray",
+   "dask-array>=0.7.1,<0.8",
 ]
 
 dynamic = ["version"]
@@ -229,6 +230,7 @@ numbagg = "*"
 marimo = ">=0.24"
 matplotlib = "*"  # benchmark notebooks render speedup heatmaps
 graphviz = ">=14.1.2,<15"
+tabulate = ">=0.10.0,<0.11"
 
 [tool.pixi.feature.test.tasks]
 test = { cmd = "pytest tests", description = "Run tests" }
