@@ -404,6 +404,16 @@ def test_a_redundant_drop_is_eliminated_and_replays_equal(ds):
     assert_equal(chain.collect(), ds.drop_vars("elevation")[["temperature"]])
 
 
+def test_an_absent_drop_is_eliminated_when_the_projection_excludes_it(ds):
+    """An absent dropped name is ignored when it cannot affect the requested projection."""
+    chain = ds.plan.drop_vars("nope")[["temperature"]]
+    optimised = optimize(list(chain._ops), chain._base_schema())
+    assert [type(n).__name__ for n in optimised] == ["Project"]
+    with pytest.raises(ValueError):
+        ds.drop_vars("nope")[["temperature"]]
+    assert_equal(chain.collect(), ds[["temperature"]])
+
+
 def test_a_surviving_coord_drop_hops_the_projection_and_replays_equal(ds):
     """A ``drop_vars`` of a retained coordinate hops behind the projection, trimmed, and still equals eager."""
     chain = ds.plan.drop_vars(["elevation", "area"])[["temperature"]]

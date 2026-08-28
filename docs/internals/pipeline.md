@@ -68,8 +68,8 @@ Applies local rewrite rules to a fixpoint, and owns the schema fold. Its contrac
 package's headline invariant:
 
 > `optimize` preserves the **values** of everything the plan asks for. It may additionally
-> avoid an error raised by a computation whose result the plan discards. It may never
-> change a value, nor introduce an error.
+> avoid an error raised while computing or validating a part of the chain that cannot
+> affect those values. It may never change a value, nor introduce an error.
 
 The fold lives here, not in recording, for the reason above, and the optimiser is also
 the only stage that knows how far it can be trusted. The fold models an `Opaque` as

@@ -958,16 +958,14 @@ def push_projection_past_drop(nodes: Plan, schema: SchemaState) -> Plan | None:
       modelled projection and its spanned dims are known, and it **names nothing the drop
       removes** (a chain that drops then projects the same name is an eager ``KeyError`` this
       rule must not launder into a value).
-    - **every dropped name is present** in the schema, so the eager ``drop_vars`` succeeds:
-      dropping an absent name raises (``errors="raise"``), and eliding it here would turn that
-      error into a value -- the one thing ``planning/roadmap/07-small-wins.md`` §8 forbids.
-      With every name present the drop's ``errors`` kwarg is moot, so the trimmed ``Drop`` is
-      rebuilt from the survivors without it.
+    - dropped names that are absent from the schema are treated like other non-survivors:
+      they cannot affect the projected value and disappear with the redundant part of the
+      ``Drop``.
 
     **This rule may skip an error, and that is the same §8 licence** :func:`pushdown_projections`
-    runs on: the dropped data variables are never computed, so a chain that would raise while
-    building one it discards (``ds.drop_vars("elevation")`` after an op that errors on
-    ``elevation``) returns the projection-first answer instead. No surviving value moves.
+    runs on: the dropped data variables are never computed, and an absent dropped name that
+    the projection excludes is never validated, so chains that fail only in discarded pieces
+    return the projection-first answer instead. No surviving value moves.
 
     Confined to the trusted prefix, so the receiver is a known ``Dataset`` and the fold is
     exact. The elimination case shrinks the plan; the hop case moves the projection one left
@@ -993,8 +991,6 @@ def push_projection_past_drop(nodes: Plan, schema: SchemaState) -> Plan | None:
 
         entering = schemas[i]
         dropped = set(first.variables)
-        if not dropped <= set(entering.variables):
-            continue  # a name the drop names is absent; the eager drop_vars would raise
         keep = second.variables
         if not all(n in entering.data_vars for n in keep) or dropped & set(keep):
             continue  # projection isn't a modelled data-var projection, or drops-then-keeps
