@@ -92,7 +92,11 @@ from xrexpr.ir import ContextOpen, Opaque, Rechunk, Select
 from xrexpr.lower import Call as Lowered
 from xrexpr.lower import emit, to_lower_ir
 from xrexpr.operations import CONTEXT_METHODS, OP_TABLE, ReduceSpec, ScanSpec
-from xrexpr.optimize import eliminate_projection_before_coord, optimize
+from xrexpr.optimize import (
+    eliminate_projection_before_coord,
+    optimize,
+    push_projection_past_drop,
+)
 from xrexpr.schema import SchemaState, apply_schema, to_opnode
 
 # Reductions spelled ``name(dim=...)``: every tabulated reduce except ``reduce``, whose
@@ -1083,6 +1087,39 @@ def coord_projection_plans(draw):
 
 
 @st.composite
+def drop_projection_plans(draw):
+    """A plain chain ending in the ``drop_vars(names)`` then ``[[keep]]`` pair #176 rewrites.
+
+    ``keep`` is a list-form data-variable projection; ``names`` is drawn from the names that
+    projection excludes -- other data variables (redundant, the drop is eliminated) and
+    coordinates the kept variables still span (survivors, the drop hops behind the projection
+    trimmed to them). So :func:`~xrexpr.optimize.push_projection_past_drop` always fires.
+
+    Its own strategy, mirroring :func:`coord_projection_plans`: the random :func:`_calls`
+    draw hits this ``(Drop, Project)`` shape too rarely to rely on, and asking for it by name
+    is the anti-vacuity guarantee. The prefix is builder-free, so the pair lands in the
+    trusted prefix where the rule looks.
+    """
+    ds = draw(datasets(dated=draw(st.booleans())))
+    calls = draw(_calls(ds))
+    current = _apply(ds, calls)
+    data_vars = sorted(map(str, current.data_vars))
+    assume(bool(data_vars))
+    keep = draw(
+        st.lists(st.sampled_from(data_vars), min_size=1, unique=True).map(sorted)
+    )
+    # Names the projection excludes and the rule therefore fires on: the other data variables
+    # (redundant), plus the coordinates present *after* the projection (survivors).
+    survivors = sorted(map(str, _apply(current, [Call("__getitem__", keep)]).coords))
+    candidates = sorted({v for v in data_vars if v not in keep} | set(survivors))
+    assume(bool(candidates))
+    names = draw(
+        st.lists(st.sampled_from(candidates), min_size=1, unique=True).map(sorted)
+    )
+    return ds, [*calls, Call("drop_vars", names), Call("__getitem__", keep)]
+
+
+@st.composite
 def select_runs(draw):
     """A dataset paired with a run of >=2 adjacent same-name selects on distinct dims."""
     ds = draw(datasets())
@@ -1593,4 +1630,22 @@ def test_a_coord_projection_drops_its_input_and_replays_equal(case):
         eliminate_projection_before_coord(lowered, SchemaState.from_dataset(ds))
         is not None
     )
+    _assert_replays_equal(_apply(ds.plan, calls).collect(), _apply(ds, calls))
+
+
+@given(drop_projection_plans())
+def test_a_drop_before_a_projection_is_absorbed_and_replays_equal(case):
+    """Anti-vacuity plus value: the ``drop_vars`` then projection pair fires #176 and preserves the answer.
+
+    ``push_projection_past_drop`` fires on no random chain reliably -- the ``(Drop, Project)``
+    adjacency with the right schema shape is too rare -- so it is asked for by name here, like
+    :func:`test_a_coord_projection_drops_its_input_and_replays_equal`. Both facts are pinned:
+    that the rule fires (its return on the lowered plan is not ``None``), and that the full
+    optimiser's answer still equals eager, whether the drop was eliminated or hopped and
+    trimmed.
+    """
+    ds, calls = case
+    plan, _ = _build_plan(ds, calls)
+    lowered = to_lower_ir(plan, _dim_names(ds))
+    assert push_projection_past_drop(lowered, SchemaState.from_dataset(ds)) is not None
     _assert_replays_equal(_apply(ds.plan, calls).collect(), _apply(ds, calls))
