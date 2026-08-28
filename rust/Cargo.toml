@@ -5,7 +5,7 @@ edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
-name = "xrexprs"
+name = "_xrexprs"       # Module name - needs to match what we have in pyproject.toml and also cargo.toml
 crate-type = ["cdylib"]
 
 [dependencies]

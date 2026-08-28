@@ -1,13 +1,22 @@
 use pyo3::prelude::*;
 
+mod ir;
 /// A Python module implemented in Rust.
 #[pymodule]
-mod xrexpr_rs {
+mod _xrexprs {
     use pyo3::prelude::*;
 
-    /// Formats the sum of two numbers as string.
-    #[pyfunction]
-    fn sum_as_string(a: usize, b: usize) -> PyResult<String> {
-        Ok((a + b).to_string())
+    #[pymodule_export]
+    use crate::ir::ir;
+
+    #[pymodule_init]
+    fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
+        let py = m.py();
+        let sys = py.import("sys")?;
+        let modules = sys.getattr("modules")?;
+        let ir = m.getattr("ir")?;
+        modules.set_item("xrexpr._xrexprs.ir", ir)?;   // now the dotted import resolves
+        Ok(())
     }
+
 }

@@ -170,6 +170,10 @@ asyncio_default_fixture_loop_scope = "function"
 # discarded by ``assume``, and how long generation took.
 addopts = "--hypothesis-show-statistics"
 
+[tool.maturin]
+python-source = "src"
+module-name = "xrexpr._xrexprs"
+
 [tool.pixi.workspace]
 channels = ["conda-forge"]
 name = "xrexpr"
@@ -182,6 +186,7 @@ frozendict = "*"
 packaging = "*"
 typing_extensions = "*"
 versioneer = ">=0.29,<0.30"
+maturin = ">=1.15.0,<2"
 
 [tool.pixi.pypi-dependencies]
 xrexpr = { editable = true, path = "." }
