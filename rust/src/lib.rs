@@ -15,8 +15,7 @@ mod _xrexprs {
         let sys = py.import("sys")?;
         let modules = sys.getattr("modules")?;
         let ir = m.getattr("ir")?;
-        modules.set_item("xrexpr._xrexprs.ir", ir)?;   // now the dotted import resolves
+        modules.set_item("xrexpr._xrexprs.ir", ir)?; // now the dotted import resolves
         Ok(())
     }
-
 }
