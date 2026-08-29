@@ -24,8 +24,8 @@ from collections.abc import Hashable, Iterable
 
 from typing_extensions import assert_never
 
+from xrexpr._xrexprs.ir import AllDims
 from xrexpr.ir import (
-    AllDims,
     DimSet,
     Drop,
     Elementwise,

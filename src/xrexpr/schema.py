@@ -29,10 +29,9 @@ from frozendict import frozendict
 from packaging.version import Version
 from typing_extensions import assert_never
 
+from xrexpr._xrexprs.ir import ALL_DIMS, AllDims
 from xrexpr.indexers import Advanced, Indexer, classify
 from xrexpr.ir import (
-    ALL_DIMS,
-    AllDims,
     ContextOpen,
     DimSet,
     Drop,

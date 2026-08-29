@@ -22,10 +22,11 @@ See ``docs/internals/ir.md``; ``test_ir.py`` pins the hashability behaviour.
 
 from collections.abc import Hashable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Final, Literal, final
+from typing import Any, Literal
 
 from frozendict import frozendict
 
+from xrexpr._xrexprs.ir import ALL_DIMS, AllDims
 from xrexpr.chunks import ChunkSpec, classify_chunk
 from xrexpr.indexers import Indexer, classify
 
@@ -53,28 +54,6 @@ __all__ = [
     "frozendict",
 ]
 
-
-@final
-@dataclass(frozen=True)
-class AllDims:
-    """Sentinel: *every dim present at this point*, whatever they turn out to be.
-
-    Notes
-    -----
-    The dim set of a call that names none — ``ds.mean()``, ``ds.mean(dim=None)``. It
-    stays unexpanded until a reader with an exact schema resolves it, which is what
-    keeps a record-time guess about the dims from being frozen into the plan.
-
-    Fieldless and frozen, so every instance compares and hashes equal; :data:`ALL_DIMS`
-    is the one to use.
-    """
-
-    def __repr__(self) -> str:
-        return "ALL_DIMS"
-
-
-#: The singleton :class:`AllDims`.
-ALL_DIMS: Final = AllDims()
 
 #: The dims an op removes — a concrete set, or :data:`ALL_DIMS` for a call that named
 #: none. Readers must handle both — see this module's docstring.
