@@ -108,11 +108,11 @@ impl<'py> IntoPyObject<'py> for DimSet {
 #[pyclass(module = "xrexpr._xrexprs.ir", skip_from_py_object, )]
 pub struct Reduce {
     /// What reduction method we are applying, e.g. "mean", "sum", "std", etc.
-    /// Can't just use a pyo3(get) here, as we need it to come back as a tuple,
-    /// not a list (default behaviour)
+    #[pyo3(get)]
     name: String,
     /// The call's positional arguments, verbatim.
-    #[pyo3(get)]
+    /// Can't just use a pyo3(get) here, as we need it to come back as a tuple,
+    /// not a list (default behaviour)
     args: Vec<Py<PyAny>>,
     /// The call's keyword arguments, verbatim.
     #[pyo3(get)]
