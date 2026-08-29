@@ -1,6 +1,9 @@
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyFrozenSet, PyTuple};
 use std::fmt::{Display, Formatter};
+use std::collections::{HashMap, HashSet};
 
 /// A singleton type representing all dimensions in a dataset.
 /// This is used to indicate that an operation should be applied to all dimensions,
@@ -36,6 +39,8 @@ impl AllDims {
     }
 }
 
+static ALL_DIMS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
 /// A dimension in a dataset, represented as a string. For example, "time", "lat", "lon", etc.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Dim(pub String);
@@ -52,6 +57,7 @@ impl From<&str> for Dim {
     }
 }
 
+#[derive(Clone)]
 pub enum DimSet {
     AllDims,
     Concrete(std::collections::HashSet<Dim>),
@@ -74,6 +80,24 @@ impl FromPyObject<'_, '_> for DimSet {
     }
 }
 
+impl<'py> IntoPyObject<'py> for DimSet {
+    type Target = PyAny;
+    type Output = Bound<'py, Self::Target>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        match self {
+            DimSet::AllDims => Ok(ALL_DIMS
+                .import(py, "xrexpr._xrexprs.ir", "ALL_DIMS")?
+                .clone()),
+            DimSet::Concrete(dim_set) => {
+                let dim_list: Vec<String> = dim_set.into_iter().map(|d| d.0).collect();
+                Ok(PyFrozenSet::new(py, dim_list)?.into_any())
+            }
+        }
+    }
+}
+
 /// A dimension-destroying reduction (``mean``/``sum``/``std``/...).
 /// args and kwargs have to be Py<PyAny>, because they can be any Python object,
 /// eg. a string, a number, a list, a dict, etc. We don't want to restrict the types of the arguments.
@@ -81,24 +105,31 @@ impl FromPyObject<'_, '_> for DimSet {
 /// because otherwise we tie the lifetime of the Reduce struct to the lifetime of
 /// the args/kwargs in the Python interpreter, which might mean they get dropped
 /// when we still need them here (ie. this wouldn't compile)
-#[pyclass(module = "xrexpr._xrexprs.ir", skip_from_py_object)]
+#[pyclass(module = "xrexpr._xrexprs.ir", skip_from_py_object, )]
 pub struct Reduce {
     /// What reduction method we are applying, e.g. "mean", "sum", "std", etc.
+    /// Can't just use a pyo3(get) here, as we need it to come back as a tuple,
+    /// not a list (default behaviour)
     name: String,
     /// The call's positional arguments, verbatim.
+    #[pyo3(get)]
     args: Vec<Py<PyAny>>,
     /// The call's keyword arguments, verbatim.
+    #[pyo3(get)]
     kwargs: std::collections::HashMap<String, Py<PyAny>>,
     /// The dims the reduction consumes. Typically named in the call, but if none
     /// are named, then it consumes all dims (``ALL_DIMS``).
+    #[pyo3(get)]
     consumes: DimSet,
     /// Whether the reduction keeps its named dims at size 1 (``keepdims=True``).
+    #[pyo3(get)]
     keepdims: bool,
 }
 
 #[pymethods]
 impl Reduce {
     #[new]
+    #[pyo3(signature=(name, args=Vec::new(), kwargs=HashMap::new(), consumes=DimSet::Concrete(HashSet::new())))]
     pub fn new(
         py: Python,
         name: String,
@@ -116,6 +147,11 @@ impl Reduce {
             consumes,
             keepdims,
         }
+    }
+
+    #[getter]
+    fn args<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, &self.args)
     }
 }
 
