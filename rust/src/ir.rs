@@ -68,15 +68,13 @@ impl FromPyObject<'_, '_> for DimSet {
     fn extract(obj: pyo3::Borrowed<'_, '_, pyo3::PyAny>) -> Result<Self, Self::Error> {
         if obj.is_instance_of::<AllDims>() {
             Ok(DimSet::AllDims)
-        } else if let Ok(dim_list) = obj.extract::<Vec<String>>() {
-            let dim_set: std::collections::HashSet<Dim> =
-                dim_list.into_iter().map(|s| Dim(s)).collect();
-            Ok(DimSet::Concrete(dim_set))
         } else {
-            Err(PyTypeError::new_err(
-                "DimSet must be AllDims or a list of strings",
-            ))
-        }
+            let dims: HashSet<Dim> = obj.to_owned().try_iter()?.map(|item| {
+                let dim_str: String = item?.extract()?;
+                Ok(Dim(dim_str))
+            }).collect::<PyResult<_>>()?;
+            Ok(DimSet::Concrete(dims))
+        } 
     }
 }
 

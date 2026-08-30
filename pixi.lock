@@ -17155,7 +17155,7 @@ packages:
   - packaging
   - typing-extensions
   - xarray
-  - pdbpp
+  - pdbpp>=0.12.1,<0.13
   - black ; extra == 'dev'
   - coverage ; extra == 'dev'
   - dask ; extra == 'dev'
