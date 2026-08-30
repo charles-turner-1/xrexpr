@@ -26,7 +26,7 @@ from typing import Any, Literal
 
 from frozendict import frozendict
 
-from xrexpr._xrexprs.ir import ALL_DIMS, AllDims
+from xrexpr._xrexprs.ir import ALL_DIMS, AllDims, Reduce
 from xrexpr.chunks import ChunkSpec, classify_chunk
 from xrexpr.indexers import Indexer, classify
 
@@ -58,60 +58,6 @@ __all__ = [
 #: The dims an op removes — a concrete set, or :data:`ALL_DIMS` for a call that named
 #: none. Readers must handle both — see this module's docstring.
 DimSet = frozenset[Hashable] | AllDims
-
-
-@dataclass(frozen=True)
-class Reduce:
-    """A dimension-destroying reduction (``mean``/``sum``/``std``/...).
-
-    Attributes
-    ----------
-    name : str
-        The method name. An open set of tabulated reductions, so ``str`` — kind-safety
-        comes from ``operations.OP_TABLE``.
-    args : tuple
-        The call's positional arguments, verbatim.
-    kwargs : frozendict
-        The call's keyword arguments, verbatim.
-    consumes : DimSet
-        The dims the reduction names. What it *does* to them depends on
-        :attr:`keepdims`: an ordinary reduce **removes** them; a ``keepdims=True`` one
-        **resizes** each to 1 and keeps it (see :attr:`keepdims`).
-
-    Notes
-    -----
-    ``consumes`` is *stored*, parsed by ``to_opnode`` from the ``dim`` spec. A bare
-    ``mean()`` names no dim and so consumes :data:`ALL_DIMS`, left symbolic rather than
-    expanded against the record-time schema (see the module docstring).
-    ``args``/``kwargs`` are coerced to immutable containers so the node is safe to share
-    between plans, and hashable when its payload is (see the module docstring on why that
-    last part is conditional).
-    """
-
-    name: str  # open set of tabulated reductions → str (kind-safety via OP_TABLE)
-    args: tuple[Any, ...] = ()
-    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
-    consumes: DimSet = frozenset()
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "args", tuple(self.args))
-        object.__setattr__(self, "kwargs", frozendict(self.kwargs))
-        if not isinstance(self.consumes, AllDims):
-            object.__setattr__(self, "consumes", frozenset(self.consumes))
-
-    @property
-    def keepdims(self) -> bool:
-        """Whether the reduction keeps its named dims at size 1 (``keepdims=True``).
-
-        Returns
-        -------
-        bool
-            ``True`` when the call passed ``keepdims=True`` — the reduce then resizes
-            each dim in :attr:`consumes` to 1 rather than removing it. Derived from the
-            verbatim ``kwargs``, so it cannot disagree with what replay does (the
-            ``Project.single`` precedent).
-        """
-        return bool(self.kwargs.get("keepdims", False))
 
 
 @dataclass(frozen=True)
