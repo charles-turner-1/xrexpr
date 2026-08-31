@@ -1,9 +1,10 @@
-use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyFrozenSet, PyTuple};
-use std::fmt::{Display, Formatter};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::fmt::{Display, Formatter};
+use std::hash::{Hash, Hasher};
 
 /// A singleton type representing all dimensions in a dataset.
 /// This is used to indicate that an operation should be applied to all dimensions,
@@ -42,7 +43,7 @@ impl AllDims {
 static ALL_DIMS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 /// A dimension in a dataset, represented as a string. For example, "time", "lat", "lon", etc.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct Dim(pub String);
 
 impl Display for Dim {
@@ -57,10 +58,25 @@ impl From<&str> for Dim {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum DimSet {
     AllDims,
     Concrete(std::collections::HashSet<Dim>),
+}
+
+impl Hash for DimSet {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            DimSet::AllDims => {
+                0.hash(state);
+            }
+            DimSet::Concrete(dim_set) => {
+                let mut dims = dim_set.iter().collect::<Vec<_>>();
+                dims.sort(); // Can't do this above or we get a unit ouput
+                dims.hash(state)
+            }
+        }
+    }
 }
 
 impl FromPyObject<'_, '_> for DimSet {
@@ -69,12 +85,16 @@ impl FromPyObject<'_, '_> for DimSet {
         if obj.is_instance_of::<AllDims>() {
             Ok(DimSet::AllDims)
         } else {
-            let dims: HashSet<Dim> = obj.to_owned().try_iter()?.map(|item| {
-                let dim_str: String = item?.extract()?;
-                Ok(Dim(dim_str))
-            }).collect::<PyResult<_>>()?;
+            let dims: HashSet<Dim> = obj
+                .to_owned()
+                .try_iter()?
+                .map(|item| {
+                    let dim_str: String = item?.extract()?;
+                    Ok(Dim(dim_str))
+                })
+                .collect::<PyResult<_>>()?;
             Ok(DimSet::Concrete(dims))
-        } 
+        }
     }
 }
 
@@ -103,7 +123,7 @@ impl<'py> IntoPyObject<'py> for DimSet {
 /// because otherwise we tie the lifetime of the Reduce struct to the lifetime of
 /// the args/kwargs in the Python interpreter, which might mean they get dropped
 /// when we still need them here (ie. this wouldn't compile)
-#[pyclass(module = "xrexpr._xrexprs.ir", skip_from_py_object, )]
+#[pyclass(module = "xrexpr._xrexprs.ir", skip_from_py_object)]
 pub struct Reduce {
     /// What reduction method we are applying, e.g. "mean", "sum", "std", etc.
     #[pyo3(get)]
@@ -137,7 +157,7 @@ impl Reduce {
     ) -> Self {
         let keepdims = kwargs
             .get("keepdims")
-            .map_or(false, |v| v.extract::<bool>(py).unwrap_or(false));
+            .is_none_or(|v| v.extract::<bool>(py).unwrap_or(false));
         Reduce {
             name,
             args,
@@ -150,6 +170,88 @@ impl Reduce {
     #[getter]
     fn args<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         PyTuple::new(py, &self.args)
+    }
+
+    fn __hash__(&self, py: Python) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.name.hash(&mut hasher);
+        self.keepdims.hash(&mut hasher);
+        self.consumes.hash(&mut hasher);
+        // Just gotta add args & kwargs now.
+        self.hash_args(py, &mut hasher).unwrap();
+        self.hash_kwargs(py, &mut hasher).unwrap();
+        hasher.finish()
+    }
+
+    /// Fast check for rust fields - easy. Then compare hashes. If everything
+    /// matches, then we need to check args and kwargs for equality, because
+    /// hashes might collide. See python -c "hash(-1) == hash(-2)"
+    fn __eq__(&self, other: &Bound<'_, PyAny>, py: Python) -> PyResult<bool> {
+        // Fast check rust fields first
+        let Ok(other) = other.cast::<Reduce>() else {
+            return Ok(false);
+        };
+        let other = other.borrow();
+        // let py = other.py(); // Can do this to remove the py argment.
+
+        if self.name != other.name {
+            return Ok(false);
+        }
+        if self.keepdims != other.keepdims {
+            return Ok(false);
+        }
+        if self.consumes != other.consumes {
+            return Ok(false);
+        }
+
+        // Now, we need to check args and kwargs for equality, because hashes might collide.
+        // args
+        if self.args.len() != other.args.len() {
+            return Ok(false);
+        }
+        for (s_arg, o_arg) in self.args.iter().zip(other.args.iter()) {
+            if !s_arg.bind(py).eq(o_arg.bind(py))? {
+                return Ok(false);
+            }
+        }
+        // kwargs
+        if self.kwargs.len() != other.kwargs.len() {
+            return Ok(false);
+        }
+        for (s_key, s_val) in self.kwargs.iter() {
+            let Some(o_val) = other.kwargs.get(s_key) else {
+                return Ok(false);
+            };
+            if !s_val.bind(py).eq(o_val.bind(py))? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+impl Reduce {
+    fn hash_args(&self, py: Python, state: &mut impl Hasher) -> PyResult<()> {
+        // Call __hash__ on args from Python side so we can fold them into our
+        // rust hash.
+        for arg in &self.args {
+            let arg_hash = arg.bind(py).hash()?;
+            arg_hash.hash(state);
+        }
+        Ok(())
+    }
+
+    fn hash_kwargs(&self, py: Python, state: &mut impl Hasher) -> PyResult<()> {
+        let mut kwargs: Vec<_> = self.kwargs.iter().collect();
+        kwargs.sort_by_key(|k| k.0);
+
+        // Now iterate over the sorted keys and hash the key-value pairs.
+        for (key, value) in kwargs {
+            key.hash(state);
+            let value_hash = value.bind(py).hash()?;
+            value_hash.hash(state);
+        }
+        Ok(())
     }
 }
 
