@@ -22,12 +22,13 @@ See ``docs/internals/ir.md``; ``test_ir.py`` pins the hashability behaviour.
 
 from collections.abc import Hashable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Final, Literal, final
+from typing import Any, Final, Literal, TypeVar, final
 
 from frozendict import frozendict
 
 from xrexpr.chunks import ChunkSpec, classify_chunk
 from xrexpr.indexers import Indexer, classify
+from xrexpr.interner import Interner
 
 __all__ = [
     "ALL_DIMS",
@@ -52,6 +53,8 @@ __all__ = [
     "WindowedReduce",
     "frozendict",
 ]
+
+T = TypeVar("T", bound=Hashable)
 
 
 @final
@@ -81,8 +84,17 @@ ALL_DIMS: Final = AllDims()
 DimSet = frozenset[Hashable] | AllDims
 
 
+class Internable:
+    def to_interned(self, interner: Interner[T]) -> "Internable":
+        """Take a schema and return a schema with every item interned.
+
+        Name stays as is, args and kwargs are interned.
+        """
+        raise NotImplementedError
+
+
 @dataclass(frozen=True)
-class Reduce:
+class Reduce(Internable):
     """A dimension-destroying reduction (``mean``/``sum``/``std``/...).
 
     Attributes
@@ -322,6 +334,24 @@ class Project:
             verbatim key, so it cannot disagree with what replay does.
         """
         return bool(self.args) and not isinstance(self.args[0], list)
+
+    def to_interned(self, interner: Interner[Hashable]) -> "Project":
+        """Take a schema and return a schema with every item interned.
+
+        Name stays as is, args, kwargs and variables are interned.
+        """
+        int_args = tuple(interner(a) for a in self.args)
+        int_kwargs = frozendict(
+            {interner(k): interner(v) for k, v in self.kwargs.items()}
+        )
+        int_variables = tuple(interner(v) for v in self.variables)
+
+        return Project(
+            name="__getitem__",
+            args=int_args,
+            kwargs=int_kwargs,
+            variables=int_variables,
+        )
 
 
 @dataclass(frozen=True)

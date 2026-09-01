@@ -402,6 +402,8 @@ class LazyProxy:
         # tell a dim grouper from a coordinate one (see ``lower._grouper_dims``).
         interner = Interner[Hashable]()
         _interned_schema = schema.to_interned(interner)
+        if self._ops:
+            breakpoint()
 
         lowered_ir = to_lower_ir(self._ops, schema.dim_names)
         return optimize(lowered_ir, schema)
