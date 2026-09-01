@@ -21,10 +21,11 @@ import pytest
 import xarray as xr
 from frozendict import frozendict
 
+from xrexpr._xrexprs.ir import ALL_DIMS
 from xrexpr.chunks import NoChange, SingleSize
 from xrexpr.exceptions import InvalidExpressionError
 from xrexpr.indexers import classify
-from xrexpr.ir import ALL_DIMS, GroupedReduce, WeightedReduce, WindowedReduce
+from xrexpr.ir import GroupedReduce, WeightedReduce, WindowedReduce
 from xrexpr.optimize import dim_effect, optimize
 from xrexpr.schema import SchemaState, to_opnode
 

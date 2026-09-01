@@ -27,8 +27,8 @@ from typing import Any
 from frozendict import frozendict
 from typing_extensions import assert_never
 
+from xrexpr._xrexprs.ir import AllDims
 from xrexpr.ir import (
-    AllDims,
     ContextOpen,
     Drop,
     Elementwise,
