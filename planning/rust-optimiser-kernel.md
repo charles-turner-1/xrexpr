@@ -5,10 +5,17 @@
 The Rust spike so far ports the IR **data structures** — `Reduce` became a `#[pyclass]`,
 and we hand-wrote `__hash__`/`__eq__` that delegate to Python's `hash`/`==` for the
 verbatim `args`/`kwargs`. That work is correct, but it reproduces, by hand and across an
-FFI boundary, exactly what `@dataclass(frozen=True)` already gave for free — while the
-optimiser it feeds stays in Python. It also threads `Py<PyAny>` through every reasoned-about
-field, and that only worsens as more node kinds land (dims are arbitrary `Hashable`, not
-`str`; see `test_reduce_non_string_hashable_dim`).
+FFI boundary, exactly what `@dataclass(frozen=True)` already gave for free — and, more to
+the point, it does not pay off even once the optimiser itself moves to Rust. A Rust
+optimiser built on pyclasses would *still* thread `Py<PyAny>` through every reasoned-about
+field: holding the GIL throughout, delegating every dim hash/eq to Python (`PyResult`
+everywhere), unable to build a `HashSet` of dims or `match` over a clean `enum` — so it
+would never reach the exhaustive integer algebra that is the whole point. The pyclass is
+dominated either way. Fed straight to the Rust optimiser, it drags Python objects into the
+algebra; lifted to a native form first, it was a pointless intermediate the Python
+dataclass could have supplied. And the `Py<PyAny>` threading only worsens as more node
+kinds land (dims are arbitrary `Hashable`, not `str`; see
+`test_reduce_non_string_hashable_dim`).
 
 The goal that actually justifies Rust here is **not** speed (the optimiser runs once, over a
 handful of ops; array compute dominates by orders of magnitude). It is an **exhaustive,
