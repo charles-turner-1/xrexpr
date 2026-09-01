@@ -1,13 +1,8 @@
-from typing import Any
-
-from hypothesis import HealthCheck, assume, given, settings
+import pytest
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from xrexpr.indexers import (Advanced, ForwardSlice, GeneralSlice, Indexer,
-                             Label, Mask, Positions, Scalar, _is_int, classify)
 from xrexpr.interner import Interner
-from xrexpr.ir import Select
-from xrexpr.optimize import _compose_indexer
 
 
 class TestInterner:
@@ -23,7 +18,7 @@ class TestInterner:
         assert interner[handle2] == "bar"
         assert len(interner) == 2
 
-    def test_no_intern_collisions(self):
+    def test_separate_intern_tables(self):
         i1 = Interner[str]()
         i2 = Interner[str]()
 
@@ -31,6 +26,13 @@ class TestInterner:
         handle2 = i2("foo")
 
         assert handle1 == handle2 == 0
+
+    def test_interner_dedup(self):
+        interner = Interner[str]()
+        handle1 = interner("foo")
+        handle2 = interner("foo")
+        assert handle1 == handle2
+        assert len(interner) == 1
 
     def test_interner_contains(self):
         interner = Interner[str]()
@@ -57,6 +59,11 @@ class TestInterner:
         round_trip_items = [interner[handle] for handle in handles]
         assert round_trip_items == items
 
+    def test_internet_rejects_unhashable(self):
+        interner = Interner()
+        with pytest.raises(TypeError):
+            interner(["foo", "bar"])
+
 # Now lets do a bunch of property tests for the interener.
 
 @given(st.lists(st.text(), min_size=1, max_size=100))
@@ -67,10 +74,16 @@ def test_interner_property(items):
     round_trip_items = [interner[handle] for handle in handles]
     assert round_trip_items == items
 
-@given(st.dictionaries(keys=st.text(), values=st.integers(), min_size=1, max_size=100))
-def test_interner_property_dict(items):
-    interner = Interner()
 
-    handles = [interner(key) for key in items]
-    round_trip_items = [interner[handle] for handle in handles]
-    assert round_trip_items == list(items.keys())
+@given(st.lists(st.text(), min_size=1, max_size=100))
+@settings(suppress_health_check=[HealthCheck.too_slow])
+def test_interner_dedups(items):
+    interner = Interner[str]()
+    handles = [interner(item) for item in items]
+
+    assert len(interner) == len(set(items))
+    # equal inputs -> equal handles, distinct inputs -> distinct handles
+    assert all(
+        (items[i] == items[j]) == (handles[i] == handles[j])
+        for i in range(len(items)) for j in range(len(items))
+    )
