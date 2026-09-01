@@ -30,11 +30,15 @@ over integers, not a *type* Python manipulates.
 ## The pipeline
 
 ```
-record (Python)  →  lift (Python)  →  optimise (RUST)  →  lower (Python)  →  replay (Python)
-   list[Op]          CorePlan          CorePlan            list[Op]
- (dataclasses)     (ints + tags)      (native enums)     (dataclasses)
+record  →  lower (lower.py)  →  encode  →  optimise (RUST)  →  decode  →  replay
+  Op          LoweredOp          CorePlan     CorePlan        LoweredOp
+(dataclasses) (dataclasses)    (ints + tags) (native enums) (dataclasses)
 ```
 
+The existing `lower` (`lower.py`, `Op → LoweredOp`) is unchanged and keeps its name. The new
+boundary is `encode`/`decode` — a serialise-to-native / read-back pair *inside* the optimise
+step, not a second "lowering". (`encode` is itself a lowering in the compiler sense — names
+become integers — but the word "lower" is already spoken for here, so we keep neutral verbs.)
 The Python dataclass IR stays as the public recording form. Rust only ever sees `CorePlan`.
 
 ## The idea: intern dim names to integers
@@ -86,17 +90,17 @@ just works because every field is an integer or a native sum type.
 
 ## Sequencing — boundary first, algebra once
 
-1. **`lift` + `lower`, pure Python.** Build `CorePlan` and the two conversions. No optimiser,
-   no Rust yet.
-2. **Round-trip test the boundary, alone.** Assert `lower(lift(p)) == p` over the suite and
-   via hypothesis. This validates the scary part with zero optimiser and zero Rust.
+1. **`encode` + `decode`, pure Python.** Build `CorePlan` and the two conversions. No
+   optimiser, no Rust yet.
+2. **Round-trip test the boundary, alone.** Assert `decode(encode(p)) == p` over the suite
+   and via hypothesis. This validates the scary part with zero optimiser and zero Rust.
 3. **Write the optimiser once, in Rust**, over `CorePlan`.
 4. **Differential-test against the oracle you already have:** assert
-   `lower(rust_optimise(lift(p))) == optimize(p)` (`optimize.py`). Do **not** rewrite the
+   `decode(rust_optimise(encode(p))) == optimize(p)` (`optimize.py`). Do **not** rewrite the
    optimiser in Python first — the existing one *is* the reference. Step 2's identity
    guarantee is what makes step 4 a fair test of the algebra alone.
 
-Start smaller than step 1's full scope: get `lift`/`lower` + round-trip green for just
+Start smaller than step 1's full scope: get `encode`/`decode` + round-trip green for just
 `Reduce` and `Select` before committing to the whole port.
 
 ## The exhaustiveness payoff (the point)
@@ -123,7 +127,8 @@ rewrite rule. `DimSet` becomes `AllDims | Concrete(HashSet<DimId>)` — a total 
 - Which ops cross first, and which stay Python-only barriers for now (`GroupedReduce`,
   `WeightedReduce`, `Rechunk`)? A partial port is fine if unported kinds lower to `Opaque`.
 - Where does normalisation (`classify`, `_dim_spec`) live — it stays in Python at record
-  time, so lift consumes *already-parsed* nodes. Confirm nothing in lift re-parses raw args.
+  time, so `encode` consumes *already-parsed* nodes. Confirm nothing in `encode` re-parses
+  raw args.
 
 ## What to stop doing
 
