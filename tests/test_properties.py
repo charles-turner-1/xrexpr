@@ -88,6 +88,7 @@ import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
 # aliased: this module's own ``Call`` is a generated *recorded* call (name + args/kwargs),
 # a different thing from the emitted call header ``lower.Call`` denotes.
 from xrexpr.chunks import Auto, BlockSeq, ByteSize
+from xrexpr.interner import Interner
 from xrexpr.ir import ContextOpen, Opaque, Rechunk, Select
 from xrexpr.lower import Call as Lowered
 from xrexpr.lower import emit, to_lower_ir
@@ -1209,6 +1210,19 @@ def test_optimised_plan_matches_eager_evaluation(case):
         if type(node).__name__.endswith("Reduce") and type(node).__name__ != "Reduce":
             event(f"fused: {type(node).__name__}")
     _assert_replays_equal(_apply(ds.plan, calls).collect(), _apply(ds, calls))
+
+
+@SETTINGS
+@given(any_plans())
+def test_roundtrip_intern_schema_unchanged(case):
+    ds, calls = case
+    _, schema = _build_plan(ds, calls)
+
+    interner = Interner()
+    interned_schema = schema.to_interned(interner)
+    roundtrip_schema = SchemaState.from_interned(interned_schema, interner)
+
+    assert roundtrip_schema == schema
 
 
 @pytest.mark.skipif(not HAS_DASK, reason="rechunk replay needs a chunk manager")

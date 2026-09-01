@@ -27,7 +27,8 @@ dependencies = [
    "frozendict",
    "packaging",  # Version() gates the pre-2026.4.0 scan-coord bug in schema.py
    "typing_extensions",  # assert_never on the 3.10 floor (typing.assert_never is 3.11+)
-   "xarray"
+   "xarray",
+   "pdbpp>=0.12.1,<0.13",
 ]
 
 dynamic = ["version"]

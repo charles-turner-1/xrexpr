@@ -20,12 +20,14 @@ is read off the base object rather than stored — the same derived-property dis
 See ``docs/internals/pipeline.md``.
 """
 
+from collections.abc import Hashable
 from functools import wraps
 from typing import Any
 
 import xarray as xr
 
 from xrexpr.explain import format_plan
+from xrexpr.interner import Interner
 from xrexpr.ir import ContextOpen, FluentOp, LoweredOp, Opaque, Project, frozendict
 from xrexpr.lower import Call, emit, to_lower_ir
 from xrexpr.optimize import optimize
@@ -209,7 +211,7 @@ class LazyProxy:
             for node in self._ops
         )
 
-    def _base_schema(self) -> SchemaState:
+    def _base_schema(self) -> SchemaState[Hashable]:
         """Snapshot the *base* object's schema, which is what the optimiser plans against.
 
         Returns
@@ -232,7 +234,7 @@ class LazyProxy:
         verbatim, correct, merely unfused. Teaching ``SchemaState`` to hold the array
         itself would recover the fusion; it is a schema change, not an accessor one.
         """
-        return SchemaState.from_dataset(self._base)
+        return SchemaState[Hashable].from_dataset(self._base)
 
     def _is_method_callable_on_base(self, name: str) -> bool:
         """Report whether ``name`` is a callable attribute of the base object.
@@ -386,6 +388,10 @@ class LazyProxy:
     def _optimized(self) -> list[LoweredOp]:
         """Lower and rewrite the recorded plan.
 
+        Before lowering, we intern everything in the schema and the plan so that
+        the optimizer can be easily converted to rust - a hashable just becomes
+        an integer. (N.B Python handles all the hashing - hard for rust)
+
         Returns
         -------
         list of LoweredOp
@@ -394,7 +400,11 @@ class LazyProxy:
         schema = self._base_schema()
         # Both stages plan against the base schema; lowering needs only its dim names, to
         # tell a dim grouper from a coordinate one (see ``lower._grouper_dims``).
-        return optimize(to_lower_ir(self._ops, schema.dim_names), schema)
+        interner = Interner[Hashable]()
+        _interned_schema = schema.to_interned(interner)
+
+        lowered_ir = to_lower_ir(self._ops, schema.dim_names)
+        return optimize(lowered_ir, schema)
 
     def compute(self) -> xr.Dataset | xr.DataArray:
         """Alias for :meth:`collect`, for xarray users who reach for ``.compute()``.

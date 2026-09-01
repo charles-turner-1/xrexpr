@@ -48,7 +48,6 @@ class TestInterner:
         item_list = list(interner)
         item_tup = tuple(interner)
 
-
         assert item_list == ["foo", "bar"]
         assert item_tup == ("foo", "bar")
 
@@ -64,7 +63,9 @@ class TestInterner:
         with pytest.raises(TypeError):
             interner(["foo", "bar"])
 
+
 # Now lets do a bunch of property tests for the interener.
+
 
 @given(st.lists(st.text(), min_size=1, max_size=100))
 @settings(suppress_health_check=[HealthCheck.too_slow])
@@ -85,5 +86,6 @@ def test_interner_dedups(items):
     # equal inputs -> equal handles, distinct inputs -> distinct handles
     assert all(
         (items[i] == items[j]) == (handles[i] == handles[j])
-        for i in range(len(items)) for j in range(len(items))
+        for i in range(len(items))
+        for j in range(len(items))
     )

@@ -25,7 +25,10 @@ class Interner(Generic[T]):
 
     The interner takes eg. a dimensions name and returns a unique handle for that name.
     The handle is guaranteed to be the same for the same name, and different for different names.
-    We do this basically by adding all new items to a dictionary
+    We do this basically by adding all new items to a dictionary.
+
+    The generic type here basically does nothing, but can be handle to let the
+    type checker know that we are interning a particular type of object, and not just any hashable object.
     """
 
     def __init__(self) -> None:

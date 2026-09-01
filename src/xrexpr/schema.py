@@ -21,7 +21,7 @@ normalises a raw recorded call into that ``Op`` variant.
 
 from collections.abc import Hashable, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Generic, Literal, TypeVar
 
 import numpy as np
 import xarray as xr
@@ -30,6 +30,7 @@ from packaging.version import Version
 from typing_extensions import assert_never
 
 from xrexpr.indexers import Advanced, Indexer, classify
+from xrexpr.interner import Interner
 from xrexpr.ir import (
     ALL_DIMS,
     AllDims,
@@ -73,9 +74,12 @@ __all__ = ["SchemaState", "apply_schema", "resolve_dims", "to_opnode"]
 #: *exact* on every supported version rather than modelling only the fixed behaviour.
 SCAN_DROPS_SCANNED_COORDS = Version(xr.__version__) < Version("2026.4.0")
 
+IntOrNone = int | None
+T = TypeVar("T", bound=Hashable)
+
 
 @dataclass(frozen=True)
-class SchemaState:
+class SchemaState(Generic[T]):
     """An immutable snapshot of a dataset's logical shape at one point in a plan.
 
     Attributes
@@ -130,11 +134,9 @@ class SchemaState:
     blanking every size and demanding the same output.
     """
 
-    variables: frozendict[Hashable, tuple[Hashable, ...]] = field(
-        default_factory=frozendict
-    )
-    coord_names: frozenset[Hashable] = frozenset()
-    sizes: frozendict[Hashable, int | None] = field(default_factory=frozendict)
+    variables: frozendict[T, tuple[T, ...]] = field(default_factory=frozendict)
+    coord_names: frozenset[T] = frozenset()
+    sizes: frozendict[T, IntOrNone] = field(default_factory=frozendict)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -156,7 +158,7 @@ class SchemaState:
         )
 
     @classmethod
-    def from_dataset(cls, ds: xr.Dataset | xr.DataArray) -> "SchemaState":
+    def from_dataset(cls, ds: xr.Dataset | xr.DataArray) -> "SchemaState[Hashable]":
         """Snapshot a dataset's logical schema, materialising nothing.
 
         Parameters
@@ -180,23 +182,23 @@ class SchemaState:
         variables = {k: tuple(v.dims) for k, v in ds.coords.items()}
         if isinstance(ds, xr.Dataset):
             variables |= {k: tuple(v.dims) for k, v in ds.data_vars.items()}
-        return cls(
+        return SchemaState[Hashable](
             variables=frozendict(variables),
             coord_names=frozenset(ds.coords),
             sizes=frozendict(ds.sizes),
         )
 
-    def var_dims(self, names: Iterable[Hashable]) -> frozenset[Hashable] | None:
+    def var_dims(self, names: Iterable[T]) -> frozenset[T] | None:
         """Return the dims carried by ``names`` collectively.
 
         Parameters
         ----------
-        names : iterable of Hashable
+        names : iterable of T
             Data variable names, e.g. the ones a :class:`~xrexpr.ir.Project` requests.
 
         Returns
         -------
-        frozenset of Hashable or None
+        frozenset of T or None
             The union of those variables' dims, or ``None`` if any name is not a tracked
             data variable.
 
@@ -211,7 +213,7 @@ class SchemaState:
         coordinate answers ``None`` here even though its dims are now known, because
         naming one in a projection is not something those rules model.
         """
-        dims: set[Hashable] = set()
+        dims: set[T] = set()
         data_vars = self.data_vars
         for name in names:
             if name not in data_vars:
@@ -220,19 +222,19 @@ class SchemaState:
         return frozenset(dims)
 
     @property
-    def dim_names(self) -> frozenset[Hashable]:
+    def dim_names(self) -> frozenset[T]:
         """The dims that exist — every dim some variable spans. Derived, never stored.
 
         Returns
         -------
-        frozenset of Hashable
+        frozenset of T
             The union of every variable's dims, which is what a symbolic
             :data:`~xrexpr.ir.ALL_DIMS` resolves to.
         """
         return frozenset(d for var_dims in self.variables.values() for d in var_dims)
 
     @property
-    def data_vars(self) -> frozendict[Hashable, tuple[Hashable, ...]]:
+    def data_vars(self) -> frozendict[T, tuple[T, ...]]:
         """The non-coordinate variables and their dims. Derived from the store.
 
         Returns
@@ -245,15 +247,48 @@ class SchemaState:
         )
 
     @property
-    def coords(self) -> frozenset[Hashable]:
+    def coords(self) -> frozenset[T]:
         """The coordinate names. Alias for :attr:`coord_names`, kept for readers.
 
         Returns
         -------
-        frozenset of Hashable
+        frozenset of T
             :attr:`coord_names`, unchanged.
         """
         return self.coord_names
+
+    def to_interned(self, interner: Interner[T]) -> "SchemaState[int]":
+        """Take a schema and return a schema with every item interned."""
+        int_variables = frozendict(
+            {
+                interner(v): tuple(interner(d) for d in dims)
+                for v, dims in self.variables.items()
+            }
+        )
+        int_coord_names = frozenset(interner(c) for c in self.coord_names)
+        int_sizes = frozendict({interner(d): s for d, s in self.sizes.items()})
+        return SchemaState[int](
+            variables=int_variables, coord_names=int_coord_names, sizes=int_sizes
+        )
+
+    @classmethod
+    def from_interned(
+        cls, interned_schema: "SchemaState[int]", interner: Interner[Hashable]
+    ) -> "SchemaState[Hashable]":
+        """Take an interned schema and return a schema with every item de-interned."""
+        deint_variables = frozendict(
+            {
+                interner[v]: tuple(interner[d] for d in dims)
+                for v, dims in interned_schema.variables.items()
+            }
+        )
+        deint_coord_names = frozenset(interner[c] for c in interned_schema.coord_names)
+        deint_sizes = frozendict(
+            {interner[d]: s for d, s in interned_schema.sizes.items()}
+        )
+        return SchemaState[Hashable](
+            variables=deint_variables, coord_names=deint_coord_names, sizes=deint_sizes
+        )
 
 
 def resolve_dims(
@@ -329,19 +364,21 @@ def resolve_dims(
             assert_never(consumes)
 
 
-def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
+def apply_schema(
+    schema: SchemaState[Hashable], node: LoweredOp
+) -> SchemaState[Hashable]:
     """Return the schema resulting from applying ``node`` to ``schema``.
 
     Parameters
     ----------
-    schema : SchemaState
+    schema : SchemaState[Hashable]
         The schema *entering* the node.
     node : LoweredOp
         The node to apply.
 
     Returns
     -------
-    SchemaState
+    SchemaState[Hashable]
         The next snapshot: the schema the following node sees.
 
     Notes
@@ -578,7 +615,7 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
         case _:
             assert_never(node)
 
-    return SchemaState(
+    return SchemaState[Hashable](
         variables=frozendict(variables),
         coord_names=frozenset(coord_names),
         sizes=frozendict(sizes),
