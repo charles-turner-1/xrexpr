@@ -29,48 +29,24 @@ type error here until both directions handle it.
 """
 
 from collections.abc import Hashable, Mapping
-from typing import TypeVar, assert_never, cast
+from typing import TypeVar, cast
 
 from frozendict import frozendict
+from typing_extensions import assert_never
 
 from xrexpr.indexers import Advanced, Indexer
 from xrexpr.intern.interner import InternedVal, Interner
-from xrexpr.intern.ir import (
-    InternedContextOpen,
-    InternedDrop,
-    InternedElementwise,
-    InternedFluentOp,
-    InternedGroupedReduce,
-    InternedLoweredOp,
-    InternedOpaque,
-    InternedProject,
-    InternedRechunk,
-    InternedReduce,
-    InternedRename,
-    InternedScan,
-    InternedSelect,
-    InternedWeightedReduce,
-    InternedWindowedReduce,
-)
-from xrexpr.ir import (
-    AllDims,
-    ContextOpen,
-    DimSet,
-    Drop,
-    Elementwise,
-    FluentOp,
-    GroupedReduce,
-    LoweredOp,
-    Opaque,
-    Project,
-    Rechunk,
-    Reduce,
-    Rename,
-    Scan,
-    Select,
-    WeightedReduce,
-    WindowedReduce,
-)
+from xrexpr.intern.ir import (InternedContextOpen, InternedDrop,
+                              InternedElementwise, InternedFluentOp,
+                              InternedGroupedReduce, InternedLoweredOp,
+                              InternedOpaque, InternedProject, InternedRechunk,
+                              InternedReduce, InternedRename, InternedScan,
+                              InternedSelect, InternedWeightedReduce,
+                              InternedWindowedReduce)
+from xrexpr.ir import (AllDims, ContextOpen, DimSet, Drop, Elementwise,
+                       FluentOp, GroupedReduce, LoweredOp, Opaque, Project,
+                       Rechunk, Reduce, Rename, Scan, Select, WeightedReduce,
+                       WindowedReduce)
 
 __all__ = [
     "deintern",
