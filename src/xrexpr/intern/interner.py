@@ -31,6 +31,10 @@ class InternedVal:
 
     handle: int
 
+    def __repr__(self) -> str:
+        """Return a string representation of the InternedVal, not stating `handle=`."""
+        return f"InternedVal({self.handle})"
+
 
 class Interner(Generic[T]):
     """Interner to intern a particular type of object.
