@@ -30,7 +30,7 @@ from packaging.version import Version
 from typing_extensions import assert_never
 
 from xrexpr.indexers import Advanced, Indexer, classify
-from xrexpr.interner import InternedVal, Interner
+from xrexpr.intern import InternedVal, Interner
 from xrexpr.ir import (
     ALL_DIMS,
     AllDims,
@@ -262,7 +262,7 @@ class SchemaState(Generic[T]):
 
         Names — variable names, their dim tuples, coord names, and the dim keys of
         ``sizes`` — become handles; ``sizes`` *values* stay bare ``int`` (they are extents,
-        not names), the same name/value split :mod:`xrexpr.interned` makes for the ops.
+        not names), the same name/value split :mod:`xrexpr.intern.converters` makes for the ops.
         """
         int_variables = frozendict(
             {

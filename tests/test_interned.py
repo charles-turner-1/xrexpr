@@ -2,7 +2,7 @@
 
 The round-trip is pinned by ``test_properties.test_roundtrip_intern_ops_unchanged`` over
 generated plans; this file pins the *shape* of an interned node — which atoms are relabeled
-to :class:`~xrexpr.interner.InternedVal` and which are left exactly as they are — since that
+to :class:`~xrexpr.intern.interner.InternedVal` and which are left exactly as they are — since that
 is the contract the Rust reader extracts against.
 """
 
@@ -13,14 +13,15 @@ from frozendict import frozendict
 
 from xrexpr.chunks import SingleSize
 from xrexpr.indexers import ForwardSlice, Positions, Scalar
-from xrexpr.interned import (
+from xrexpr.intern import (
     InternedProject,
     InternedReduce,
     InternedSelect,
+    InternedVal,
+    Interner,
     deintern,
     intern,
 )
-from xrexpr.interner import InternedVal, Interner
 from xrexpr.ir import (
     ALL_DIMS,
     Project,
