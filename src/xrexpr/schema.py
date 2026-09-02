@@ -307,15 +307,13 @@ class SchemaState(Generic[T]):
         """
         deint_variables = frozendict(
             {
-                interner[v.handle]: tuple(interner[d.handle] for d in dims)
+                interner[v]: tuple(interner[d] for d in dims)
                 for v, dims in interned_schema.variables.items()
             }
         )
-        deint_coord_names = frozenset(
-            interner[c.handle] for c in interned_schema.coord_names
-        )
+        deint_coord_names = frozenset(interner[c] for c in interned_schema.coord_names)
         deint_sizes = frozendict(
-            {interner[d.handle]: s for d, s in interned_schema.sizes.items()}
+            {interner[d]: s for d, s in interned_schema.sizes.items()}
         )
         return SchemaState[Hashable](
             variables=deint_variables, coord_names=deint_coord_names, sizes=deint_sizes

@@ -101,8 +101,11 @@ class Interner(Generic[T]):
             self.reverse.append(item)
         return self.forward[item]
 
-    def __getitem__(self, handle: int) -> T:
+    def __getitem__(self, handle: int | InternedVal) -> T:
         """Return the item corresponding to the given handle.
+
+        If the handle is a :class:`InternedVal`, we extract the ``handle`` it
+        wraps, and then look up the item in the reverse mapping.
 
         Parameters
         ----------
@@ -114,6 +117,8 @@ class Interner(Generic[T]):
         T
             The item that ``handle`` stands for.
         """
+        if isinstance(handle, InternedVal):
+            handle = handle.handle
         return self.reverse[handle]
 
     def __len__(self) -> int:
