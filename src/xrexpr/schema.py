@@ -74,7 +74,6 @@ __all__ = ["SchemaState", "apply_schema", "resolve_dims", "to_opnode"]
 #: *exact* on every supported version rather than modelling only the fixed behaviour.
 SCAN_DROPS_SCANNED_COORDS = Version(xr.__version__) < Version("2026.4.0")
 
-IntOrNone = int | None
 T = TypeVar("T", bound=Hashable)
 
 
@@ -136,7 +135,7 @@ class SchemaState(Generic[T]):
 
     variables: frozendict[T, tuple[T, ...]] = field(default_factory=frozendict)
     coord_names: frozenset[T] = frozenset()
-    sizes: frozendict[T, IntOrNone] = field(default_factory=frozendict)
+    sizes: frozendict[T, int | None] = field(default_factory=frozendict)
 
     def __post_init__(self) -> None:
         object.__setattr__(
