@@ -387,10 +387,6 @@ class LazyProxy:
     def _optimized(self) -> list[LoweredOp]:
         """Lower and rewrite the recorded plan.
 
-        Before lowering, we intern everything in the schema and the plan so that
-        the optimizer can be easily converted to rust - a hashable just becomes
-        an integer. (N.B Python handles all the hashing - hard for rust)
-
         Returns
         -------
         list of LoweredOp
@@ -399,7 +395,7 @@ class LazyProxy:
         schema = self._base_schema()
         # Both stages plan against the base schema; lowering needs only its dim names, to
         # tell a dim grouper from a coordinate one (see ``lower._grouper_dims``).
-        lowered_ir = to_lower_ir(self._ops, schema.dim_names)
+        return optimize(to_lower_ir(self._ops, schema.dim_names), schema)
         return optimize(lowered_ir, schema)
 
     def compute(self) -> xr.Dataset | xr.DataArray:

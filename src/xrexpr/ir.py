@@ -110,7 +110,7 @@ class Reduce:
     """
 
     name: str  # open set of tabulated reductions → str (kind-safety via OP_TABLE)
-    args: tuple[str, ...] = ()
+    args: tuple[Any, ...] = ()
     kwargs: frozendict[str, Any] = field(default_factory=frozendict)
     consumes: DimSet = frozenset()
 
