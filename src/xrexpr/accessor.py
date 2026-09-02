@@ -396,7 +396,6 @@ class LazyProxy:
         # Both stages plan against the base schema; lowering needs only its dim names, to
         # tell a dim grouper from a coordinate one (see ``lower._grouper_dims``).
         return optimize(to_lower_ir(self._ops, schema.dim_names), schema)
-        return optimize(lowered_ir, schema)
 
     def compute(self) -> xr.Dataset | xr.DataArray:
         """Alias for :meth:`collect`, for xarray users who reach for ``.compute()``.

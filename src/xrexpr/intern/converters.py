@@ -82,13 +82,35 @@ _V = TypeVar("_V")
 
 
 def _iname(name: Hashable) -> InternedVal:
-    """Relabel one name to its handle."""
+    """Relabel one name to its handle.
+
+    Parameters
+    ----------
+    name : Hashable
+        The dim or variable name to intern.
+
+    Returns
+    -------
+    InternedVal
+        The handle standing for ``name``.
+    """
     it: Interner[Hashable] = Interner()
     return InternedVal(it(name))
 
 
 def _dename(val: InternedVal) -> Hashable:
-    """Look one handle back up to its name."""
+    """Look one handle back up to its name.
+
+    Parameters
+    ----------
+    val : InternedVal
+        The handle to resolve.
+
+    Returns
+    -------
+    Hashable
+        The name ``val`` stands for.
+    """
     it: Interner[Hashable] = Interner()
     return it[val.handle]
 
@@ -110,7 +132,18 @@ def _dnameset(names: frozenset[InternedVal]) -> frozenset[Hashable]:
 
 
 def _idims(dims: DimSet) -> frozenset[InternedVal] | AllDims:
-    """Intern a dim set, preserving the :data:`~xrexpr.ir.ALL_DIMS` sentinel."""
+    """Intern a dim set, preserving the :data:`~xrexpr.ir.ALL_DIMS` sentinel.
+
+    Parameters
+    ----------
+    dims : DimSet
+        The dim set to intern, or the ``ALL_DIMS`` sentinel.
+
+    Returns
+    -------
+    frozenset of InternedVal or AllDims
+        The interned dims, or the sentinel passed straight through.
+    """
     if isinstance(dims, AllDims):
         return dims
     return frozenset(_iname(d) for d in dims)
@@ -135,7 +168,18 @@ def _dnamemap(
 
 
 def _ikeys(mapping: Mapping[Hashable, _V]) -> frozendict[InternedVal, _V]:
-    """Intern the *keys* of a ``{dim: value}`` map (chunks, window); values untouched."""
+    """Intern the *keys* of a ``{dim: value}`` map (chunks, window); values untouched.
+
+    Parameters
+    ----------
+    mapping : Mapping
+        A ``{dim: value}`` map whose keys are names and whose values are kept structural.
+
+    Returns
+    -------
+    frozendict
+        ``mapping`` with each key relabeled to its handle, values unchanged.
+    """
     return frozendict({_iname(k): v for k, v in mapping.items()})
 
 
@@ -149,6 +193,16 @@ def _intern_indexer(idx: Indexer) -> Indexer:
 
     Moot on a live plan: an ``Advanced`` select is recorded :class:`~xrexpr.ir.Opaque`, so
     it never reaches here. Handled anyway so the transform is total over the variant.
+
+    Parameters
+    ----------
+    idx : Indexer
+        The indexer value to relabel.
+
+    Returns
+    -------
+    Indexer
+        The indexer with any ``Advanced.dims`` interned; other variants unchanged.
     """
     if isinstance(idx, Advanced):
         return Advanced(dims=_inames(idx.dims))
@@ -176,6 +230,16 @@ def intern(op: FluentOp | LoweredOp) -> InternedFluentOp | InternedLoweredOp:
 
     Total over every op variant: the ``assert_never`` makes a new one a type error until it
     is handled. ``args``/``kwargs`` and every value atom pass through untouched.
+
+    Parameters
+    ----------
+    op : FluentOp or LoweredOp
+        The fluent or lowered op to intern.
+
+    Returns
+    -------
+    InternedFluentOp or InternedLoweredOp
+        The interned counterpart of ``op``.
     """
     match op:
         case Reduce():
@@ -248,6 +312,16 @@ def deintern(op: InternedFluentOp | InternedLoweredOp) -> FluentOp | LoweredOp:
     normalisation and derivation (``keepdims``, ``single``, ``uniform``, ``classify``) from
     the verbatim replay header — the materialized flags are Rust-facing only and ignored
     here. Total, with the same ``assert_never`` guarantee as :func:`intern`.
+
+    Parameters
+    ----------
+    op : InternedFluentOp or InternedLoweredOp
+        The interned op to de-intern.
+
+    Returns
+    -------
+    FluentOp or LoweredOp
+        The rebuilt fluent or lowered op.
     """
     match op:
         case InternedReduce():

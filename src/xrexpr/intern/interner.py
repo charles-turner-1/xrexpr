@@ -32,7 +32,13 @@ class InternedVal:
     handle: int
 
     def __repr__(self) -> str:
-        """Return a string representation of the InternedVal, not stating `handle=`."""
+        """Return a string representation of the InternedVal, not stating `handle=`.
+
+        Returns
+        -------
+        str
+            The representation, e.g. ``InternedVal(3)``.
+        """
         return f"InternedVal({self.handle})"
 
 
@@ -53,7 +59,13 @@ class Interner(Generic[T]):
     _instance: ClassVar["Interner[Any] | None"] = None
 
     def __new__(cls) -> "Interner[T]":
-        """Ensure that only one instance of the interner exists."""
+        """Ensure that only one instance of the interner exists.
+
+        Returns
+        -------
+        Interner[T]
+            The singleton interner instance.
+        """
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
@@ -72,26 +84,71 @@ class Interner(Generic[T]):
         self.reverse: list[T] = []
 
     def __call__(self, item: T) -> int:
-        """Return a unique handle for the given item, interning it if necessary."""
+        """Return a unique handle for the given item, interning it if necessary.
+
+        Parameters
+        ----------
+        item : T
+            The name to intern.
+
+        Returns
+        -------
+        int
+            The stable handle for ``item``.
+        """
         if item not in self.forward:
             self.forward[item] = len(self.reverse)
             self.reverse.append(item)
         return self.forward[item]
 
     def __getitem__(self, handle: int) -> T:
-        """Return the item corresponding to the given handle."""
+        """Return the item corresponding to the given handle.
+
+        Parameters
+        ----------
+        handle : int
+            A handle previously returned by interning.
+
+        Returns
+        -------
+        T
+            The item that ``handle`` stands for.
+        """
         return self.reverse[handle]
 
     def __len__(self) -> int:
-        """Return the number of items interned."""
+        """Return the number of items interned.
+
+        Returns
+        -------
+        int
+            The count of distinct interned items.
+        """
         return len(self.reverse)
 
     def __contains__(self, item: T) -> bool:
-        """Return whether the given item is interned."""
+        """Return whether the given item is interned.
+
+        Parameters
+        ----------
+        item : T
+            The item to test.
+
+        Returns
+        -------
+        bool
+            ``True`` if ``item`` already has a handle.
+        """
         return item in self.forward
 
     def __iter__(self) -> Iterator[T]:
-        """Return an iterator over the interned items."""
+        """Return an iterator over the interned items.
+
+        Returns
+        -------
+        Iterator of T
+            The interned items in handle order.
+        """
         return iter(self.reverse)
 
     def _clear(self) -> None:

@@ -262,6 +262,16 @@ class SchemaState(Generic[T]):
         Names — variable names, their dim tuples, coord names, and the dim keys of
         ``sizes`` — become handles; ``sizes`` *values* stay bare ``int`` (they are extents,
         not names), the same name/value split :mod:`xrexpr.intern.converters` makes for the ops.
+
+        Parameters
+        ----------
+        interner : Interner[T]
+            The interner that relabels each name to its handle.
+
+        Returns
+        -------
+        SchemaState[InternedVal]
+            The schema with every name relabeled, values left structural.
         """
         int_variables = frozendict(
             {
@@ -281,7 +291,20 @@ class SchemaState(Generic[T]):
     def from_interned(
         cls, interned_schema: "SchemaState[InternedVal]", interner: Interner[Hashable]
     ) -> "SchemaState[Hashable]":
-        """Take an interned schema and return a schema with every name de-interned."""
+        """Take an interned schema and return a schema with every name de-interned.
+
+        Parameters
+        ----------
+        interned_schema : SchemaState[InternedVal]
+            The interned schema to resolve.
+        interner : Interner[Hashable]
+            The interner that looks each handle back up to its name.
+
+        Returns
+        -------
+        SchemaState[Hashable]
+            The schema with every handle resolved back to its name.
+        """
         deint_variables = frozendict(
             {
                 interner[v.handle]: tuple(interner[d.handle] for d in dims)
