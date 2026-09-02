@@ -5,6 +5,13 @@ from hypothesis import strategies as st
 from xrexpr.interner import Interner
 
 
+@pytest.fixture(autouse=True)
+def _clear_interner():
+    """Reset the interner singleton before each test — it now persists process-wide."""
+    Interner()._clear()
+    yield
+
+
 class TestInterner:
     def test_interning(self):
         interner = Interner[str]()
@@ -18,14 +25,16 @@ class TestInterner:
         assert interner[handle2] == "bar"
         assert len(interner) == 2
 
-    def test_separate_intern_tables(self):
+    def test_interner_is_singleton(self):
+        # The interner is a process-wide singleton: constructing it again returns the same
+        # populated instance rather than a fresh table.
         i1 = Interner[str]()
         i2 = Interner[str]()
 
-        handle1 = i1("foo")
-        handle2 = i2("foo")
-
-        assert handle1 == handle2 == 0
+        assert i1 is i2
+        handle = i1("foo")
+        assert i2("foo") == handle
+        assert len(i2) == 1
 
     def test_interner_dedup(self):
         interner = Interner[str]()
@@ -70,6 +79,9 @@ class TestInterner:
 @given(st.lists(st.text(), min_size=1, max_size=100))
 @settings(suppress_health_check=[HealthCheck.too_slow])
 def test_interner_property(items):
+    # Hypothesis re-runs the body per example; the singleton persists, so clear per example.
+    interner = Interner[str]()
+    interner._clear()
     interner = Interner[str]()
     handles = [interner(item) for item in items]
     round_trip_items = [interner[handle] for handle in handles]
@@ -79,6 +91,8 @@ def test_interner_property(items):
 @given(st.lists(st.text(), min_size=1, max_size=100))
 @settings(suppress_health_check=[HealthCheck.too_slow])
 def test_interner_dedups(items):
+    # Hypothesis re-runs the body per example; the singleton persists, so clear per example.
+    Interner[str]()._clear()
     interner = Interner[str]()
     handles = [interner(item) for item in items]
 

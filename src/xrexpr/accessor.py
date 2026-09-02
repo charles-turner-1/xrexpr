@@ -27,7 +27,6 @@ from typing import Any
 import xarray as xr
 
 from xrexpr.explain import format_plan
-from xrexpr.interner import Interner
 from xrexpr.ir import ContextOpen, FluentOp, LoweredOp, Opaque, Project, frozendict
 from xrexpr.lower import Call, emit, to_lower_ir
 from xrexpr.optimize import optimize
@@ -400,11 +399,6 @@ class LazyProxy:
         schema = self._base_schema()
         # Both stages plan against the base schema; lowering needs only its dim names, to
         # tell a dim grouper from a coordinate one (see ``lower._grouper_dims``).
-        interner = Interner[Hashable]()
-        _interned_schema = schema.to_interned(interner)
-        if self._ops:
-            breakpoint()
-
         lowered_ir = to_lower_ir(self._ops, schema.dim_names)
         return optimize(lowered_ir, schema)
 

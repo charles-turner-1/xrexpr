@@ -22,13 +22,12 @@ See ``docs/internals/ir.md``; ``test_ir.py`` pins the hashability behaviour.
 
 from collections.abc import Hashable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Final, Literal, TypeVar, final
+from typing import Any, Final, Literal, final
 
 from frozendict import frozendict
 
 from xrexpr.chunks import ChunkSpec, classify_chunk
 from xrexpr.indexers import Indexer, classify
-from xrexpr.interner import Interner
 
 __all__ = [
     "ALL_DIMS",
@@ -53,8 +52,6 @@ __all__ = [
     "WindowedReduce",
     "frozendict",
 ]
-
-T = TypeVar("T", bound=Hashable)
 
 
 @final
@@ -84,17 +81,8 @@ ALL_DIMS: Final = AllDims()
 DimSet = frozenset[Hashable] | AllDims
 
 
-class Internable:
-    def to_interned(self, interner: Interner[T]) -> "Internable":
-        """Take a schema and return a schema with every item interned.
-
-        Name stays as is, args and kwargs are interned.
-        """
-        raise NotImplementedError
-
-
 @dataclass(frozen=True)
-class Reduce(Internable):
+class Reduce:
     """A dimension-destroying reduction (``mean``/``sum``/``std``/...).
 
     Attributes
@@ -146,31 +134,9 @@ class Reduce(Internable):
         """
         return bool(self.kwargs.get("keepdims", False))
 
-    def to_interned(self, interner: Interner[T]) -> "Reduce":
-        """Take a schema and return a schema with every item interned.
-
-        Name stays as is, args and kwargs are interned.
-        """
-        int_args = tuple(interner(a) for a in self.args)
-        int_kwargs = frozendict(
-            {interner(k): interner(v) for k, v in self.kwargs.items()}
-        )
-        int_consumes: DimSet
-        if isinstance(self.consumes, AllDims):
-            int_consumes = ALL_DIMS
-        else:
-            int_consumes = frozenset(interner(d) for d in self.consumes)  # type: ignore
-
-        return Reduce(
-            name=self.name,
-            args=int_args,
-            kwargs=int_kwargs,
-            consumes=int_consumes,
-        )
-
 
 @dataclass(frozen=True)
-class Select(Internable):
+class Select:
     """An ``isel``/``sel`` selection, described by its ``{dim: indexer}`` mapping.
 
     Attributes
@@ -226,26 +192,6 @@ class Select(Internable):
             The dropped dims, derived from :attr:`indexer` so the two cannot disagree.
         """
         return frozenset(d for d, v in self.indexer.items() if v.drops_dim)
-
-    def to_interned(self, interner: Interner[T]) -> "Select":
-        """Take a schema and return a schema with every item interned.
-
-        Name stays as is, args, kwargs and indexer are interned.
-        """
-        int_args = tuple(interner(a) for a in self.args)
-        int_kwargs = frozendict(
-            {interner(k): interner(v) for k, v in self.kwargs.items()}
-        )
-        int_indexer = frozendict(
-            {interner(d): interner(v) for d, v in self.indexer.items()}
-        )
-
-        return Select(
-            name=self.name,
-            args=int_args,
-            kwargs=int_kwargs,
-            indexer=int_indexer,
-        )
 
 
 @dataclass(frozen=True)
@@ -327,7 +273,7 @@ class Elementwise:
 
 
 @dataclass(frozen=True)
-class Project(Internable):
+class Project:
     """A variable projection — ``ds["tas"]`` or ``ds[["tas", "pr"]]``.
 
     Attributes
@@ -376,24 +322,6 @@ class Project(Internable):
             verbatim key, so it cannot disagree with what replay does.
         """
         return bool(self.args) and not isinstance(self.args[0], list)
-
-    def to_interned(self, interner: Interner[Hashable]) -> "Project":
-        """Take a schema and return a schema with every item interned.
-
-        Name stays as is, args, kwargs and variables are interned.
-        """
-        int_args = tuple(interner(a) for a in self.args)
-        int_kwargs = frozendict(
-            {interner(k): interner(v) for k, v in self.kwargs.items()}
-        )
-        int_variables = tuple(interner(v) for v in self.variables)
-
-        return Project(
-            name="__getitem__",
-            args=int_args,
-            kwargs=int_kwargs,
-            variables=int_variables,
-        )
 
 
 @dataclass(frozen=True)

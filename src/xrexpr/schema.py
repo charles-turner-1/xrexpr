@@ -30,7 +30,7 @@ from packaging.version import Version
 from typing_extensions import assert_never
 
 from xrexpr.indexers import Advanced, Indexer, classify
-from xrexpr.interner import Interner
+from xrexpr.interner import InternedVal, Interner
 from xrexpr.ir import (
     ALL_DIMS,
     AllDims,
@@ -257,34 +257,43 @@ class SchemaState(Generic[T]):
         """
         return self.coord_names
 
-    def to_interned(self, interner: Interner[T]) -> "SchemaState[int]":
-        """Take a schema and return a schema with every item interned."""
+    def to_interned(self, interner: Interner[T]) -> "SchemaState[InternedVal]":
+        """Return a schema with every *name* relabeled to an :class:`InternedVal` handle.
+
+        Names — variable names, their dim tuples, coord names, and the dim keys of
+        ``sizes`` — become handles; ``sizes`` *values* stay bare ``int`` (they are extents,
+        not names), the same name/value split :mod:`xrexpr.interned` makes for the ops.
+        """
         int_variables = frozendict(
             {
-                interner(v): tuple(interner(d) for d in dims)
+                InternedVal(interner(v)): tuple(InternedVal(interner(d)) for d in dims)
                 for v, dims in self.variables.items()
             }
         )
-        int_coord_names = frozenset(interner(c) for c in self.coord_names)
-        int_sizes = frozendict({interner(d): s for d, s in self.sizes.items()})
-        return SchemaState[int](
+        int_coord_names = frozenset(InternedVal(interner(c)) for c in self.coord_names)
+        int_sizes = frozendict(
+            {InternedVal(interner(d)): s for d, s in self.sizes.items()}
+        )
+        return SchemaState[InternedVal](
             variables=int_variables, coord_names=int_coord_names, sizes=int_sizes
         )
 
     @classmethod
     def from_interned(
-        cls, interned_schema: "SchemaState[int]", interner: Interner[Hashable]
+        cls, interned_schema: "SchemaState[InternedVal]", interner: Interner[Hashable]
     ) -> "SchemaState[Hashable]":
-        """Take an interned schema and return a schema with every item de-interned."""
+        """Take an interned schema and return a schema with every name de-interned."""
         deint_variables = frozendict(
             {
-                interner[v]: tuple(interner[d] for d in dims)
+                interner[v.handle]: tuple(interner[d.handle] for d in dims)
                 for v, dims in interned_schema.variables.items()
             }
         )
-        deint_coord_names = frozenset(interner[c] for c in interned_schema.coord_names)
+        deint_coord_names = frozenset(
+            interner[c.handle] for c in interned_schema.coord_names
+        )
         deint_sizes = frozendict(
-            {interner[d]: s for d, s in interned_schema.sizes.items()}
+            {interner[d.handle]: s for d, s in interned_schema.sizes.items()}
         )
         return SchemaState[Hashable](
             variables=deint_variables, coord_names=deint_coord_names, sizes=deint_sizes

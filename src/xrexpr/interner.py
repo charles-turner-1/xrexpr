@@ -10,14 +10,26 @@ implement hashing and equality.
 """
 
 from collections.abc import Hashable, Iterator
-from typing import Generic, TypeVar
+from dataclasses import dataclass
+from typing import Any, ClassVar, Generic, TypeVar, final
 
 T = TypeVar("T", bound=Hashable)
 
-NameType = Hashable
-ArgType = Hashable
-KwargType = Hashable
-DimType = Hashable
+
+@final
+@dataclass(frozen=True)
+class InternedVal:
+    """A name relabeled to an interner handle — a *distinct type* from a literal ``int``.
+
+    Interning turns dim and variable *names* into handles, but a plan is also full of
+    literal ``int`` values that are **not** names — a scalar index position, a chunk block
+    size, a slice bound. Wrapping a handle keeps the two apart: an :class:`InternedVal` is
+    always a name to look up, a bare ``int`` is always a value to read. That distinction is
+    what lets interning stay *selective* (relabel names, leave values alone) and lets a Rust
+    reader extract each into the right kind of struct field.
+    """
+
+    handle: int
 
 
 class Interner(Generic[T]):
@@ -29,9 +41,29 @@ class Interner(Generic[T]):
 
     The generic type here basically does nothing, but can be handle to let the
     type checker know that we are interning a particular type of object, and not just any hashable object.
+
+    Singleton so that we have one interner everywhere. This is unlikely to ever
+    get so long we have a problem, and stops us threading interners through everywhere.
     """
 
+    _instance: ClassVar["Interner[Any] | None"] = None
+
+    def __new__(cls) -> "Interner[T]":
+        """Ensure that only one instance of the interner exists."""
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
     def __init__(self) -> None:
+        """Initialize the interner with empty forward and reverse mappings.
+
+        Guarded so that re-constructing the singleton does not wipe its tables:
+        ``__new__`` sets ``_instance`` *before* ``__init__`` runs, so we key the guard on
+        whether *this instance* has been initialized, not on ``_instance``.
+        """
+        if hasattr(self, "initialised"):
+            return None
+        self.initialised = True
         self.forward: dict[T, int] = {}
         self.reverse: list[T] = []
 
@@ -58,8 +90,8 @@ class Interner(Generic[T]):
         """Return an iterator over the interned items."""
         return iter(self.reverse)
 
-
-name_interner = Interner[NameType]()
-arg_interner = Interner[ArgType]()
-kwarg_interner = Interner[KwargType]()
-dim_interner = Interner[DimType]()
+    def _clear(self) -> None:
+        """Clear the interner. This is mainly for testing purposes."""
+        self.forward = {}
+        self.reverse = []
+        Interner._instance = None

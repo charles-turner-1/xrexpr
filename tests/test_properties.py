@@ -88,6 +88,7 @@ import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
 # aliased: this module's own ``Call`` is a generated *recorded* call (name + args/kwargs),
 # a different thing from the emitted call header ``lower.Call`` denotes.
 from xrexpr.chunks import Auto, BlockSeq, ByteSize
+from xrexpr.interned import deintern, intern
 from xrexpr.interner import Interner
 from xrexpr.ir import ContextOpen, Opaque, Rechunk, Select
 from xrexpr.lower import Call as Lowered
@@ -1223,6 +1224,23 @@ def test_roundtrip_intern_schema_unchanged(case):
     roundtrip_schema = SchemaState.from_interned(interned_schema, interner)
 
     assert roundtrip_schema == schema
+
+
+@SETTINGS
+@given(any_plans())
+def test_roundtrip_intern_ops_unchanged(case):
+    """Every op survives ``deintern(intern(op)) == op``.
+
+    Covers both the fluent plan — which may carry a ``ContextOpen`` — and its lowered form,
+    which carries the fused ``*Reduce`` nodes, so all op variants are exercised.
+    """
+    ds, calls = case
+    Interner()._clear()
+
+    fluent = _build_plan(ds, calls)[0]
+    lowered = to_lower_ir(fluent, _dim_names(ds))
+    for op in (*fluent, *lowered):
+        assert deintern(intern(op)) == op
 
 
 @pytest.mark.skipif(not HAS_DASK, reason="rechunk replay needs a chunk manager")
