@@ -26,8 +26,10 @@ from typing import Literal, get_args
 from xrexpr.ir import ContextOpenName
 
 __all__ = [
+    "CHUNK_OPTION_KWARGS",
     "CONTEXT_METHODS",
     "OP_TABLE",
+    "SELECT_OPTION_KWARGS",
     "ContextSpec",
     "DropSpec",
     "ElementwiseSpec",
@@ -285,6 +287,26 @@ OP_TABLE: dict[str, OpSpec] = {op.name: op for op in _SPECS}
 #: from the type either. A test pins the names against ``xr.Dataset``, the one agreement
 #: no derivation can supply.
 CONTEXT_METHODS = frozenset(op.name for op in _SPECS if isinstance(op, ContextSpec))
+
+#: ``isel``/``sel`` keyword arguments that are *options*, not dim indexers. The forward
+#: parser (``schema._select_indexer``) drops them when reading the indexer off a call, and
+#: the inverse (``lower._emit_node``) preserves exactly them when rebuilding the header from
+#: :attr:`~xrexpr.ir.Select.indexer`. One source of truth so the two cannot disagree.
+SELECT_OPTION_KWARGS = frozenset({"drop", "missing_dims", "method", "tolerance"})
+
+#: ``chunk`` keyword arguments that are *options*, not per-dim chunk specs. Shared by
+#: ``schema._chunk_spec`` (forward) and ``lower._emit_node`` (inverse), as
+#: :data:`SELECT_OPTION_KWARGS` is.
+CHUNK_OPTION_KWARGS = frozenset(
+    {
+        "name_prefix",
+        "token",
+        "lock",
+        "inline_array",
+        "chunked_array_type",
+        "from_array_kwargs",
+    }
+)
 
 
 def spec(name: str) -> OpSpec | None:

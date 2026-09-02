@@ -51,6 +51,12 @@ from xrexpr.ir import (
     WindowedReduce,
 )
 from xrexpr.operations import (
+    CHUNK_OPTION_KWARGS as _CHUNK_OPTION_KWARGS,
+)
+from xrexpr.operations import (
+    SELECT_OPTION_KWARGS as _SELECT_OPTION_KWARGS,
+)
+from xrexpr.operations import (
     ContextSpec,
     DropSpec,
     ElementwiseSpec,
@@ -902,22 +908,6 @@ def _selected_size(
     if name == "sel" and isinstance(index.to_raw(), slice):
         return None
     return index.size(current)
-
-
-#: ``isel``/``sel`` keyword arguments that are *options*, not dim indexers.
-_SELECT_OPTION_KWARGS = frozenset({"drop", "missing_dims", "method", "tolerance"})
-
-#: ``chunk`` keyword arguments that are *options*, not per-dim chunk specs.
-_CHUNK_OPTION_KWARGS = frozenset(
-    {
-        "name_prefix",
-        "token",
-        "lock",
-        "inline_array",
-        "chunked_array_type",
-        "from_array_kwargs",
-    }
-)
 
 
 def to_opnode(

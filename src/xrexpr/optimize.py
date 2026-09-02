@@ -400,10 +400,9 @@ def merge_adjacent_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
 
         j = i + 1
         indexer = dict(node.indexer)
-        # ``consumes`` is not accumulated here — it is a derived property of the
-        # merged ``indexer`` on :class:`~xrexpr.ir.Select`, so it cannot drift from it.
-        # ``args`` does mirror ``indexer`` and is
-        # rebuilt from it below, which stays the merge rule's local responsibility.
+        # Only the ``indexer`` is accumulated: ``consumes`` is a derived property of it, and
+        # the replay header is derived from it by ``lower._emit_node`` (§7), so neither can
+        # drift from the merged indexer — this rule touches the semantic field alone.
         while j < n:
             nxt = nodes[j]
             if nxt.name != node.name or not _mergeable_select(nxt):
@@ -416,13 +415,7 @@ def merge_adjacent_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
 
         if j - i > 1:  # at least two selects folded
             folded = True
-            out.append(
-                Select(
-                    name=node.name,
-                    args=({dim: v.to_raw() for dim, v in indexer.items()},),
-                    indexer=frozendict(indexer),
-                )
-            )
+            out.append(Select(name=node.name, indexer=frozendict(indexer)))
         else:
             out.append(node)
         i = j
@@ -1003,13 +996,7 @@ def push_projection_past_drop(nodes: Plan, schema: SchemaState) -> Plan | None:
         )
         moved: Plan = [second]
         if survivors:
-            moved.append(
-                Drop(
-                    name=first.name,
-                    args=(list(survivors),),
-                    variables=survivors,
-                )
-            )
+            moved.append(Drop(name=first.name, variables=survivors))
         return list(nodes[:i]) + moved + list(nodes[i + 2 :])
     return None
 
@@ -1282,11 +1269,7 @@ def pushdown_selects_past_rechunks(nodes: Plan, schema: SchemaState) -> Plan | N
                 elif kept:
                     moved = [
                         select,
-                        Rechunk(
-                            name=rechunk.name,
-                            args=({dim: s.to_raw() for dim, s in kept.items()},),
-                            chunks=frozendict(kept),
-                        ),
+                        Rechunk(name=rechunk.name, chunks=frozendict(kept)),
                     ]
                 else:  # the spec is spent
                     moved = [select]
@@ -1453,11 +1436,7 @@ def merge_adjacent_rechunks(nodes: Plan, schema: SchemaState) -> Plan | None:
                         merged.setdefault(dim, spec)
                     else:
                         merged[dim] = spec
-                node = Rechunk(
-                    name=r1.name,
-                    args=({dim: s.to_raw() for dim, s in merged.items()},),
-                    chunks=frozendict(merged),
-                )
+                node = Rechunk(name=r1.name, chunks=frozendict(merged))
                 return list(nodes[:i]) + [node] + list(nodes[i + 2 :])
     return None
 
