@@ -22,13 +22,7 @@ from xrexpr.intern import (
     deintern,
     intern,
 )
-from xrexpr.ir import (
-    ALL_DIMS,
-    Project,
-    Rechunk,
-    Reduce,
-    Select,
-)
+from xrexpr.ir import ALL_DIMS, Project, Rechunk, Reduce, Select
 
 
 @pytest.fixture(autouse=True)
