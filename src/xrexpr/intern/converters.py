@@ -112,7 +112,7 @@ def _dename(val: InternedVal) -> Hashable:
         The name ``val`` stands for.
     """
     it: Interner[Hashable] = Interner()
-    return it[val.handle]
+    return it[val]
 
 
 def _inames(names: tuple[Hashable, ...]) -> tuple[InternedVal, ...]:
