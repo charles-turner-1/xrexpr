@@ -29,7 +29,7 @@ type error here until both directions handle it.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypeVar
+from typing import Annotated, Any, Literal, TypeVar
 
 from frozendict import frozendict
 
@@ -37,6 +37,17 @@ from xrexpr.chunks import ChunkSpec
 from xrexpr.indexers import Indexer
 from xrexpr.intern.interner import InternedVal
 from xrexpr.ir import AllDims, ContextOpenName
+
+T = TypeVar("T")
+
+
+class _PyOnly: ...
+
+
+# Anything marked with PyOnly is ignored when serialising operations to the
+# rust version of the optimiser.
+PyOnly = Annotated[T, _PyOnly]
+
 
 __all__ = [
     "InternedContextOpen",
@@ -67,8 +78,8 @@ class InternedReduce:
     name: str
     consumes: frozenset[InternedVal] | AllDims = frozenset()
     keepdims: bool = False
-    args: tuple[Any, ...] = ()
-    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    args: PyOnly[tuple[Any, ...]] = ()
+    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -77,8 +88,8 @@ class InternedSelect:
 
     name: Literal["isel", "sel"]
     indexer: frozendict[InternedVal, Indexer] = field(default_factory=frozendict)
-    args: tuple[Any, ...] = ()
-    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    args: PyOnly[tuple[Any, ...]] = ()
+    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -87,8 +98,8 @@ class InternedScan:
 
     name: Literal["cumsum", "cumprod", "diff"]
     dims: frozenset[InternedVal] | AllDims = frozenset()
-    args: tuple[Any, ...] = ()
-    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    args: PyOnly[tuple[Any, ...]] = ()
+    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -96,8 +107,8 @@ class InternedElementwise:
     """Interned :class:`~xrexpr.ir.Elementwise` — no names; just the replay header."""
 
     name: str
-    args: tuple[Any, ...] = ()
-    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    args: PyOnly[tuple[Any, ...]] = ()
+    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -107,8 +118,8 @@ class InternedProject:
     name: Literal["__getitem__"]
     variables: tuple[InternedVal, ...] = ()
     single: bool = False
-    args: tuple[Any, ...] = ()
-    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    args: PyOnly[tuple[Any, ...]] = ()
+    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -118,8 +129,8 @@ class InternedRechunk:
     name: Literal["chunk"]
     chunks: frozendict[InternedVal, ChunkSpec] = field(default_factory=frozendict)
     uniform: ChunkSpec | None = None
-    args: tuple[Any, ...] = ()
-    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    args: PyOnly[tuple[Any, ...]] = ()
+    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -127,8 +138,8 @@ class InternedOpaque:
     """Interned :class:`~xrexpr.ir.Opaque` — no names; the replay header may hold arrays."""
 
     name: str
-    args: tuple[Any, ...] = ()
-    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    args: PyOnly[tuple[Any, ...]] = ()
+    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -137,18 +148,23 @@ class InternedDrop:
 
     name: Literal["drop_vars"]
     variables: tuple[InternedVal, ...] = ()
-    args: tuple[Any, ...] = ()
-    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    args: PyOnly[tuple[Any, ...]] = ()
+    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
 class InternedRename:
-    """Interned :class:`~xrexpr.ir.Rename` — both sides of ``mapping`` relabeled."""
+    """Interned :class:`~xrexpr.ir.Rename` — both sides of ``mapping`` relabeled.
+
+    We have no need for args or kwargs when we drop to rust, as mapping is interned
+    and contains all the info we need. We keep them purely so that we can replay the
+    original call verbatim.
+    """
 
     name: Literal["rename"]
     mapping: frozendict[InternedVal, InternedVal] = field(default_factory=frozendict)
-    args: tuple[Any, ...] = ()
-    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    args: PyOnly[tuple[Any, ...]] = ()
+    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -156,8 +172,8 @@ class InternedContextOpen:
     """Interned :class:`~xrexpr.ir.ContextOpen` — fluent-only; never survives lowering."""
 
     name: ContextOpenName
-    args: tuple[Any, ...] = ()
-    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    args: PyOnly[tuple[Any, ...]] = ()
+    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -169,10 +185,10 @@ class InternedGroupedReduce:
     new_dim: InternedVal
     reduce: str
     consumes: frozenset[InternedVal] = frozenset()
-    args: tuple[Any, ...] = ()
-    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
-    reduce_args: tuple[Any, ...] = ()
-    reduce_kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    args: PyOnly[tuple[Any, ...]] = ()
+    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
+    reduce_args: PyOnly[tuple[Any, ...]] = ()
+    reduce_kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -182,10 +198,10 @@ class InternedWindowedReduce:
     name: Literal["rolling", "coarsen"]
     reduce: str
     window: frozendict[InternedVal, int] = field(default_factory=frozendict)
-    args: tuple[Any, ...] = ()
-    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
-    reduce_args: tuple[Any, ...] = ()
-    reduce_kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    args: PyOnly[tuple[Any, ...]] = ()
+    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
+    reduce_args: PyOnly[tuple[Any, ...]] = ()
+    reduce_kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -196,10 +212,10 @@ class InternedWeightedReduce:
     reduce: str
     weight_dims: frozenset[InternedVal] = frozenset()
     consumes: frozenset[InternedVal] | AllDims = frozenset()
-    args: tuple[Any, ...] = ()
-    kwargs: frozendict[str, Any] = field(default_factory=frozendict)
-    reduce_args: tuple[Any, ...] = ()
-    reduce_kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    args: PyOnly[tuple[Any, ...]] = ()
+    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
+    reduce_args: PyOnly[tuple[Any, ...]] = ()
+    reduce_kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 #: The interned counterpart of :data:`~xrexpr.ir.Op`.
