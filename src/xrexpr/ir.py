@@ -698,10 +698,6 @@ class WindowedReduce:
     kwargs: frozendict[str, Any] = field(default_factory=frozendict)
     reduce_args: tuple[Any, ...] = ()  # the closer's header, verbatim
     reduce_kwargs: frozendict[str, Any] = field(default_factory=frozendict)
-    #: How ``coarsen`` rounds each windowed dim's new length: ``True`` ceils
-    #: (``boundary="pad"``), ``False`` floors (``"trim"``/``"exact"``), ``None`` not
-    #: statically known. Read only for ``coarsen`` — ``rolling`` keeps every length. Derived
-    #: (``init=False``) rather than passed, the ``Rechunk.uniform`` precedent (see notes).
     rounds_up: bool | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
@@ -710,19 +706,27 @@ class WindowedReduce:
         object.__setattr__(self, "kwargs", frozendict(self.kwargs))
         object.__setattr__(self, "reduce_args", tuple(self.reduce_args))
         object.__setattr__(self, "reduce_kwargs", frozendict(self.reduce_kwargs))
-        # ``coarsen`` divides each windowed dim and rounds by the ``boundary`` option; the
-        # size layer needs that rule, so read it off the verbatim ``kwargs`` *here* rather
-        # than in ``schema._windowed_size``. Like ``uniform``, a derived reading that cannot
-        # disagree with what replay does.
-        rounds_up: bool | None
+        object.__setattr__(self, "rounds_up", self._rounds_up())
+
+    def _rounds_up(self) -> bool | None:
+        """
+        ``coarsen`` divides each windowed dim and rounds by the ``boundary`` option; the
+        size layer needs that rule, so read it off the verbatim ``kwargs`` *here* rather
+        than in ``schema._windowed_size``. Like ``uniform``, a derived reading that cannot
+        disagree with what replay does.
+
+        Returns
+        -------
+        bool | None
+            True if we ceil, false if we floor, None if not known.
+        """
         match self.name, self.kwargs.get("boundary", "exact"):
-            case "coarsen", "pad":
-                rounds_up = True
-            case "coarsen", "trim" | "exact":
-                rounds_up = False
+            case "coarsen", "pad":  # ceil
+                return True
+            case "coarsen", "trim" | "exact":  # floor
+                return False
             case _:  # rolling (length kept), or a boundary this does not model
-                rounds_up = None
-        object.__setattr__(self, "rounds_up", rounds_up)
+                return None
 
 
 @dataclass(frozen=True)
