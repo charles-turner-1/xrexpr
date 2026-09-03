@@ -651,12 +651,17 @@ class WindowedReduce:
     args : tuple
         The opener's positional arguments, verbatim.
     kwargs : frozendict
-        The opener's keyword arguments, verbatim. Kept whole because ``coarsen``'s size
-        effect depends on the ``boundary`` option — see the notes.
+        The opener's keyword arguments, verbatim — kept whole for replay. ``coarsen``'s
+        ``boundary`` lives here too, but its size-relevant reading is lifted to
+        :attr:`rounds_up` so no reasoning layer reaches back into the header — see the notes.
     reduce_args : tuple
         The closer's positional arguments, verbatim.
     reduce_kwargs : frozendict
         The closer's keyword arguments, verbatim.
+    rounds_up : bool or None
+        Whether ``coarsen`` rounds a windowed dim's new length up (``True``, ``boundary=
+        "pad"``), down (``False``, ``"trim"``/``"exact"``), or unpredictably (``None``).
+        Derived from :attr:`kwargs`, not passed — see the notes.
 
     Notes
     -----
@@ -668,8 +673,13 @@ class WindowedReduce:
       position, ``center``/``min_periods`` affecting values but never shape;
     - **coarsen** divides each windowed dim by its window, rounded according to the
       ``boundary`` kwarg (``"trim"`` down, ``"pad"`` up, ``"exact"`` requiring
-      divisibility). That is a size effect that depends on an *option*, which is why
-      ``kwargs`` is kept whole rather than reduced to ``window``.
+      divisibility). That is a size effect that depends on an *option*, so the option's
+      reading is lifted into :attr:`rounds_up` — the way :class:`Reduce` surfaces
+      ``keepdims`` and :class:`Rechunk` surfaces ``uniform``. Derived in ``__post_init__``
+      from the verbatim ``kwargs`` (``init=False``), it cannot disagree with what replay
+      does, and it keeps ``schema._windowed_size`` reasoning over the node rather than
+      digging ``boundary`` back out of the header. ``kwargs`` stays whole for replay and for
+      the other options (``center``, ``min_periods``, ...), which no layer reasons over.
 
     A windowed closer takes **no dim argument** at all — ``DatasetRolling.mean`` is
     ``(keep_attrs=None, **kwargs)`` — so ``ds.rolling(time=3).mean("lat")`` passes
@@ -688,6 +698,11 @@ class WindowedReduce:
     kwargs: frozendict[str, Any] = field(default_factory=frozendict)
     reduce_args: tuple[Any, ...] = ()  # the closer's header, verbatim
     reduce_kwargs: frozendict[str, Any] = field(default_factory=frozendict)
+    #: How ``coarsen`` rounds each windowed dim's new length: ``True`` ceils
+    #: (``boundary="pad"``), ``False`` floors (``"trim"``/``"exact"``), ``None`` not
+    #: statically known. Read only for ``coarsen`` — ``rolling`` keeps every length. Derived
+    #: (``init=False``) rather than passed, the ``Rechunk.uniform`` precedent (see notes).
+    rounds_up: bool | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "window", frozendict(self.window))
@@ -695,6 +710,19 @@ class WindowedReduce:
         object.__setattr__(self, "kwargs", frozendict(self.kwargs))
         object.__setattr__(self, "reduce_args", tuple(self.reduce_args))
         object.__setattr__(self, "reduce_kwargs", frozendict(self.reduce_kwargs))
+        # ``coarsen`` divides each windowed dim and rounds by the ``boundary`` option; the
+        # size layer needs that rule, so read it off the verbatim ``kwargs`` *here* rather
+        # than in ``schema._windowed_size``. Like ``uniform``, a derived reading that cannot
+        # disagree with what replay does.
+        rounds_up: bool | None
+        match self.name, self.kwargs.get("boundary", "exact"):
+            case "coarsen", "pad":
+                rounds_up = True
+            case "coarsen", "trim" | "exact":
+                rounds_up = False
+            case _:  # rolling (length kept), or a boundary this does not model
+                rounds_up = None
+        object.__setattr__(self, "rounds_up", rounds_up)
 
 
 @dataclass(frozen=True)

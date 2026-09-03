@@ -46,11 +46,7 @@ from xrexpr.ir import (
     WeightedReduce,
     WindowedReduce,
 )
-from xrexpr.operations import (
-    CHUNK_OPTION_KWARGS,
-    SELECT_OPTION_KWARGS,
-    ReduceSpec,
-)
+from xrexpr.operations import CHUNK_OPTION_KWARGS, SELECT_OPTION_KWARGS, ReduceSpec
 from xrexpr.operations import spec as op_spec
 
 __all__ = ["Call", "emit", "to_lower_ir"]
@@ -741,6 +737,14 @@ def _emit_node(node: LoweredOp) -> tuple[Call, ...]:
                 ),
             )
         case Reduce() as reduce:
+            # Looks like args/kwargs are replayed verbatim and could drift out of sync,
+            # but _dim_call strips the dim out of the recorded header and rebuilds it from
+            # the node's semantic field (``consumes``); only the non-dim payload rides the
+            # header through, and that has no semantic twin to disagree with. So this is safe
+            # - see https://github.com/charles-turner-1/xrexpr/pull/191 and
+            # tests/test_lower.py::test_emit_follows_the_reduce_dim_not_a_stale_header.
+            # Leans on the dim sitting at _dim_arg(name): test_operations pins the
+            # leading-positional exceptions (quantile, ...) out of OP_TABLE.
             return (
                 _dim_call(
                     reduce.name,

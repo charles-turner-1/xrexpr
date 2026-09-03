@@ -110,6 +110,11 @@ EXACT = [
         "ds.coarsen(time=2, boundary='trim').mean()",
         [("coarsen", (), {"time": 2, "boundary": "trim"}), ("mean", (), {})],
     ),
+    (
+        # boundary='pad' ceils: lat 3 → 2, where 'trim' would floor to 1 — the ceil branch.
+        "ds.coarsen(lat=2, boundary='pad').mean()",
+        [("coarsen", (), {"lat": 2, "boundary": "pad"}), ("mean", (), {})],
+    ),
     ("ds.rolling(time=2).mean()", [("rolling", (), {"time": 2}), ("mean", (), {})]),
     (
         "ds.mean('lat').isel(time=0)",

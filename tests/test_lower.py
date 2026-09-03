@@ -25,6 +25,8 @@ cannot read off the calls. :data:`_DIM_NAMES` stands in for a dataset with those
 grouper naming anything else is a *coordinate* grouper as far as fusion is concerned.
 """
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -250,6 +252,70 @@ def test_emit_follows_the_semantic_field_not_a_stale_header():
         indexer=frozendict({"time": 0}),  # what the optimiser left it as
     )
     assert emit([stale]) == [Call("isel", ({"time": 0},))]
+
+
+def test_emit_follows_the_reduce_dim_not_a_stale_header():
+    """A reduce whose ``consumes`` an optimiser rewrote emits the *new* dim, not the recorded one.
+
+    Notes
+    -----
+    The ``Select`` regression above, for the one *derived* arm that threads the recorded
+    ``args``/``kwargs`` back through :func:`~xrexpr.lower._dim_call`. Start from a reduce as the
+    recorder built it — header and ``consumes`` agreeing — then rewrite *only* the semantic
+    field, the way a rule (or a Rust backend that never sees ``args``/``kwargs``) would, and
+    leave the header stale. ``emit`` must follow ``consumes``: ``_dim_call`` strips the recorded
+    dim out of the header and re-derives it from the field, so the stale spelling never reaches
+    replay. Only the non-dim payload (a function, an option kwarg) rides the header through, and
+    it has no semantic twin to fall out of sync with.
+    """
+    recorded = to_opnode("mean", ("time",), {})
+    assert emit([recorded]) == [Call("mean", ("time",))]  # header and field agree
+
+    # An optimiser rewrites the field alone; the header still spells the old dim.
+    rewritten = replace(recorded, consumes=frozenset({"lat"}))
+    assert rewritten.args == ("time",)  # header untouched — still "time"
+    assert emit([rewritten]) == [Call("mean", ("lat",))]  # emit follows consumes
+
+    # Same when the recorded dim was a ``dim=`` kwarg rather than a positional.
+    from_kwarg = replace(
+        to_opnode("mean", (), {"dim": "time"}), consumes=frozenset({"lat"})
+    )
+    assert emit([from_kwarg]) == [Call("mean", ("lat",))]
+
+    # Rewriting to ALL_DIMS drops the stale positional and re-inserts nothing (bare ``mean()``).
+    to_all = replace(recorded, consumes=ALL_DIMS)
+    assert emit([to_all]) == [Call("mean", ())]
+
+    # The non-dim payload survives the rewrite: ``skipna``/``keepdims`` here, ...
+    optioned = replace(
+        to_opnode("mean", ("time",), {"skipna": True, "keepdims": True}),
+        consumes=frozenset({"lat"}),
+    )
+    assert emit([optioned]) == [
+        Call("mean", ("lat",), {"skipna": True, "keepdims": True})
+    ]
+
+    # ... and ``reduce``'s function, whose dim sits at position 1.
+    with_func = replace(
+        to_opnode("reduce", (np.sum, "time"), {}), consumes=frozenset({"lat"})
+    )
+    assert emit([with_func]) == [Call("reduce", (np.sum, "lat"))]
+
+
+def test_emit_follows_the_scan_dim_not_a_stale_header():
+    """A scan whose ``dims`` an optimiser rewrote emits the *new* dim, not the recorded one.
+
+    Notes
+    -----
+    The :func:`test_emit_follows_the_reduce_dim_not_a_stale_header` guarantee for a scan, which
+    keeps its dim rather than consuming it but shares the same :func:`_dim_call` strip.
+    """
+    recorded = to_opnode("cumsum", ("time",), {})
+    assert emit([recorded]) == [Call("cumsum", ("time",))]  # header and field agree
+
+    rewritten = replace(recorded, dims=frozenset({"lat"}))
+    assert rewritten.args == ("time",)  # header untouched — still "time"
+    assert emit([rewritten]) == [Call("cumsum", ("lat",))]  # emit follows dims
 
 
 def test_call_coerces_to_immutable_containers_and_hashes():
