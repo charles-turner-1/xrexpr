@@ -652,8 +652,8 @@ class WindowedReduce:
         The opener's positional arguments, verbatim.
     kwargs : frozendict
         The opener's keyword arguments, verbatim — kept whole for replay. ``coarsen``'s
-        ``boundary`` lives here too, but its size-relevant reading is lifted to
-        :attr:`rounds_up` so no reasoning layer reaches back into the header — see the notes.
+        ``boundary`` lives here too, but its semantic, size relevant info is stored
+        in :attr:`rounds_up`.
     reduce_args : tuple
         The closer's positional arguments, verbatim.
     reduce_kwargs : frozendict
@@ -661,25 +661,24 @@ class WindowedReduce:
     rounds_up : bool or None
         Whether ``coarsen`` rounds a windowed dim's new length up (``True``, ``boundary=
         "pad"``), down (``False``, ``"trim"``/``"exact"``), or unpredictably (``None``).
-        Derived from :attr:`kwargs`, not passed — see the notes.
+        Derived from :attr:`kwargs`.
 
     Notes
     -----
-    Simpler than :class:`GroupedReduce`, in the direction that matters: a window consumes
-    no dim and mints none, so there is no ``consumes`` field to get wrong. What changes is
-    only the *size* of the windowed dims, and only for ``coarsen``:
+    A window consumes no dim and mints none, so there is no ``consumes`` field to
+    worry about. Only the *size* of the windowed dims can change for ``coarsen``:
 
     - **rolling** keeps every dim at its current length — one output position per input
-      position, ``center``/``min_periods`` affecting values but never shape;
-    - **coarsen** divides each windowed dim by its window, rounded according to the
-      ``boundary`` kwarg (``"trim"`` down, ``"pad"`` up, ``"exact"`` requiring
-      divisibility). That is a size effect that depends on an *option*, so the option's
-      reading is lifted into :attr:`rounds_up` — the way :class:`Reduce` surfaces
-      ``keepdims`` and :class:`Rechunk` surfaces ``uniform``. Derived in ``__post_init__``
-      from the verbatim ``kwargs`` (``init=False``), it cannot disagree with what replay
-      does, and it keeps ``schema._windowed_size`` reasoning over the node rather than
-      digging ``boundary`` back out of the header. ``kwargs`` stays whole for replay and for
-      the other options (``center``, ``min_periods``, ...), which no layer reasons over.
+      position, ``center``/``min_periods`` affects values but not shape.
+    - **coarsen** divides each windowed dim by its window, rounded according to
+      ``boundary`` (``"trim"`` down, ``"pad"`` up, ``"exact"`` requiring
+      divisibility). As the size effect depends on an kwarg option, the option's
+      meaning gets stored in :attr:`rounds_up` — like how :class:`Reduce` stores
+      ``keepdims`` and :class:`Rechunk` stores ``uniform``. Derived in ``__post_init__``,
+      so it can't disagree with replay, and keeps ``schema._windowed_size`` reasoning
+      over the node rather than digging ``boundary`` back out of the kwargs. ``kwargs``
+      stays whole for replay and other options (``center``, ``min_periods``, ...),
+      which no layer reasons over.
 
     A windowed closer takes **no dim argument** at all — ``DatasetRolling.mean`` is
     ``(keep_attrs=None, **kwargs)`` — so ``ds.rolling(time=3).mean("lat")`` passes
