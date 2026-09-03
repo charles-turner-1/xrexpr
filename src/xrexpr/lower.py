@@ -574,10 +574,10 @@ def _canon_dims(dims: frozenset[Hashable]) -> Hashable | list[Hashable]:
     -------
     Hashable or list of Hashable
         A single *string* dim bare (``"time"``), matching xarray's str-is-one-name
-        convention and the common spelling; anything else a list, ordered by ``repr`` for a
-        deterministic header. A single *non*-string dim is still wrapped in a list, because a
-        bare iterable dim name (a tuple) would otherwise re-parse as several dims through
-        ``schema._as_dim_set``.
+        convention; anything else a list, ordered by ``repr`` for a deterministic
+        header. A single *non*-string dim is still wrapped in a list, because a
+        bare iterable dim name (a tuple) would otherwise re-parse as several dims
+        through ``schema._as_dim_set``.
     """
     ordered = sorted(dims, key=repr)
     if len(ordered) == 1 and isinstance(ordered[0], str):

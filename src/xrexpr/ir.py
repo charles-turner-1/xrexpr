@@ -658,10 +658,6 @@ class WindowedReduce:
         The closer's positional arguments, verbatim.
     reduce_kwargs : frozendict
         The closer's keyword arguments, verbatim.
-    rounds_up : bool or None
-        Whether ``coarsen`` rounds a windowed dim's new length up (``True``, ``boundary=
-        "pad"``), down (``False``, ``"trim"``/``"exact"``), or unpredictably (``None``).
-        Derived from :attr:`kwargs`.
 
     Notes
     -----
@@ -679,6 +675,10 @@ class WindowedReduce:
       over the node rather than digging ``boundary`` back out of the kwargs. ``kwargs``
       stays whole for replay and other options (``center``, ``min_periods``, ...),
       which no layer reasons over.
+    - rounds_up is derived from :attr:`kwargs`, and is ``bool`` or ``None``. It
+      sets whether ``coarsen`` rounds a windowed dim's new length up (``True``,
+      ``boundary="pad"``), down (``False``, ``"trim"``/``"exact"``), or unpredictably
+      (``None``).
 
     A windowed closer takes **no dim argument** at all — ``DatasetRolling.mean`` is
     ``(keep_attrs=None, **kwargs)`` — so ``ds.rolling(time=3).mean("lat")`` passes
