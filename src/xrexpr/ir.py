@@ -703,7 +703,8 @@ class WindowedReduce:
         object.__setattr__(self, "rounds_up", self._rounds_up())
 
     def _rounds_up(self) -> bool | None:
-        """
+        """Whether a ``coarsen`` rounds up (ceil) or down (floor) its windowed dims.
+
         Returns
         -------
         bool | None
