@@ -142,6 +142,44 @@ def test_pushdown_sel_past_reduce(schema):
     assert [n.name for n in out] == ["sel", "mean"]
 
 
+def test_dropping_select_is_left_before_a_sum_over_a_dim_a_var_lacks(schema):
+    """A scalar ``isel`` is *not* hopped in front of a ``sum`` over a dim a variable lacks (#192).
+
+    ``elevation`` carries ``lat`` but not ``time``. Hopping ``isel(lat=1)`` in front of
+    ``sum("time")`` would scalarise ``elevation`` and the skipna sum then collapse the lone
+    value to ``0`` -- which the recorded reduce-then-select order never produces. The dim
+    algebra alone (``lat`` disjoint from the reduced ``time``) would swap; the per-variable
+    guard declines it. Left, not raised: the chain is valid, merely un-reorderable.
+    """
+    plan = [_node("sum", "time"), _node("isel", lat=1)]
+    assert optimize(plan, schema) == plan
+
+
+def test_dropping_select_is_left_before_a_keepdims_sum(schema):
+    """The #192 guard covers ``keepdims`` reduces too, which collapse a scalarised variable just the same."""
+    plan = [_node("sum", "time", keepdims=True), _node("isel", lat=1)]
+    assert optimize(plan, schema) == plan
+
+
+def test_dropping_select_still_hops_a_sum_when_no_var_is_at_risk(schema):
+    """The #192 guard is precise, not a blanket block: a scalar ``isel`` still hops a ``sum`` when safe.
+
+    ``isel(time=0)`` drops ``time``, which ``elevation`` doesn't carry -- so the select never
+    touches it -- and ``temperature`` carries the reduced ``lat``, so both orders agree. The
+    swap proceeds.
+    """
+    plan = [_node("sum", "lat"), _node("isel", time=0)]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["isel", "sum"]
+
+
+def test_dim_keeping_select_still_hops_a_sum_over_a_dim_a_var_lacks(schema):
+    """Only a *dim-dropping* select is unsafe (#192): a list ``isel`` keeps ``lat``, so it still hops the ``sum``."""
+    plan = [_node("sum", "time"), _node("isel", lat=[1])]
+    out = optimize(plan, schema)
+    assert [n.name for n in out] == ["isel", "sum"]
+
+
 def test_select_on_reduced_dim_raises(schema):
     """Selecting a dim a preceding reduce already removed is unreplayable and must raise."""
     plan = [_node("mean", "lat"), _node("isel", lat=0)]
@@ -1446,13 +1484,13 @@ def test_ops_after_a_weighted_reduce_are_still_optimised(schema):
 # --- select pushdown past the fused reduces -------------------------------------------
 
 
-def _grouped(group_dim="time", new_dim="month", consumes=frozenset()):
-    """A ``GroupedReduce`` as ``to_lower_ir`` would build it from ``groupby(...).mean()``."""
+def _grouped(group_dim="time", new_dim="month", consumes=frozenset(), reduce="mean"):
+    """A ``GroupedReduce`` as ``to_lower_ir`` would build it from ``groupby(...).<reduce>()``."""
     return GroupedReduce(
         name="groupby",
         group_dim=group_dim,
         new_dim=new_dim,
-        reduce="mean",
+        reduce=reduce,
         args=(f"{group_dim}.{new_dim}" if group_dim != new_dim else group_dim,),
         consumes=consumes,
     )
@@ -1523,6 +1561,20 @@ def test_intersecting_select_is_left_alone_never_raised(schema, fused, select, w
     """
     plan = [fused, select()]
     assert optimize(plan, schema) == plan, why
+
+
+def test_dropping_select_is_left_before_a_grouped_sum_over_a_dim_a_var_lacks(schema):
+    """A scalar ``isel`` is *not* hopped in front of a grouped ``prod``/``sum`` over a group dim a var lacks (#192).
+
+    The MRE of #192: ``groupby("time").prod().isel(lat=1)`` where ``elevation`` lacks
+    ``time``. The dim algebra permits the hop (``lat`` disjoint from the blocked
+    ``time``/``month``), but hopping it scalarises ``elevation`` and the grouped skipna
+    ``prod`` collapses the lone value to ``1``. So the swap is declined -- for both the
+    non-NaN-identity closers, and only for those.
+    """
+    for closer in ("prod", "sum"):
+        plan = [_grouped(reduce=closer), _node("isel", lat=1)]
+        assert optimize(plan, schema) == plan, closer
 
 
 def test_select_reaches_the_front_past_a_fused_reduce_and_a_reduce(schema):

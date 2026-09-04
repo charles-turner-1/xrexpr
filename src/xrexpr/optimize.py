@@ -1001,6 +1001,55 @@ def push_projection_past_drop(nodes: Plan, schema: SchemaState) -> Plan | None:
     return None
 
 
+#: Reductions whose all-skipped (empty) result is NaN. Scalarising a variable that the
+#: reduce does not otherwise touch (it carries none of the reduce's trigger dims) then
+#: feeding the lone value through the reduce leaves the same NaN either way, so a
+#: dim-dropping select still commutes with these. Every *other* reduction is guarded —
+#: ``sum`` collapses an all-skipped variable to ``0`` and ``prod`` to ``1``, which the
+#: un-reordered chain never produces (#192). Membership is the conservative default: an
+#: op not listed here is guarded, so an unmodelled or new reducer declines the swap rather
+#: than risk a silently-wrong reorder.
+_NAN_EMPTY_REDUCES = frozenset({"mean", "min", "max", "median"})
+
+
+def _reduce_drop_unsafe(
+    entering: SchemaState, dropped: frozenset[Hashable], trigger: DimSet | None
+) -> bool:
+    """Whether a dim-dropping select may not hop before a reduce (#192).
+
+    Parameters
+    ----------
+    entering : SchemaState
+        The schema entering the reduce — the point the select would land in front of.
+    dropped : frozenset of Hashable
+        The dims the select *drops* (:attr:`Select.consumes`).
+    trigger : DimSet or None
+        The dims the reduce collapses (its :attr:`DimEffect.requires`): a variable carrying
+        one of these is genuinely reduced in either order and stays consistent.
+        :data:`~xrexpr.ir.ALL_DIMS` means every variable carries a trigger dim (never
+        unsafe); ``None`` is "don't know" and declines conservatively.
+
+    Returns
+    -------
+    bool
+        ``True`` when some data variable carries a dropped dim but *none* of the trigger
+        dims. Hopping the select in front would scalarise that variable, and the reduce —
+        which otherwise leaves it be — then collapses the lone value to a non-NaN identity,
+        diverging from the recorded order. ``False`` (safe to swap) otherwise.
+    """
+    if isinstance(trigger, AllDims):
+        # Unreachable from the disjoint branch (a bare reduce blocks every select), but a
+        # variable would carry a trigger dim whenever it carries any dim, so: never unsafe.
+        return False
+    if trigger is None:
+        return True  # unknown trigger dims: can't prove safe, so decline (unreachable here)
+    for dims in entering.data_vars.values():
+        var_dims = frozenset(dims)
+        if (var_dims & dropped) and not (var_dims & trigger):
+            return True
+    return False
+
+
 def pushdown_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
     """Hop a select left past a preceding node whose dims permit it.
 
@@ -1009,8 +1058,9 @@ def pushdown_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
     nodes : Plan
         The plan to rewrite.
     schema : SchemaState
-        The schema entering the plan. Unused — this is a dim-level rule, and even
-        :data:`~xrexpr.ir.ALL_DIMS` needs no schema here (see the notes).
+        The schema entering the plan. Read only for the one case that needs per-variable
+        dims — a *dim-dropping* select crossing a plain or grouped reduce (see the notes);
+        every other adjacency is pure dim algebra and folds no schema.
 
     Returns
     -------
@@ -1045,6 +1095,18 @@ def pushdown_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
     - **``blocks is None``** — don't know, so don't move. Scans are the salient case:
       ``cumsum("time").isel(time=5)`` is left untouched because order matters there.
 
+    The disjoint case has one exception, and it is why this rule reads the schema. A
+    *dim-dropping* select (``Select.consumes``) hopping in front of a plain or grouped
+    reduce over dims a data variable does **not** carry would scalarise that variable, and
+    the reduce — which otherwise leaves it be — then collapses the lone value to a non-NaN
+    identity (``sum`` gives 0, ``prod`` gives 1), diverging from the recorded order (#192).
+    So for
+    that combination the swap is declined (not raised — the chain is valid, merely
+    un-reorderable) when :func:`_reduce_drop_unsafe` finds such a variable in the entering
+    schema, and declined conservatively past the trusted prefix where per-variable dims are
+    a guess. ``mean``/``min``/``max``/``median`` reduce an all-skipped variable to NaN,
+    which matches either order, so they still hop (:data:`_NAN_EMPTY_REDUCES`).
+
     That last distinction is what makes this one generic rule rather than one per node
     kind. A
     pushed select also cannot disturb window *boundaries* (``02-lowering.md`` §11.2):
@@ -1058,6 +1120,8 @@ def pushdown_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
     One hop per call. :func:`optimize`'s fixpoint composes hops so a select reaches the
     front of a run of reductions (and adjacent selects then merge).
     """
+    limit: int | None = None
+    schemas: list[SchemaState] | None = None
     for i in range(len(nodes) - 1):
         crossed, select = nodes[i], nodes[i + 1]
         if not isinstance(select, Select):
@@ -1071,6 +1135,18 @@ def pushdown_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
         select_dims = frozenset(select.indexer)
         shared = select_dims if isinstance(blocks, AllDims) else select_dims & blocks
         if not shared:
+            if isinstance(crossed, Reduce | GroupedReduce):
+                dropped = select.consumes
+                op = crossed.name if isinstance(crossed, Reduce) else crossed.reduce
+                if dropped and op not in _NAN_EMPTY_REDUCES:
+                    if limit is None:
+                        limit = _trusted_prefix(nodes)
+                    if i >= limit:
+                        continue  # past the first Opaque: per-var dims are a guess, decline
+                    if schemas is None:
+                        schemas = _schemas(nodes[:limit], schema)
+                    if _reduce_drop_unsafe(schemas[i], dropped, effect.requires):
+                        continue  # valid chain, merely un-reorderable — leave it, don't raise
             swapped = list(nodes)
             swapped[i], swapped[i + 1] = select, crossed
             return swapped
