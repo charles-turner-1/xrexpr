@@ -25,6 +25,7 @@ from xrexpr.chunks import NoChange, SingleSize
 from xrexpr.exceptions import InvalidExpressionError
 from xrexpr.indexers import classify
 from xrexpr.ir import ALL_DIMS, GroupedReduce, WeightedReduce, WindowedReduce
+from xrexpr.lower import Call, emit
 from xrexpr.optimize import dim_effect, optimize
 from xrexpr.schema import SchemaState, to_opnode
 
@@ -46,8 +47,9 @@ def test_merge_consecutive_isel_kwargs(schema):
     assert len(out) == 1
     assert out[0].name == "isel"
     assert out[0].indexer == _ix(time=0, lat=1)
-    assert out[0].args == ({"time": 0, "lat": 1},)
     assert out[0].consumes == frozenset({"time", "lat"})
+    # Replayable: the merged indexer emits as one canonical positional dict.
+    assert emit(out) == [Call("isel", ({"time": 0, "lat": 1},))]
 
 
 def test_merge_consecutive_isel_positional_dict(schema):
@@ -956,7 +958,8 @@ def test_scalar_isel_past_rechunk_strips_only_the_dropped_dim(schema):
     out = optimize(plan, schema)
     assert [n.name for n in out] == ["isel", "chunk"]
     assert out[1].chunks == frozendict({"lat": SingleSize(50)})
-    assert out[1].args == ({"lat": 50},)  # replayable: no stale ``time`` key
+    # Replayable, with no stale ``time`` key — the header is derived from ``chunks``.
+    assert emit(out)[1] == Call("chunk", ({"lat": 50},))
 
 
 def test_slice_isel_pushes_with_the_spec_intact(schema):
@@ -1104,7 +1107,8 @@ def test_adjacent_rechunks_over_disjoint_dims_merge(schema):
     out = optimize(plan, schema)
     assert [n.name for n in out] == ["chunk"]
     assert out[0].chunks == frozendict({"time": SingleSize(100), "lat": SingleSize(50)})
-    assert out[0].args == ({"time": 100, "lat": 50},)  # replayable mapping form
+    # Replayable mapping form, derived from the merged ``chunks``.
+    assert emit(out) == [Call("chunk", ({"time": 100, "lat": 50},))]
 
 
 def test_adjacent_rechunks_on_one_dim_are_later_wins(schema):

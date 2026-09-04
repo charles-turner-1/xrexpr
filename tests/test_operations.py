@@ -101,6 +101,24 @@ def test_spec_unknown_returns_none():
     assert spec("where") is None
 
 
+def test_leading_positional_methods_stay_out_of_the_op_table():
+    """``quantile``/``sum_of_squares``/``sum_of_weights`` are untabulated → ``Opaque``.
+
+    Notes
+    -----
+    ``lower._dim_call`` assumes a reduction's dim sits at ``_dim_arg(name)`` — 0, or 1 for
+    ``reduce`` — and strips that positional out to re-derive the dim from the semantic field.
+    A method whose first positional is something else (``quantile(q, dim=...)``) would have
+    its ``q`` stripped as if it were the dim. Such a method must not enter ``OP_TABLE`` as a
+    plain :class:`~xrexpr.operations.ReduceSpec` (or must carry the right ``dim_arg``); this
+    pins that the known offenders haven't, so they replay verbatim and never reach
+    ``_dim_call``. See ``lower._weighted_reduce``.
+    """
+    assert spec("quantile") is None
+    assert spec("sum_of_squares") is None
+    assert spec("sum_of_weights") is None
+
+
 def test_getitem_is_tabulated_even_though_the_key_decides():
     """``__getitem__`` has a row, and that row only *nominates* the kind.
 

@@ -36,6 +36,7 @@ from xrexpr.ir import (
     Reduce,
     Scan,
     Select,
+    WindowedReduce,
     frozendict,
 )
 
@@ -176,6 +177,56 @@ def test_rechunk_uniform_is_derived_from_args_not_passed():
     """
     with pytest.raises(TypeError):
         Rechunk(name="chunk", args=("auto",), uniform=NoChange())  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize(
+    ("name", "kwargs", "expected"),
+    [
+        ("coarsen", {"boundary": "pad"}, True),
+        ("coarsen", {"boundary": "trim"}, False),
+        ("coarsen", {"boundary": "exact"}, False),
+        ("coarsen", {}, False),  # ``exact`` is xarray's default
+        ("coarsen", {"boundary": "wrap"}, None),  # a boundary the node does not model
+        ("rolling", {}, None),  # rolling keeps every length; rounding is irrelevant
+        ("rolling", {"boundary": "pad"}, None),  # ... even if a boundary rides along
+    ],
+    ids=[
+        "coarsen-pad",
+        "coarsen-trim",
+        "coarsen-exact",
+        "coarsen-default",
+        "coarsen-unknown",
+        "rolling",
+        "rolling-with-boundary",
+    ],
+)
+def test_windowed_reduce_classifies_its_rounding(name, kwargs, expected):
+    """``rounds_up`` reads ``coarsen``'s ``boundary`` into the size layer's rounding rule.
+
+    Notes
+    -----
+    ``pad`` ceils, ``trim``/``exact`` (and the default) floor, and a boundary the node does
+    not model answers ``None`` — precision, not correctness, is what an unrecognised spelling
+    costs (:func:`~xrexpr.schema._windowed_size`). ``rolling`` keeps every dim's length, so it
+    never consults this and reads ``None`` whatever the header carries.
+    """
+    assert WindowedReduce(name=name, reduce="mean", kwargs=kwargs).rounds_up == expected
+
+
+def test_windowed_reduce_rounds_up_is_derived_from_kwargs_not_passed():
+    """``rounds_up`` cannot be set independently of ``kwargs``, so the two can never disagree.
+
+    Notes
+    -----
+    The ``Rechunk.uniform`` precedent for a fused node: ``boundary`` is replayed verbatim from
+    ``kwargs``, and its size-relevant reading is ``init=False`` so a hand-built node is
+    normalised exactly as a fused one is, rather than able to claim a rounding its call does
+    not perform.
+    """
+    with pytest.raises(TypeError):
+        WindowedReduce(  # type: ignore[call-arg]
+            name="coarsen", reduce="mean", kwargs={"boundary": "pad"}, rounds_up=False
+        )
 
 
 def test_reduce_coerces_containers():

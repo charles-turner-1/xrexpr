@@ -54,10 +54,13 @@ def test_a_plan_lists_one_numbered_line_per_node():
             name="mean", kwargs=frozendict({"dim": "lat"}), consumes=frozenset({"lat"})
         ),
     ]
+    # ``emit`` derives the header from the semantic fields, so the rendered call is the
+    # canonical spelling it replays as: the select's indexer as a positional dict, and the
+    # reduce's dim positionally rather than as ``dim=``.
     assert format_plan(plan) == (
         "plan (2 ops):\n"
-        "  1. Select  isel(time=0)\n"
-        "  2. Reduce  mean(dim='lat')  [consumes={lat}]"
+        "  1. Select  isel({'time': 0})\n"
+        "  2. Reduce  mean('lat')  [consumes={lat}]"
     )
 
 
@@ -174,7 +177,13 @@ def test_a_dask_backed_argument_elides_without_computing():
 
 def test_a_projection_renders_as_the_getitem_it_replays():
     """A ``Project`` renders in subscript form, ``[['temperature']]``, not as a call."""
-    text = format_plan([Project(name="__getitem__", args=(["temperature"],))])
+    text = format_plan(
+        [
+            Project(
+                name="__getitem__", args=(["temperature"],), variables=("temperature",)
+            )
+        ]
+    )
     assert text == "plan (1 ops):\n  1. Project  [['temperature']]"
 
 

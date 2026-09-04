@@ -30,6 +30,7 @@ from typing_extensions import assert_never
 from xrexpr.ir import (
     AllDims,
     ContextOpen,
+    DimSet,
     Drop,
     Elementwise,
     FluentOp,
@@ -45,6 +46,8 @@ from xrexpr.ir import (
     WeightedReduce,
     WindowedReduce,
 )
+from xrexpr.operations import CHUNK_OPTION_KWARGS, SELECT_OPTION_KWARGS, ReduceSpec
+from xrexpr.operations import spec as op_spec
 
 __all__ = ["Call", "emit", "to_lower_ir"]
 
@@ -559,6 +562,111 @@ def emit(nodes: list[LoweredOp]) -> list[Call]:
     return [call for node in nodes for call in _emit_node(node)]
 
 
+def _canon_dims(dims: frozenset[Hashable]) -> Hashable | list[Hashable]:
+    """Render a concrete dim set as a reduce/scan ``dim`` argument.
+
+    Parameters
+    ----------
+    dims : frozenset of Hashable
+        The dims the op names — never :data:`~xrexpr.ir.ALL_DIMS` (the caller handles that).
+
+    Returns
+    -------
+    Hashable or list of Hashable
+        A single *string* dim bare (``"time"``), matching xarray's str-is-one-name
+        convention; anything else a list, ordered by ``repr`` for a deterministic
+        header. A single *non*-string dim is still wrapped in a list, because a
+        bare iterable dim name (eg. a tuple) would otherwise re-parse as several dims
+        through ``schema._as_dim_set``.
+    """
+    ordered = sorted(dims, key=repr)
+    if len(ordered) == 1 and isinstance(ordered[0], str):
+        return ordered[0]
+    return ordered
+
+
+def _dim_arg(name: str) -> int:
+    """Where a reduction's dim spec sits among its positional args — 0, or 1 for ``reduce``.
+
+    Parameters
+    ----------
+    name : str
+        The reduction's method name.
+
+    Returns
+    -------
+    int
+        The :attr:`~xrexpr.operations.ReduceSpec.dim_arg` position — 0 for every reduction
+        but ``reduce`` (``reduce(func, dim, ...)``), and 0 for a non-tabulated name.
+    """
+    op = op_spec(name)
+    return op.dim_arg if isinstance(op, ReduceSpec) else 0
+
+
+def _dim_call(
+    name: str,
+    args: tuple[Any, ...],
+    kwargs: frozendict[str, Any],
+    dims: DimSet,
+    position: int,
+) -> Call:
+    """Rebuild a reduce/scan call header from its parsed ``dims``, keeping every option.
+
+    The inverse of ``schema._dim_spec``: drop whatever spelled the dim (the positional at
+    ``position``, or a ``dim=`` kwarg), then re-emit the dim positionally from ``dims`` — or
+    emit no dim at all for :data:`~xrexpr.ir.ALL_DIMS`, the bare ``mean()``/``cumsum()`` case.
+    Every other positional (``reduce``'s function, ``diff``'s ``n``) and every option kwarg
+    (``skipna``, ``keepdims``, ...) rides along untouched, so a Rust-mutated ``dims`` flows
+    into the header while the options that live nowhere else are preserved.
+
+    Parameters
+    ----------
+    name : str
+        The method name.
+    args, kwargs : tuple, frozendict
+        The recorded call header.
+    dims : DimSet
+        The op's parsed dims, or :data:`~xrexpr.ir.ALL_DIMS`.
+    position : int
+        Where the dim sits among the positionals — :func:`_dim_arg` for a reduce, 0 for a scan.
+
+    Returns
+    -------
+    Call
+        The reconstructed call.
+    """
+    positionals = list(args)
+    if "dim" not in kwargs and len(positionals) > position:
+        del positionals[position]
+    options = {k: v for k, v in kwargs.items() if k != "dim"}
+    if not isinstance(dims, AllDims):
+        positionals.insert(position, _canon_dims(dims))
+    return Call(name=name, args=tuple(positionals), kwargs=frozendict(options))
+
+
+def _rechunk_args(rechunk: Rechunk) -> tuple[Any, ...]:
+    """Rebuild the positional header of a ``chunk`` call from its spec fields.
+
+    Parameters
+    ----------
+    rechunk : Rechunk
+        The node whose ``chunk`` call to rebuild.
+
+    Returns
+    -------
+    tuple
+        The uniform form (``chunk("auto")``) when :attr:`~xrexpr.ir.Rechunk.uniform` is set,
+        the mapping form (``chunk({dim: spec})``) when :attr:`~xrexpr.ir.Rechunk.chunks` is,
+        and an empty header for a bare ``chunk()`` — the three cases ``schema._chunk_spec``
+        parses. Tuple because it is passed straight to args.
+    """
+    if rechunk.uniform is not None:
+        return (rechunk.uniform.to_raw(),)
+    if rechunk.chunks:
+        return ({dim: spec.to_raw() for dim, spec in rechunk.chunks.items()},)
+    return ()
+
+
 def _emit_node(node: LoweredOp) -> tuple[Call, ...]:
     """Generate the calls one lowered node stands for.
 
@@ -575,17 +683,24 @@ def _emit_node(node: LoweredOp) -> tuple[Call, ...]:
 
     Notes
     -----
-    Most nodes are one call and reproduce it from the verbatim header the recorder kept,
-    so an unmodified plan emits exactly the calls the user wrote, spelling included. A
-    :class:`~xrexpr.ir.GroupedReduce` is the case the whole design is for: one node, two
-    calls, reassembled from the headers it fused. Rebuilding them from the *semantic*
-    fields instead would re-spell calls the pipeline never needed to touch (and would
-    have to invent ``groupby("time.month")`` back out of ``group_dim``/``new_dim``), so
-    the headers are kept and replayed as recorded.
+    The header is **derived from the node's semantic fields**, not copied from the recorded
+    ``args``/``kwargs`` — the inverse of ``schema.to_opnode``'s parse
+    (``planning/roadmap/02-lowering.md`` §7). A select's header is rebuilt from its
+    ``indexer`` (via each value's ``to_raw()``), a rechunk's from its ``chunks``/``uniform``,
+    a reduce's from its ``consumes``, and so on; the *option* kwargs a call carries
+    (``skipna``, ``drop``, ...) — which live nowhere else — are preserved verbatim. This is
+    what lets a rule (or a Rust optimiser) rewrite a *semantic field* and have the replayed
+    call follow, instead of each rule hand-rebuilding its own header. It also means the
+    emitted call is the **canonical** spelling of the selection, not necessarily the recorded
+    one: ``isel(time=0)`` re-emits as ``isel({"time": 0})``. The two replay identically —
+    equivalence, not byte-identity, is the contract (see ``test_lower.py``).
 
-    A rule that *synthesises* a node is still responsible for its own header, as
-    ``merge_adjacent_selects`` is; moving that reconstruction here is a follow-up
-    (``planning/roadmap/02-lowering.md`` §7).
+    Two families keep their recorded header instead. :class:`~xrexpr.ir.Elementwise` and
+    :class:`~xrexpr.ir.Opaque` carry no semantic spec — the header *is* the content — and
+    neither is ever reordered. And the fused nodes
+    (:class:`~xrexpr.ir.GroupedReduce`/:class:`~xrexpr.ir.WindowedReduce`/:class:`~xrexpr.ir.WeightedReduce`)
+    reassemble from the two headers they fused: deriving them would have to invent
+    ``groupby("time.month")`` back out of ``group_dim``/``new_dim``.
 
     ``assert_never`` closes the match: a new lowered variant fails type-check here until
     someone says what it replays as, which is exactly the question a fused node exists to
@@ -621,17 +736,73 @@ def _emit_node(node: LoweredOp) -> tuple[Call, ...]:
                     kwargs=weighted.reduce_kwargs,
                 ),
             )
-        case (
-            Reduce()
-            | Select()
-            | Scan()
-            | Elementwise()
-            | Project()
-            | Drop()
-            | Rename()
-            | Rechunk()
-            | Opaque()
-        ):
+        case Reduce() as reduce:
+            # Looks like args/kwargs are replayed verbatim and could drift out of sync,
+            # but _dim_call strips the dim out of the recorded header and rebuilds it from
+            # the node's semantic field (``consumes``); only the non-dim payload rides the
+            # header through, and that has no semantic twin to disagree with. So this is safe
+            # - see https://github.com/charles-turner-1/xrexpr/pull/191 and
+            # tests/test_lower.py::test_emit_follows_the_reduce_dim_not_a_stale_header.
+            # Leans on the dim sitting at _dim_arg(name): test_operations pins the
+            # leading-positional exceptions (quantile, ...) out of OP_TABLE.
+            return (
+                _dim_call(
+                    reduce.name,
+                    reduce.args,
+                    reduce.kwargs,
+                    reduce.consumes,
+                    _dim_arg(reduce.name),
+                ),
+            )
+        case Scan() as scan:
+            return (_dim_call(scan.name, scan.args, scan.kwargs, scan.dims, 0),)
+        case Select() as select:
+            indexer = {dim: idx.to_raw() for dim, idx in select.indexer.items()}
+            return (
+                Call(
+                    name=select.name,
+                    args=(indexer,) if indexer else (),
+                    kwargs=frozendict(
+                        {
+                            k: v
+                            for k, v in select.kwargs.items()
+                            if k in SELECT_OPTION_KWARGS
+                        }
+                    ),
+                ),
+            )
+        case Rechunk() as rechunk:
+            return (
+                Call(
+                    name=rechunk.name,
+                    args=_rechunk_args(rechunk),
+                    kwargs=frozendict(
+                        {
+                            k: v
+                            for k, v in rechunk.kwargs.items()
+                            if k in CHUNK_OPTION_KWARGS
+                        }
+                    ),
+                ),
+            )
+        case Project() as project:
+            key = project.variables[0] if project.single else list(project.variables)
+            return (Call(name=project.name, args=(key,)),)
+        case Drop() as drop:
+            return (
+                Call(
+                    name=drop.name,
+                    args=(list(drop.variables),),
+                    kwargs=frozendict(
+                        {k: v for k, v in drop.kwargs.items() if k != "names"}
+                    ),
+                ),
+            )
+        case Rename() as rename:
+            return (Call(name=rename.name, args=(dict(rename.mapping),)),)
+        case Elementwise() | Opaque():
+            # No semantic spec to derive from — the verbatim header *is* the content, and
+            # neither op is ever reordered or restructured, so it replays exactly as recorded.
             return (Call(name=node.name, args=node.args, kwargs=node.kwargs),)
         case _:
             assert_never(node)

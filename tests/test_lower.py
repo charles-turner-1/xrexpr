@@ -1,9 +1,16 @@
 """Tests for the lowering stage: ``to_lower_ir`` and ``emit``.
 
 Two things are pinned here. The *contract* — lowering is semantics-preserving and
-idempotent, and ``emit`` reproduces the calls the recorder saw, spelling included — and
+idempotent, and ``emit`` derives each call header from the node's *semantic fields* (the
+inverse of ``to_opnode``), so a rewritten semantic field flows into the replayed call — and
 the *fusion policy*: which builder pairs v1 claims to understand, and that everything else
 takes the mandatory opaque fallback rather than being modelled on a guess.
+
+Because the header is *derived*, ``emit`` produces the **canonical** spelling of a call, not
+necessarily the recorded one (``isel(time=0)`` re-emits as ``isel({"time": 0})``). The two
+replay identically; equivalence, not byte-identity, is the contract, and the round-trip is
+pinned by re-parsing an emitted call with ``to_opnode`` — a fixed point — and end-to-end by
+the replay-equality properties in ``test_accessor.py`` and ``test_properties.py``.
 
 Refusing to fuse is always safe, so the negative cases matter as much as the positive
 ones: each pins a narrowing of what is claimed, not a bug.
@@ -17,6 +24,8 @@ metadata, materialising nothing.
 cannot read off the calls. :data:`_DIM_NAMES` stands in for a dataset with those three dims, so a
 grouper naming anything else is a *coordinate* grouper as far as fusion is concerned.
 """
+
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -97,34 +106,216 @@ def test_lowering_does_not_mutate_its_input(plan):
     assert plan == before
 
 
-def test_emit_reproduces_every_call_verbatim(plan):
-    """An unmodified plan emits exactly the calls the recorder saw.
+def _semantics(node):
+    """The optimiser-facing content of a node — everything but its replay header.
 
-    Notes
-    -----
-    One node, one call, header untouched — so an unrewritten plan replays what was
-    written.
+    Two nodes with equal semantics mean the same thing however their headers are spelled,
+    which is the equivalence ``emit`` preserves. :class:`~xrexpr.ir.Elementwise` and
+    :class:`~xrexpr.ir.Opaque` have no semantic field, so their verbatim header *is* their
+    content.
     """
-    assert emit(to_lower_ir(plan, _DIM_NAMES)) == [
-        Call(name=node.name, args=node.args, kwargs=node.kwargs) for node in plan
-    ]
+    match node:
+        case Reduce():
+            return ("reduce", node.consumes)
+        case Scan():
+            return ("scan", node.dims)
+        case Select():
+            return ("select", node.indexer)
+        case Rechunk():
+            return ("rechunk", node.chunks, node.uniform)
+        case Project():
+            return ("project", node.variables, node.single)
+        case (
+            _
+        ):  # Drop / Rename / Elementwise / Opaque — none in this fixture's flat kinds
+            return ("header", node.name, node.args, node.kwargs)
 
 
-def test_emit_keeps_the_recorded_spelling(plan):
-    """A select recorded as kwargs emits as kwargs, not canonicalised to a positional dict.
+def test_emit_derives_a_reparseable_canonical_header(plan):
+    """Every emitted call re-parses to the same semantics and re-emits identically.
 
     Notes
     -----
-    ``emit`` must not re-spell calls the pipeline never needed to touch — the positional
-    dict is the form the merge rule happens to build, not a normal form.
+    The header ``emit`` writes is *derived* from the node's semantic fields, so it may not be
+    the recorded spelling — but it must (a) preserve the meaning, checked by re-parsing with
+    ``to_opnode`` and comparing semantics, and (b) be a canonical *fixed point*: parsing an
+    emitted call and re-emitting yields the identical call. Together these are the dataset-free
+    proxy for "replays what was written"; the literal replay equality lives in the property
+    suite.
+    """
+    lowered = to_lower_ir(plan, _DIM_NAMES)
+    calls = emit(lowered)
+
+    reparsed = [to_opnode(c.name, c.args, c.kwargs) for c in calls]
+    assert [_semantics(r) for r in reparsed] == [_semantics(n) for n in lowered]
+    assert emit(reparsed) == calls
+
+
+def test_emit_canonicalises_a_kwargs_select(plan):
+    """A select recorded as kwargs emits as the canonical positional dict + option kwargs.
+
+    Notes
+    -----
+    The inverse of ``_select_indexer``: the indexer becomes a single positional ``{dim:
+    index}`` dict and only the *option* kwargs (``drop``) survive as kwargs. ``isel(time=0,
+    drop=True)`` and this form select identically.
     """
     select = emit(to_lower_ir(plan, _DIM_NAMES))[2]
-    assert select == Call(name="isel", kwargs=frozendict({"time": 0, "drop": True}))
+    assert select == Call(
+        name="isel", args=({"time": 0},), kwargs=frozendict({"drop": True})
+    )
 
 
 def test_emit_of_an_empty_plan_is_empty():
     """An empty plan lowers and emits to nothing, rather than raising."""
     assert emit(to_lower_ir([], _DIM_NAMES)) == []
+
+
+@pytest.mark.parametrize(
+    ("name", "args", "kwargs", "expected"),
+    [
+        # Reduce: dim canonicalised, every option kwarg preserved.
+        (
+            "mean",
+            ("lat",),
+            {"skipna": False, "keepdims": True},
+            Call("mean", ("lat",), frozendict({"skipna": False, "keepdims": True})),
+        ),
+        ("sum", (), {"dim": "time"}, Call("sum", ("time",))),  # dim= → positional
+        ("mean", (["lon", "lat"],), {}, Call("mean", (["lat", "lon"],))),  # sorted
+        ("mean", (), {}, Call("mean", ())),  # bare → no dim
+        # Scan: diff's ``n`` rides along, positional or keyword.
+        ("diff", ("time", 2), {}, Call("diff", ("time", 2))),
+        ("diff", ("time",), {"n": 2}, Call("diff", ("time",), frozendict({"n": 2}))),
+        ("cumsum", (), {}, Call("cumsum", ())),  # bare scan → no dim
+        # Select: indexer → one positional dict; only option kwargs survive.
+        (
+            "isel",
+            (),
+            {"time": 0, "lat": slice(0, 5), "drop": True},
+            Call(
+                "isel", ({"time": 0, "lat": slice(0, 5)},), frozendict({"drop": True})
+            ),
+        ),
+        # Rechunk: uniform, mapping (+ option kwarg), and empty forms.
+        ("chunk", ("auto",), {}, Call("chunk", ("auto",))),
+        (
+            "chunk",
+            ({"time": 100},),
+            {"token": "x"},
+            Call("chunk", ({"time": 100},), frozendict({"token": "x"})),
+        ),
+        ("chunk", (), {}, Call("chunk", ())),
+        # Project: single (bare name), list, and tuple-as-one-name keys.
+        ("__getitem__", ("tas",), {}, Call("__getitem__", ("tas",))),
+        ("__getitem__", (["a", "b"],), {}, Call("__getitem__", (["a", "b"],))),
+        ("__getitem__", (("a", "b"),), {}, Call("__getitem__", (("a", "b"),))),
+        # Drop: canonical list form; the redundant ``names=`` goes, ``errors=`` stays.
+        ("drop_vars", ("region",), {}, Call("drop_vars", (["region"],))),
+        (
+            "drop_vars",
+            (),
+            {"names": ["a", "b"], "errors": "ignore"},
+            Call("drop_vars", (["a", "b"],), frozendict({"errors": "ignore"})),
+        ),
+        # Rename: kwargs → positional mapping (rename has no option kwargs).
+        ("rename", (), {"month": "time"}, Call("rename", ({"month": "time"},))),
+        # Elementwise: no semantic field, so the header is verbatim.
+        ("fillna", (0,), {}, Call("fillna", (0,))),
+    ],
+)
+def test_emit_derives_the_canonical_header(name, args, kwargs, expected):
+    """Each flat ``Op`` kind emits the canonical inverse of its ``to_opnode`` parse."""
+    node = to_opnode(name, args, kwargs)
+    assert emit([node]) == [expected]
+
+
+def test_emit_reduce_keeps_the_function_of_a_reduce_call():
+    """``.reduce(func, dim)`` — dim at position 1 — re-emits with its function intact."""
+    node = to_opnode("reduce", (np.mean, "time"), {})
+    assert emit([node]) == [Call("reduce", (np.mean, "time"))]
+
+
+def test_emit_follows_the_semantic_field_not_a_stale_header():
+    """A mutated ``indexer`` drives the emitted call even when ``args`` still says otherwise.
+
+    Notes
+    -----
+    The regression the whole change exists for: an optimiser (a rule, or a Rust backend that
+    never sees ``args``/``kwargs`` at all) rewrites the *semantic field* and leaves the
+    recorded header untouched. ``emit`` must read the field, not the stale header — otherwise
+    a rewritten plan replays its pre-rewrite call.
+    """
+    stale = Select(
+        name="isel",
+        args=({"time": 99},),  # what the call was recorded as
+        indexer=frozendict({"time": 0}),  # what the optimiser left it as
+    )
+    assert emit([stale]) == [Call("isel", ({"time": 0},))]
+
+
+def test_emit_follows_the_reduce_dim_not_a_stale_header():
+    """A reduce whose ``consumes`` an optimiser rewrote emits the *new* dim, not the recorded one.
+
+    Notes
+    -----
+    The ``Select`` regression above, for the one *derived* arm that threads the recorded
+    ``args``/``kwargs`` back through :func:`~xrexpr.lower._dim_call`. Start from a reduce as the
+    recorder built it — header and ``consumes`` agreeing — then rewrite *only* the semantic
+    field, the way a rule (or a Rust backend that never sees ``args``/``kwargs``) would, and
+    leave the header stale. ``emit`` must follow ``consumes``: ``_dim_call`` strips the recorded
+    dim out of the header and re-derives it from the field, so the stale spelling never reaches
+    replay. Only the non-dim payload (a function, an option kwarg) rides the header through, and
+    it has no semantic twin to fall out of sync with.
+    """
+    recorded = to_opnode("mean", ("time",), {})
+    assert emit([recorded]) == [Call("mean", ("time",))]  # header and field agree
+
+    # An optimiser rewrites the field alone; the header still spells the old dim.
+    rewritten = replace(recorded, consumes=frozenset({"lat"}))
+    assert rewritten.args == ("time",)  # header untouched — still "time"
+    assert emit([rewritten]) == [Call("mean", ("lat",))]  # emit follows consumes
+
+    # Same when the recorded dim was a ``dim=`` kwarg rather than a positional.
+    from_kwarg = replace(
+        to_opnode("mean", (), {"dim": "time"}), consumes=frozenset({"lat"})
+    )
+    assert emit([from_kwarg]) == [Call("mean", ("lat",))]
+
+    # Rewriting to ALL_DIMS drops the stale positional and re-inserts nothing (bare ``mean()``).
+    to_all = replace(recorded, consumes=ALL_DIMS)
+    assert emit([to_all]) == [Call("mean", ())]
+
+    # The non-dim payload survives the rewrite: ``skipna``/``keepdims`` here, ...
+    optioned = replace(
+        to_opnode("mean", ("time",), {"skipna": True, "keepdims": True}),
+        consumes=frozenset({"lat"}),
+    )
+    assert emit([optioned]) == [
+        Call("mean", ("lat",), {"skipna": True, "keepdims": True})
+    ]
+
+    # ... and ``reduce``'s function, whose dim sits at position 1.
+    with_func = replace(
+        to_opnode("reduce", (np.sum, "time"), {}), consumes=frozenset({"lat"})
+    )
+    assert emit([with_func]) == [Call("reduce", (np.sum, "lat"))]
+
+
+def test_emit_follows_the_scan_dim_not_a_stale_header():
+    """A scan whose ``dims`` an optimiser rewrote emits the *new* dim, not the recorded one.
+
+    Notes
+    -----
+    The :func:`test_emit_follows_the_reduce_dim_not_a_stale_header` guarantee for a scan, which
+    keeps its dim rather than consuming it but shares the same :func:`_dim_call` strip.
+    """
+    recorded = to_opnode("cumsum", ("time",), {})
+    assert emit([recorded]) == [Call("cumsum", ("time",))]  # header and field agree
+
+    rewritten = replace(recorded, dims=frozenset({"lat"}))
+    assert rewritten.args == ("time",)  # header untouched — still "time"
+    assert emit([rewritten]) == [Call("cumsum", ("lat",))]  # emit follows dims
 
 
 def test_call_coerces_to_immutable_containers_and_hashes():

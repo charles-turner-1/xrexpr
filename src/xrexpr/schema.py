@@ -50,6 +50,8 @@ from xrexpr.ir import (
     WeightedReduce,
     WindowedReduce,
 )
+from xrexpr.operations import CHUNK_OPTION_KWARGS as _CHUNK_OPTION_KWARGS
+from xrexpr.operations import SELECT_OPTION_KWARGS as _SELECT_OPTION_KWARGS
 from xrexpr.operations import (
     ContextSpec,
     DropSpec,
@@ -838,21 +840,24 @@ def _windowed_size(
     ``rolling`` yields one output position per input position, so its dims keep their
     length outright — ``center`` and ``min_periods`` change values, never shape.
 
-    ``coarsen`` divides, and how it rounds is an *option* rather than a property of the
-    op: ``boundary="trim"`` discards the short final block (floor), ``"pad"`` fills it
-    (ceil), and the default ``"exact"`` requires divisibility — so where it is exact the
-    two agree, and where it is not, xarray raises at replay rather than producing the
-    size computed here. A ``boundary`` this does not recognise answers ``None``: a
-    future spelling should cost precision, not correctness.
+    ``coarsen`` divides, and how it rounds is an *option* rather than a property of the op:
+    ``boundary="trim"`` discards the short final block (floor), ``"pad"`` fills it (ceil),
+    and the default ``"exact"`` requires divisibility — so where it is exact the two agree,
+    and where it is not, xarray raises at replay rather than producing the size computed
+    here. That reading of ``boundary`` is precomputed on the node as
+    :attr:`~xrexpr.ir.WindowedReduce.rounds_up` (``True`` ceil, ``False`` floor, ``None``
+    unknown), so this function reasons over the node, not the raw header. A ``boundary`` the
+    node does not recognise answers ``None``: a future spelling should cost precision, not
+    correctness.
     """
     if current is None or node.name == "rolling":
         return current
-    match node.kwargs.get("boundary", "exact"):
-        case "trim" | "exact":
+    match node.rounds_up:
+        case False:
             return current // window
-        case "pad":
+        case True:
             return -(-current // window)  # ceil
-        case _:
+        case None:
             return None
 
 
@@ -902,22 +907,6 @@ def _selected_size(
     if name == "sel" and isinstance(index.to_raw(), slice):
         return None
     return index.size(current)
-
-
-#: ``isel``/``sel`` keyword arguments that are *options*, not dim indexers.
-_SELECT_OPTION_KWARGS = frozenset({"drop", "missing_dims", "method", "tolerance"})
-
-#: ``chunk`` keyword arguments that are *options*, not per-dim chunk specs.
-_CHUNK_OPTION_KWARGS = frozenset(
-    {
-        "name_prefix",
-        "token",
-        "lock",
-        "inline_array",
-        "chunked_array_type",
-        "from_array_kwargs",
-    }
-)
 
 
 def to_opnode(
