@@ -576,7 +576,7 @@ def _canon_dims(dims: frozenset[Hashable]) -> Hashable | list[Hashable]:
         A single *string* dim bare (``"time"``), matching xarray's str-is-one-name
         convention; anything else a list, ordered by ``repr`` for a deterministic
         header. A single *non*-string dim is still wrapped in a list, because a
-        bare iterable dim name (a tuple) would otherwise re-parse as several dims
+        bare iterable dim name (eg. a tuple) would otherwise re-parse as several dims
         through ``schema._as_dim_set``.
     """
     ordered = sorted(dims, key=repr)
@@ -586,7 +586,7 @@ def _canon_dims(dims: frozenset[Hashable]) -> Hashable | list[Hashable]:
 
 
 def _dim_arg(name: str) -> int:
-    """Where a reduction's dim spec sits among its positionals — 0, or 1 for ``reduce``.
+    """Where a reduction's dim spec sits among its positional args — 0, or 1 for ``reduce``.
 
     Parameters
     ----------
@@ -658,7 +658,7 @@ def _rechunk_args(rechunk: Rechunk) -> tuple[Any, ...]:
         The uniform form (``chunk("auto")``) when :attr:`~xrexpr.ir.Rechunk.uniform` is set,
         the mapping form (``chunk({dim: spec})``) when :attr:`~xrexpr.ir.Rechunk.chunks` is,
         and an empty header for a bare ``chunk()`` — the three cases ``schema._chunk_spec``
-        parses.
+        parses. Tuple because it is passed straight to args.
     """
     if rechunk.uniform is not None:
         return (rechunk.uniform.to_raw(),)
@@ -700,7 +700,7 @@ def _emit_node(node: LoweredOp) -> tuple[Call, ...]:
     neither is ever reordered. And the fused nodes
     (:class:`~xrexpr.ir.GroupedReduce`/:class:`~xrexpr.ir.WindowedReduce`/:class:`~xrexpr.ir.WeightedReduce`)
     reassemble from the two headers they fused: deriving them would have to invent
-    ``groupby("time.month")`` back out of ``group_dim``/``new_dim``, which §7 rejects.
+    ``groupby("time.month")`` back out of ``group_dim``/``new_dim``.
 
     ``assert_never`` closes the match: a new lowered variant fails type-check here until
     someone says what it replays as, which is exactly the question a fused node exists to

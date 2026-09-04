@@ -661,24 +661,19 @@ class WindowedReduce:
 
     Notes
     -----
-    A window consumes no dim and mints none, so there is no ``consumes`` field to
-    worry about. Only the *size* of the windowed dims can change for ``coarsen``:
+    A window cannot consume/mint dims so there is no ``consumes`` field. The *size* of the windowed dims can change for ``coarsen``:
 
     - **rolling** keeps every dim at its current length — one output position per input
       position, ``center``/``min_periods`` affects values but not shape.
     - **coarsen** divides each windowed dim by its window, rounded according to
       ``boundary`` (``"trim"`` down, ``"pad"`` up, ``"exact"`` requiring
       divisibility). As the size effect depends on an kwarg option, the option's
-      meaning gets stored in :attr:`rounds_up` — like how :class:`Reduce` stores
+      meaning gets stored in :attr:`rounds_up` (derived from :attr:``kwargs``)— like how :class:`Reduce` stores
       ``keepdims`` and :class:`Rechunk` stores ``uniform``. Derived in ``__post_init__``,
       so it can't disagree with replay, and keeps ``schema._windowed_size`` reasoning
       over the node rather than digging ``boundary`` back out of the kwargs. ``kwargs``
       stays whole for replay and other options (``center``, ``min_periods``, ...),
       which no layer reasons over.
-    - rounds_up is derived from :attr:`kwargs`, and is ``bool`` or ``None``. It
-      sets whether ``coarsen`` rounds a windowed dim's new length up (``True``,
-      ``boundary="pad"``), down (``False``, ``"trim"``/``"exact"``), or unpredictably
-      (``None``).
 
     A windowed closer takes **no dim argument** at all — ``DatasetRolling.mean`` is
     ``(keep_attrs=None, **kwargs)`` — so ``ds.rolling(time=3).mean("lat")`` passes
@@ -709,11 +704,6 @@ class WindowedReduce:
 
     def _rounds_up(self) -> bool | None:
         """
-        ``coarsen`` divides each windowed dim and rounds by the ``boundary`` option; the
-        size layer needs that rule, so read it off the verbatim ``kwargs`` *here* rather
-        than in ``schema._windowed_size``. Like ``uniform``, a derived reading that cannot
-        disagree with what replay does.
-
         Returns
         -------
         bool | None

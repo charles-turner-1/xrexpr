@@ -401,8 +401,8 @@ def merge_adjacent_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
         j = i + 1
         indexer = dict(node.indexer)
         # Only the ``indexer`` is accumulated: ``consumes`` is a derived property of it, and
-        # the replay header is derived from it by ``lower._emit_node`` (§7), so neither can
-        # drift from the merged indexer — this rule touches the semantic field alone.
+        # the replay header is derived from it by ``lower._emit_node``, so neither can
+        # drift from the merged indexer — this rule only touches the semantic field.
         while j < n:
             nxt = nodes[j]
             if nxt.name != node.name or not _mergeable_select(nxt):
