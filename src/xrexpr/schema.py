@@ -523,6 +523,10 @@ def apply_schema(schema: SchemaState, node: LoweredOp) -> SchemaState:
                         sizes[dim] = None
                 case _:
                     assert_never(weighted.consumes)
+            # A weighted reduce rebuilds its result from the data variables, so a coordinate
+            # left on a dim no data variable carries goes with them -- the #193 over-report
+            # (a plain reduce keeps such a dimension coordinate; this one does not).
+            variables, coord_names = _orphan_coords_dropped(variables, coord_names)
         case WindowedReduce() as windowed:
             for dim, window in windowed.window.items():
                 if dim in sizes:
@@ -621,6 +625,48 @@ def _aggregated(
         name: tuple(d for d in var_dims if d not in over)
         for name, var_dims in variables.items()
         if not (name in coord_names and not over.isdisjoint(var_dims))
+    }
+    return kept, coord_names & set(kept)
+
+
+def _orphan_coords_dropped(
+    variables: dict[Hashable, tuple[Hashable, ...]],
+    coord_names: set[Hashable],
+) -> tuple[dict[Hashable, tuple[Hashable, ...]], set[Hashable]]:
+    """Drop coordinates spanning a dim no surviving *data* variable carries.
+
+    Parameters
+    ----------
+    variables : dict
+        The schema's variables after the op's own dim removal, name → dims.
+    coord_names : set of Hashable
+        Which of those names are coordinates.
+
+    Returns
+    -------
+    tuple of (dict, set)
+        The variables with orphaned coordinates removed, and the coordinate names among them.
+
+    Notes
+    -----
+    A weighted reduce reconstructs its result from the data variables (xarray builds it with
+    ``dot``), so a coordinate left on a dim no data variable carries is dropped -- unlike a
+    plain reduce, which leaves that dimension coordinate in place. Issue #193: after
+    ``drop_vars`` removes the last data variable carrying ``time``, ``weighted(w).mean("lat")``
+    drops the orphaned ``time`` coordinate a plain ``mean("lat")`` would keep. A coordinate on
+    a *surviving* dim stays (``label(time)`` survives while a data variable carries ``time``).
+    Verified against xarray 2026.7.0.
+    """
+    data_dims = {
+        d
+        for name, var_dims in variables.items()
+        if name not in coord_names
+        for d in var_dims
+    }
+    kept = {
+        name: var_dims
+        for name, var_dims in variables.items()
+        if name not in coord_names or set(var_dims) <= data_dims
     }
     return kept, coord_names & set(kept)
 
