@@ -200,6 +200,34 @@ def test_reduce_then_select_equal(ds):
     assert_equal(got, ds.sum("lat").isel(time=0))
 
 
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_scalar_select_behind_a_reduce_over_a_missing_dim_replays_equal():
+    """A scalar select must not reorder in front of a reduce over a dim a NaN-carrying var lacks (#192).
+
+    Regression for #192. ``elevation`` carries ``lat`` but not ``time`` and holds a NaN.
+    The optimiser once hopped ``isel(lat=1)`` in front of ``groupby("time").prod()`` (the
+    dims look disjoint), scalarising ``elevation`` so the skipna ``prod`` collapsed its lone
+    NaN to the empty-product ``1.0`` -- diverging from eager's ``nan``. The plain ``sum``
+    twin has the identical hole. The conftest ``ds`` has no NaNs and so masks this, so the
+    dataset is built here to carry one.
+    """
+    ds = xr.Dataset(
+        {
+            "temperature": (("time", "lat"), np.array([[0.0, 1.0, 2.0]])),
+            "elevation": (("lat",), np.array([0.0, np.nan, 2.0])),
+        },
+        coords={"time": [0], "lat": [0, 1, 2]},
+    )
+    assert_equal(
+        ds.plan.groupby("time").prod().isel(lat=1).collect(),
+        ds.groupby("time").prod().isel(lat=1),
+    )
+    assert_equal(
+        ds.plan.sum("time").isel(lat=1).collect(),
+        ds.sum("time").isel(lat=1),
+    )
+
+
 def test_reduce_method_then_select_matches_eager(ds):
     """``.reduce(func, dim)`` records an honest ``Reduce``, so a disjoint select hops in front of it.
 
