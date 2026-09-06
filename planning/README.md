@@ -27,6 +27,7 @@ stands, what is missing, and the recommended order for what remains.
 | [`improvement-report.md`](improvement-report.md) | a survey of what wanted fixing |
 | [`pr-plan.md`](pr-plan.md) | how that survey was cut into landable PRs |
 | [`indexer-follow-ups.md`](indexer-follow-ups.md) | loose ends left by the indexer taxonomy |
+| [`rust-optimiser-kernel.md`](rust-optimiser-kernel.md) | why the Rust port should intern dims and move the optimiser algebra across, not mirror the IR data structures |
 
 ## Citing these from code
 

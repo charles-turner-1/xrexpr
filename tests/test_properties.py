@@ -88,6 +88,7 @@ import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
 # aliased: this module's own ``Call`` is a generated *recorded* call (name + args/kwargs),
 # a different thing from the emitted call header ``lower.Call`` denotes.
 from xrexpr.chunks import Auto, BlockSeq, ByteSize
+from xrexpr.intern import Interner, deintern, intern
 from xrexpr.ir import ContextOpen, Opaque, Rechunk, Select
 from xrexpr.lower import Call as Lowered
 from xrexpr.lower import emit, to_lower_ir
@@ -1211,6 +1212,36 @@ def test_optimised_plan_matches_eager_evaluation(case):
     _assert_replays_equal(_apply(ds.plan, calls).collect(), _apply(ds, calls))
 
 
+@SETTINGS
+@given(any_plans())
+def test_roundtrip_intern_schema_unchanged(case):
+    ds, calls = case
+    _, schema = _build_plan(ds, calls)
+
+    interner = Interner()
+    interned_schema = schema.to_interned(interner)
+    roundtrip_schema = SchemaState.from_interned(interned_schema, interner)
+
+    assert roundtrip_schema == schema
+
+
+@SETTINGS
+@given(any_plans())
+def test_roundtrip_intern_ops_unchanged(case):
+    """Every op survives ``deintern(intern(op)) == op``.
+
+    Covers both the fluent plan — which may carry a ``ContextOpen`` — and its lowered form,
+    which carries the fused ``*Reduce`` nodes, so all op variants are exercised.
+    """
+    ds, calls = case
+    Interner()._clear()
+
+    fluent = _build_plan(ds, calls)[0]
+    lowered = to_lower_ir(fluent, _dim_names(ds))
+    for op in (*fluent, *lowered):
+        assert deintern(intern(op)) == op
+
+
 @pytest.mark.skipif(not HAS_DASK, reason="rechunk replay needs a chunk manager")
 @SETTINGS
 @given(any_plans())
@@ -1334,24 +1365,29 @@ def test_no_context_open_survives_lowering(case):
 
 @SETTINGS
 @given(any_plans())
-def test_emit_after_lowering_reproduces_the_recorded_calls(case):
-    """A lowered plan emits exactly the calls that were recorded.
+def test_emit_after_lowering_is_a_reparseable_canonical_fixed_point(case):
+    """Emitted calls re-parse and re-lower to the same calls — a canonical fixed point.
 
-    The round-trip half of lowering's contract, pinned node-for-node rather than only
-    through the result: nothing in the pipeline may quietly re-spell a call it did not
-    need to touch. Compared as ``Call`` headers, not as nodes — emit's output is codegen,
-    and one node need not stay one call.
+    ``emit`` derives each header from the node's *semantic fields* (the inverse of
+    ``to_opnode``), so it emits the **canonical** spelling of a call, not necessarily the
+    recorded one. The round-trip half of the contract is therefore not byte-identity with
+    what was recorded, but *stability*: parse the emitted calls back with ``to_opnode``,
+    lower them again, and emit — and the calls are identical. That pins two things at once —
+    every emitted call is one ``to_opnode`` accepts, and canonicalisation has a fixed point
+    (a second pass changes nothing).
 
-    That last part is why this holds for builder chains too, which is not obvious: a fused
-    pair is *one* node emitting *two* calls, and because both headers are kept verbatim the
-    two are exactly the two that were recorded. The unfusable fallback lands in the same
-    place from the other direction — two ``Opaque`` nodes carrying the same headers.
+    Holds for builder chains too, which is why re-lowering is part of the loop rather than a
+    bare ``to_opnode``: a fused node emits *two* calls, whose re-parse is an opener plus a
+    closer that ``to_lower_ir`` re-fuses. The literal replay equivalence — that these calls
+    evaluate as eager does — is :func:`test_optimised_plan_matches_eager_evaluation`.
     """
     ds, calls = case
     plan, _ = _build_plan(ds, calls)
-    assert emit(to_lower_ir(plan, _dim_names(ds))) == [
-        Lowered(name=node.name, args=node.args, kwargs=node.kwargs) for node in plan
-    ]
+    dims = _dim_names(ds)
+
+    emitted = emit(to_lower_ir(plan, dims))
+    reparsed = [to_opnode(c.name, c.args, dict(c.kwargs)) for c in emitted]
+    assert emit(to_lower_ir(reparsed, dims)) == emitted
 
 
 @SETTINGS

@@ -1138,7 +1138,7 @@ def test_context_chain_records_an_opener_then_lowers_to_one_node(ds):
     assert chain.explain() == Explanation(
         "plan (2 ops):\n"
         "  1. GroupedReduce  groupby('time').mean()  [time -> time]\n"
-        "  2. Select  isel(time=0)"
+        "  2. Select  isel({'time': 0})"
     )
 
 
