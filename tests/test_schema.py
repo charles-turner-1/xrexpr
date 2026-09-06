@@ -649,6 +649,33 @@ def test_weighted_reduce_arm_agrees_with_xarray(ds, weights, consumes):
     }
 
 
+def test_weighted_reduce_drops_a_dim_orphaned_by_an_earlier_drop(ds):
+    """A weighted reduce drops a dim left carried only by a coordinate once its data var is gone (#193).
+
+    Notes
+    -----
+    Regression for #193, the over-report twin of #125. ``drop_vars("temperature")`` removes
+    the last data variable carrying ``time``, leaving it an orphan dimension coordinate. A
+    plain reduce keeps that coordinate (and xarray agrees), but a weighted reduce rebuilds its
+    result from the data variables, so ``time`` goes with them -- and the tracked schema must
+    drop it too rather than report a stale ``time``. Compared against evaluation the same way
+    :func:`test_weighted_reduce_arm_agrees_with_xarray` is.
+    """
+    reduced = ds.drop_vars("temperature")  # only elevation(lat, lon); time now orphaned
+    w = reduced["lat"].astype(float)
+    node = _weighted(frozenset({"lat"}), frozenset({"lat"}), w)
+
+    after = apply_schema(SchemaState.from_dataset(reduced), node)
+    eager = reduced.weighted(w).mean("lat")
+
+    assert "time" not in after.dim_names  # the #193 over-report was a stale {"time"}
+    assert after.dim_names == frozenset(eager.sizes)
+    assert after.coords == frozenset(eager.coords)
+    assert {k: set(v) for k, v in after.data_vars.items()} == {
+        k: set(v.dims) for k, v in eager.data_vars.items()
+    }
+
+
 def test_a_surviving_weight_dim_is_sized_unknown_not_guessed(ds):
     """A weight dim that survives the reduce is present but unsized, not left at its old size.
 
@@ -726,11 +753,27 @@ def test_several_minted_dims_land_in_a_deterministic_order(ds):
 
 
 def test_weighting_an_unknown_size_stays_unknown():
-    """A weight dim whose size was already unknown stays unknown after the fold."""
-    unknown = _dim_coords_only({"time": None, "lat": 3})
+    """A surviving weight dim whose size was already unknown stays unknown after the fold.
+
+    Notes
+    -----
+    The weight dim ``time`` survives on the data variable it broadcasts onto -- ``v(lat)``
+    becomes ``v(time)`` under ``weighted(w(time)).mean("lat")`` -- and its extent, already
+    unknown entering the fold, must stay ``None`` rather than be guessed. The dim rides a data
+    variable on purpose: a weighted reduce reports only dims its data variables carry (#193),
+    so a coords-only dataset would drop ``time`` outright, exactly as xarray does.
+    """
+    unknown = SchemaState(
+        variables={"time": ("time",), "lat": ("lat",), "v": ("lat",)},
+        coord_names=frozenset({"time", "lat"}),
+        sizes={"time": None, "lat": 3},
+    )
     w = xr.DataArray([1.0], dims="time")
     after = apply_schema(unknown, _weighted(frozenset({"lat"}), frozenset({"time"}), w))
     assert after.sizes["time"] is None
+    assert set(after.data_vars["v"]) == {
+        "time"
+    }  # time survives on the minted data variable
 
 
 def test_scan_leaves_schema_unchanged(ds):
