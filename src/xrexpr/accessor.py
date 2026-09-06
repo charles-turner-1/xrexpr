@@ -20,6 +20,7 @@ is read off the base object rather than stored — the same derived-property dis
 See ``docs/internals/pipeline.md``.
 """
 
+from collections.abc import Hashable
 from functools import wraps
 from typing import Any
 
@@ -209,7 +210,7 @@ class LazyProxy:
             for node in self._ops
         )
 
-    def _base_schema(self) -> SchemaState:
+    def _base_schema(self) -> SchemaState[Hashable]:
         """Snapshot the *base* object's schema, which is what the optimiser plans against.
 
         Returns
@@ -232,7 +233,7 @@ class LazyProxy:
         verbatim, correct, merely unfused. Teaching ``SchemaState`` to hold the array
         itself would recover the fusion; it is a schema change, not an accessor one.
         """
-        return SchemaState.from_dataset(self._base)
+        return SchemaState[Hashable].from_dataset(self._base)
 
     def _is_method_callable_on_base(self, name: str) -> bool:
         """Report whether ``name`` is a callable attribute of the base object.

@@ -79,17 +79,17 @@ Plan = list[LoweredOp]
 #: A rule maps a plan (and the schema its first node sees) to a rewritten plan, or
 #: returns ``None`` when it changes nothing (letting :func:`optimize` detect the fixpoint
 #: without a full-plan equality compare). Dim-level rules ignore the schema argument.
-Rule = Callable[[Plan, SchemaState], Plan | None]
+Rule = Callable[[Plan, SchemaState[Hashable]], Plan | None]
 
 
-def optimize(nodes: Plan, schema: SchemaState) -> Plan:
+def optimize(nodes: Plan, schema: SchemaState[Hashable]) -> Plan:
     """Rewrite ``nodes`` into an equivalent plan, applying every rule to a fixpoint.
 
     Parameters
     ----------
     nodes : Plan
         The lowered plan to rewrite.
-    schema : SchemaState
+    schema : SchemaState[Hashable]
         The schema of the dataset the plan starts from — the *base*, not the one left at
         the end of recording — since rules need to know the shape each node sees, and
         rewriting changes that.
@@ -130,14 +130,14 @@ def optimize(nodes: Plan, schema: SchemaState) -> Plan:
             return plan
 
 
-def _schemas(nodes: Plan, base: SchemaState) -> list[SchemaState]:
+def _schemas(nodes: Plan, base: SchemaState[Hashable]) -> list[SchemaState[Hashable]]:
     """Fold the base schema forward through a plan.
 
     Parameters
     ----------
     nodes : Plan
         The plan to fold over.
-    base : SchemaState
+    base : SchemaState[Hashable]
         The schema of the dataset the plan starts from.
 
     Returns
@@ -214,7 +214,7 @@ class DimEffect:
       the node. It is what the node needs of its **input**, which excludes a minted dim
       outright: that dim does not exist yet where the projection would land.
 
-    ``None`` means *don't know*, the contract ``SchemaState.var_dims`` states, with the
+    ``None`` means *don't know*, the contract ``SchemaState[Hashable].var_dims`` states, with the
     same discipline: it must be read as **no rewrite**, never as "no dims". Nothing crosses
     a node that answers ``None``.
     """
@@ -359,14 +359,14 @@ def dim_effect(node: LoweredOp) -> DimEffect:
             assert_never(node)
 
 
-def merge_adjacent_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
+def merge_adjacent_selects(nodes: Plan, schema: SchemaState[Hashable]) -> Plan | None:
     """Fold each run of consecutive same-op selects into one node.
 
     Parameters
     ----------
     nodes : Plan
         The plan to rewrite.
-    schema : SchemaState
+    schema : SchemaState[Hashable]
         The schema entering the plan. Unused — this is a dim-level rule.
 
     Returns
@@ -740,14 +740,14 @@ def _scaled_stop(inner_stop: int | None, start: int, step: int) -> int | None:
     return None if inner_stop is None else start + inner_stop * step
 
 
-def merge_adjacent_projects(nodes: Plan, schema: SchemaState) -> Plan | None:
+def merge_adjacent_projects(nodes: Plan, schema: SchemaState[Hashable]) -> Plan | None:
     """Drop the first of an adjacent pair of projections when the second subsumes it.
 
     Parameters
     ----------
     nodes : Plan
         The plan to rewrite.
-    schema : SchemaState
+    schema : SchemaState[Hashable]
         The schema entering the plan. Unused — this rule is *syntactic*, deciding on the
         two nodes' own key sets (see the notes on why that is enough, and what it costs).
 
@@ -823,14 +823,16 @@ def merge_adjacent_projects(nodes: Plan, schema: SchemaState) -> Plan | None:
     return None
 
 
-def eliminate_projection_before_coord(nodes: Plan, schema: SchemaState) -> Plan | None:
+def eliminate_projection_before_coord(
+    nodes: Plan, schema: SchemaState[Hashable]
+) -> Plan | None:
     """Drop a projection whose only consumer names coordinates that outlive it.
 
     Parameters
     ----------
     nodes : Plan
         The plan to rewrite.
-    schema : SchemaState
+    schema : SchemaState[Hashable]
         The schema of the dataset the plan starts from. Load-bearing: whether ``p2``'s
         coordinate survives ``p1`` is a fact only the fold knows.
 
@@ -907,14 +909,16 @@ def eliminate_projection_before_coord(nodes: Plan, schema: SchemaState) -> Plan 
     return None
 
 
-def push_projection_past_drop(nodes: Plan, schema: SchemaState) -> Plan | None:
+def push_projection_past_drop(
+    nodes: Plan, schema: SchemaState[Hashable]
+) -> Plan | None:
     """Hop a projection in front of a preceding ``drop_vars``, trimming the drop to survivors.
 
     Parameters
     ----------
     nodes : Plan
         The plan to rewrite.
-    schema : SchemaState
+    schema : SchemaState[Hashable]
         The schema of the dataset the plan starts from. Load-bearing: which dropped names
         *survive* the projection is a fact only the fold knows.
 
@@ -1001,14 +1005,14 @@ def push_projection_past_drop(nodes: Plan, schema: SchemaState) -> Plan | None:
     return None
 
 
-def pushdown_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
+def pushdown_selects(nodes: Plan, schema: SchemaState[Hashable]) -> Plan | None:
     """Hop a select left past a preceding node whose dims permit it.
 
     Parameters
     ----------
     nodes : Plan
         The plan to rewrite.
-    schema : SchemaState
+    schema : SchemaState[Hashable]
         The schema entering the plan. Unused — this is a dim-level rule, and even
         :data:`~xrexpr.ir.ALL_DIMS` needs no schema here (see the notes).
 
@@ -1083,14 +1087,14 @@ def pushdown_selects(nodes: Plan, schema: SchemaState) -> Plan | None:
     return None
 
 
-def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
+def pushdown_projections(nodes: Plan, schema: SchemaState[Hashable]) -> Plan | None:
     """Hop a variable projection left past a preceding reduce, select or fused reduce.
 
     Parameters
     ----------
     nodes : Plan
         The plan to rewrite.
-    schema : SchemaState
+    schema : SchemaState[Hashable]
         The schema of the dataset the plan starts from. Load-bearing here, unlike in the
         dim-level rules: whether a projection may cross an op depends on which dims the
         projected *variables* carry at that point, which only the fold knows.
@@ -1202,14 +1206,16 @@ def pushdown_projections(nodes: Plan, schema: SchemaState) -> Plan | None:
     return None
 
 
-def pushdown_selects_past_rechunks(nodes: Plan, schema: SchemaState) -> Plan | None:
+def pushdown_selects_past_rechunks(
+    nodes: Plan, schema: SchemaState[Hashable]
+) -> Plan | None:
     """Hop a select left past a preceding ``chunk`` so the rechunk moves less data.
 
     Parameters
     ----------
     nodes : Plan
         The plan to rewrite.
-    schema : SchemaState
+    schema : SchemaState[Hashable]
         The schema entering the plan. Unused — this rule has no disjointness test at all.
 
     Returns
@@ -1382,14 +1388,14 @@ def _mergeable_rechunk(node: Rechunk) -> bool:
     return node.uniform is None and bool(node.chunks) and _pushable_rechunk(node)
 
 
-def merge_adjacent_rechunks(nodes: Plan, schema: SchemaState) -> Plan | None:
+def merge_adjacent_rechunks(nodes: Plan, schema: SchemaState[Hashable]) -> Plan | None:
     """Fuse an adjacent pair of mapping-form ``chunk`` calls into one.
 
     Parameters
     ----------
     nodes : Plan
         The plan to rewrite.
-    schema : SchemaState
+    schema : SchemaState[Hashable]
         The schema entering the plan. Unused — this rule is *syntactic*, deciding on the
         two nodes' own specs.
 
