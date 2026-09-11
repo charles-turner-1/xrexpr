@@ -1,47 +1,45 @@
 [build-system]
-build-backend = "setuptools.build_meta"
-requires = [
-  "setuptools >= 61.0.0",
-  "versioneer[toml]==0.29",
-]
+requires = ["maturin>=1.15,<2.0", "versioneer[toml]==0.29"]
+build-backend = "maturin"
+
 
 [project]
 name = "xrexpr"
 description = "Rewrite chained expressions on xarray datasets to improve performance"
 readme = "README.md"
 requires-python = ">=3.10"
-authors = [
-  { name = "Charle Turner", email = "charles.turner@anu.edu.au"},
-]
-maintainers = [
-  { name = "Charle Turner", email = "charles.turner@anu.edu.au"},
-]
+authors = [{ name = "Charle Turner", email = "charles.turner@anu.edu.au" }]
+maintainers = [{ name = "Charle Turner", email = "charles.turner@anu.edu.au" }]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
 ]
-license = {text = "Apache Software License 2.0"}
+license = { text = "Apache Software License 2.0" }
 dependencies = [
-   "frozendict",
-   "packaging",  # Version() gates the pre-2026.4.0 scan-coord bug in schema.py
-   "typing_extensions",  # assert_never on the 3.10 floor (typing.assert_never is 3.11+)
-   "xarray"
+    "frozendict",
+    "packaging",         # Version() gates the pre-2026.4.0 scan-coord bug in schema.py
+    "typing_extensions", # assert_never on the 3.10 floor (typing.assert_never is 3.11+)
+    "xarray",
+    "pdbpp>=0.12.1,<0.13",
 ]
 
 dynamic = ["version"]
 
 [project.optional-dependencies]
 dev = [
-    "black",  # formatting
-    "coverage",  # testing
-    "dask",  # testing: rechunk rewrites need a chunk manager to replay
-    "hypothesis",  # testing (property-based)
-    "mypy",  # linting
-    "numbagg",  # testing: xarray's rolling_exp refuses to run without it
-    "pytest",  # testing
-    "ruff",  # linting
+    "black",      # formatting
+    "coverage",   # testing
+    "dask",       # testing: rechunk rewrites need a chunk manager to replay
+    "hypothesis", # testing (property-based)
+    "mypy",       # linting
+    "numbagg",    # testing: xarray's rolling_exp refuses to run without it
+    "pytest",     # testing
+    "ruff",       # linting
     "xarray",
 ]
 # Declared once, consumed twice: pixi exposes every optional-dependency group as a
@@ -50,14 +48,14 @@ dev = [
 # pip. Adding a docs dependency here reaches both without a second list to keep in step.
 docs = [
     "sphinx>=8",
-    "myst-nb>=1.2",  # MyST pages *and* executed code cells; it bundles myst-parser
+    "myst-nb>=1.2",               # MyST pages *and* executed code cells; it bundles myst-parser
     "pydata-sphinx-theme>=0.16",
-    "sphinx-design",  # landing-page cards
+    "sphinx-design",              # landing-page cards
     "sphinx-copybutton",
-    "sphinxcontrib-mermaid>=1.0",  # MyST has no native mermaid
-    "ipykernel",  # myst-nb executes pages through a Jupyter kernel
-    "dask",  # docs-only, same posture as the test feature: the rechunking pages call
-             # .chunk(), while xrexpr itself stays dask-free
+    "sphinxcontrib-mermaid>=1.0", # MyST has no native mermaid
+    "ipykernel",                  # myst-nb executes pages through a Jupyter kernel
+    "dask",                       # docs-only, same posture as the test feature: the rechunking pages call
+    # .chunk(), while xrexpr itself stays dask-free
 ]
 
 [project.scripts]
@@ -69,7 +67,7 @@ changelog = "https://github.com/charles-turner-1/xrexpr/blob/main/CHANGELOG.md"
 homepage = "https://github.com/charles-turner-1/xrexpr"
 
 [tool.setuptools]
-package-dir = {"" = "src"}
+package-dir = { "" = "src" }
 
 [tool.setuptools.package-data]
 "*" = ["*.*"]
@@ -80,9 +78,7 @@ package-dir = {"" = "src"}
 
 [tool.mypy]
 files = "src"
-exclude = [
-  "src/xrexpr/_version.py",
-]
+exclude = ["src/xrexpr/_version.py"]
 
 # Use strict defaults
 strict = true
@@ -101,10 +97,7 @@ tag_prefix = "v"
 parentdir_prefix = "xrexpr-"
 
 [tool.coverage.run]
-omit = [
-    "*/_version.py",
-    "*/data/__init__.py",
-]
+omit = ["*/_version.py", "*/data/__init__.py"]
 
 [tool.ruff]
 target-version = "py310"
@@ -130,7 +123,7 @@ exclude = [
     "venv",
     "versioneer.py",
     "_version.py",
-    "tests"
+    "tests",
 ]
 [tool.ruff.lint]
 # E402: module level import not at top of file
@@ -138,12 +131,7 @@ exclude = [
 # D105: magic methods (``__repr__``, ``__getitem__``) carry their meaning in the name
 # D205: a summary line followed by a blank line, but multi-sentence summaries here
 #       deliberately wrap -- black owns the wrapping, so this would fight it
-ignore = [
-    "E402",
-    "E501",
-    "D105",
-    "D205",
-]
+ignore = ["E402", "E501", "D105", "D205"]
 select = [
     # Pyflakes
     "F",
@@ -183,6 +171,10 @@ asyncio_default_fixture_loop_scope = "function"
 # discarded by ``assume``, and how long generation took.
 addopts = "--hypothesis-show-statistics"
 
+[tool.maturin]
+python-source = "src"
+module-name = "xrexpr._xrexprs"
+
 [tool.pixi.workspace]
 channels = ["conda-forge"]
 name = "xrexpr"
@@ -195,9 +187,10 @@ frozendict = "*"
 packaging = "*"
 typing_extensions = "*"
 versioneer = ">=0.29,<0.30"
+maturin = ">=1.15.0,<2"
 
 [tool.pixi.pypi-dependencies]
-xrexpr = {editable = true, path = "."}
+xrexpr = { editable = true, path = "." }
 
 [tool.pixi.environments]
 default = { features = ["dev", "test", "numbagg"], solve-group = "default" }
@@ -265,19 +258,19 @@ python = "3.13.*"
 # back.
 [tool.numpydoc_validation]
 checks = [
-    "PR01",  # parameters not documented
-    "PR02",  # documented parameters that don't exist
-    "PR03",  # parameters documented out of signature order
-    "PR04",  # parameter has no type
-    "PR05",  # parameter type ends with a period
-    "PR06",  # parameter type uses a non-canonical spelling (integer -> int, ...)
-    "PR07",  # parameter has no description
-    "RT01",  # no Returns section where a value is returned
-    "RT03",  # return value has no description
-    "RT04",  # return value type ends with a period
-    "GL02",  # closing quotes on their own line
-    "GL03",  # double line break in the middle of a docstring
-    "YD01",  # a Yields section where the callable yields
+    "PR01", # parameters not documented
+    "PR02", # documented parameters that don't exist
+    "PR03", # parameters documented out of signature order
+    "PR04", # parameter has no type
+    "PR05", # parameter type ends with a period
+    "PR06", # parameter type uses a non-canonical spelling (integer -> int, ...)
+    "PR07", # parameter has no description
+    "RT01", # no Returns section where a value is returned
+    "RT03", # return value has no description
+    "RT04", # return value type ends with a period
+    "GL02", # closing quotes on their own line
+    "GL03", # double line break in the middle of a docstring
+    "YD01", # a Yields section where the callable yields
 ]
 # Deliberately *not* enabled:
 # - GL01 (summary on the line after the opening quotes). numpydoc's own format asks for

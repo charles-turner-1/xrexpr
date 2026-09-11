@@ -28,6 +28,7 @@ from typing import Literal, TypeGuard
 from frozendict import frozendict
 from typing_extensions import assert_never
 
+from xrexpr._xrexprs.ir import ALL_DIMS, AllDims
 from xrexpr.chunks import (
     Auto,
     BlockSeq,
@@ -50,8 +51,6 @@ from xrexpr.indexers import (
     Scalar,
 )
 from xrexpr.ir import (
-    ALL_DIMS,
-    AllDims,
     DimSet,
     Drop,
     Elementwise,
