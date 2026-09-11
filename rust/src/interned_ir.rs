@@ -6,7 +6,6 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
 
-mod indexers;
 
 #[derive(Debug, Clone, Copy)]
 #[pyclass(module = "xrexpr._xrexprs.ir", skip_from_py_object)]
