@@ -1,11 +1,8 @@
 use pyo3::prelude::*;
-use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyFrozenSet, PyTuple};
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
-use std::fmt::{Display, Formatter};
-use std::hash::{Hash, Hasher};
-
+use std::hash::{Hash, };
+use crate::indexers::Indexer;
+use crate::chunks::ChunkSpec;
 
 #[derive(Debug, Clone, Copy)]
 #[pyclass(module = "xrexpr._xrexprs.ir", skip_from_py_object)]
@@ -28,9 +25,33 @@ pub struct InternedReduce{
     keepdims: bool,
 }
 
+impl From<InternedReduce> for FluentOp {
+    fn from(r: InternedReduce) -> Self {
+        FluentOp::Reduce(r)
+    }
+}
+
+impl From<InternedReduce> for LoweredOp {
+    fn from(r: InternedReduce) -> Self {
+        LoweredOp::Reduce(r)
+    }
+}
+
 pub struct InternedSelect{
     name: String,
     indexer: HashMap<InternedVal, Indexer>
+}
+
+impl From<InternedSelect> for FluentOp {
+    fn from(s: InternedSelect) -> Self {
+        FluentOp::Select(s)
+    }
+}
+
+impl From<InternedSelect> for LoweredOp {
+    fn from(s: InternedSelect) -> Self {
+        LoweredOp::Select(s)
+    }
 }
 
 pub struct InternedScan{
@@ -38,14 +59,50 @@ pub struct InternedScan{
     dims: DimSet,
 }
 
+impl From<InternedScan> for FluentOp {
+    fn from(s: InternedScan) -> Self {
+        FluentOp::Scan(s)
+    }
+}
+
+impl From<InternedScan> for LoweredOp {
+    fn from(s: InternedScan) -> Self {
+        LoweredOp::Scan(s)
+    }
+}
+
 pub struct InternedElementwise{
     name: String,
 }
 
-pub struct InternetProject{
+impl From<InternedElementwise> for FluentOp {
+    fn from(s: InternedElementwise) -> Self {
+        FluentOp::Elementwise(s)
+    }
+}
+
+impl From<InternedElementwise> for LoweredOp {
+    fn from(s: InternedElementwise) -> Self {
+        LoweredOp::Elementwise(s)
+    }
+}
+
+pub struct InternedProject{
     name: String,
     variables: Vec<InternedVal>,
     single: bool,
+}
+
+impl From<InternedProject> for FluentOp {
+    fn from(p: InternedProject) -> Self {
+        FluentOp::Project(p)
+    }
+}
+
+impl From<InternedProject> for LoweredOp {
+    fn from(p: InternedProject) -> Self {
+        LoweredOp::Project(p)
+    }
 }
 
 pub struct InternedRechunk{
@@ -53,8 +110,32 @@ pub struct InternedRechunk{
     chunks: HashMap<InternedVal, ChunkSpec>,
 }
 
+impl From<InternedRechunk> for FluentOp {
+    fn from(r: InternedRechunk) -> Self {
+        FluentOp::Rechunk(r)
+    }
+}
+
+impl From<InternedRechunk> for LoweredOp {
+    fn from(r: InternedRechunk) -> Self {
+        LoweredOp::Rechunk(r)
+    }
+}
+
 pub struct InternedOpaque{
     name: String
+}
+
+impl From<InternedOpaque> for FluentOp {
+    fn from(o: InternedOpaque) -> Self {
+        FluentOp::Opaque(o)
+    }
+}
+
+impl From<InternedOpaque> for LoweredOp {
+    fn from(o: InternedOpaque) -> Self {
+        LoweredOp::Opaque(o)
+    }
 }
 
 pub struct InternedDrop{
@@ -62,13 +143,43 @@ pub struct InternedDrop{
     variables: Vec<InternedVal>,
 }
 
+impl From<InternedDrop> for FluentOp {
+    fn from(d: InternedDrop) -> Self {
+        FluentOp::Drop(d)
+    }
+}
+
+impl From<InternedDrop> for LoweredOp {
+    fn from(d: InternedDrop) -> Self {
+        LoweredOp::Drop(d)
+    }
+}
+
 pub struct InternedRename{
     name: String,
     mapping: HashMap<InternedVal, InternedVal>,
 }
 
+impl From<InternedRename> for FluentOp {
+    fn from(r: InternedRename) -> Self {
+        FluentOp::Rename(r)
+    }
+}
+
+impl From<InternedRename> for LoweredOp {
+    fn from(r: InternedRename) -> Self {
+        LoweredOp::Rename(r)
+    }
+}
+
 pub struct InternedContextOpen{
     name: String,
+}
+
+impl From<InternedContextOpen> for FluentOp {
+    fn from(c: InternedContextOpen) -> Self {
+        FluentOp::ContextOpen(c)
+    }
 }
 
 pub struct InternedGroupedReduce{
@@ -79,14 +190,76 @@ pub struct InternedGroupedReduce{
     consumes: HashSet<InternedVal>,
 }
 
+impl From<InternedGroupedReduce> for LoweredOp {
+    fn from(g: InternedGroupedReduce) -> Self {
+        LoweredOp::GroupedReduce(g)
+    }
+}
+
 pub struct InternedWindowedReduce{
     name: String,
     reduce: String,
     window: String,
 }
- pub struct InternedWeightedReduce{
+
+impl From<InternedWindowedReduce> for LoweredOp {
+    fn from(w: InternedWindowedReduce) -> Self {
+        LoweredOp::WindowedReduce(w)
+    }
+}
+
+pub struct InternedWeightedReduce{
     name: String,
     reduce: String,
     weight_dims: HashSet<InternedVal>,
     consumes: DimSet
+}
+
+impl From<InternedWeightedReduce> for LoweredOp {
+    fn from(w: InternedWeightedReduce) -> Self{
+        LoweredOp::WeightedReduce(w)
+    }
+}
+
+
+// Not really used anywhere, just defined to keep the common ops of fluent and
+// lowered listed.
+pub enum InternedOp {
+    Reduce(InternedReduce),
+    Select(InternedSelect),
+    Scan(InternedScan),
+    Elementwise(InternedElementwise),
+    Project(InternedProject),
+    Rechunk(InternedRechunk),
+    Opaque(InternedOpaque),
+    Drop(InternedDrop),
+    Rename(InternedRename),
+}
+
+pub enum FluentOp{
+    Reduce(InternedReduce),
+    Select(InternedSelect),
+    Scan(InternedScan),
+    Elementwise(InternedElementwise),
+    Project(InternedProject),
+    Rechunk(InternedRechunk),
+    Opaque(InternedOpaque),
+    Drop(InternedDrop),
+    Rename(InternedRename),
+    ContextOpen(InternedContextOpen),
+}
+
+pub enum LoweredOp {
+    Reduce(InternedReduce),
+    Select(InternedSelect),
+    Scan(InternedScan),
+    Elementwise(InternedElementwise),
+    Project(InternedProject),
+    Rechunk(InternedRechunk),
+    Opaque(InternedOpaque),
+    Drop(InternedDrop),
+    Rename(InternedRename),
+    GroupedReduce(InternedGroupedReduce),
+    WindowedReduce(InternedWindowedReduce),
+    WeightedReduce(InternedWeightedReduce),
 }

@@ -3,6 +3,8 @@ use pyo3::prelude::*;
 mod ir;
 mod interned_ir;
 mod indexers;
+mod chunks;
+
 /// A Python module implemented in Rust.
 #[pymodule]
 mod _xrexprs {
