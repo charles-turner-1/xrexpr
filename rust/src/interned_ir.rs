@@ -3,25 +3,41 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, };
 use crate::indexers::Indexer;
 use crate::chunks::ChunkSpec;
-
-#[derive(Debug, Clone, Copy)]
-#[pyclass(module = "xrexpr._xrexprs.ir", skip_from_py_object)]
-struct AllDims;
+use crate::ir::{AllDims};
 
 /// A dimension in a dataset, interned from (typically) a string to an int.
 /// For example, "time", "lat", "lon", etc. > 0, 1, 2, etc.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct InternedVal(pub i32);
 
-#[derive(Clone, PartialEq)]
+impl<'py> FromPyObject<'_, '_> for InternedVal {
+    type Error = PyErr;
+    fn extract(obj: pyo3::Borrowed<'_, '_, pyo3::PyAny>) -> PyResult<Self> {
+        Ok(InternedVal(obj.getattr("handle")?.extract::<i32>()?))
+    }
+}
+
+#[derive(Clone, PartialEq, Debug, Eq)]
 pub enum DimSet {
     AllDims,
     Concrete(std::collections::HashSet<InternedVal>),
 }
 
+impl FromPyObject<'_, '_> for DimSet {
+    type Error = PyErr;
+    fn extract(obj: pyo3::Borrowed<'_, '_, pyo3::PyAny>) -> Result<Self, Self::Error> {
+        if obj.is_instance_of::<AllDims>() {
+            Ok(DimSet::AllDims)
+        } else {
+            Ok(DimSet::Concrete(obj.extract()?))
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, FromPyObject)]
 pub struct InternedReduce{
     name: String,
-    comsumes: HashSet<InternedVal>,
+    consumes: DimSet,
     keepdims: bool,
 }
 
@@ -37,6 +53,7 @@ impl From<InternedReduce> for LoweredOp {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, FromPyObject)]
 pub struct InternedSelect{
     name: String,
     indexer: HashMap<InternedVal, Indexer>
@@ -54,6 +71,7 @@ impl From<InternedSelect> for LoweredOp {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, FromPyObject)]
 pub struct InternedScan{
     name: String,
     dims: DimSet,
@@ -71,6 +89,7 @@ impl From<InternedScan> for LoweredOp {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, FromPyObject)]
 pub struct InternedElementwise{
     name: String,
 }
@@ -87,6 +106,7 @@ impl From<InternedElementwise> for LoweredOp {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, FromPyObject)]
 pub struct InternedProject{
     name: String,
     variables: Vec<InternedVal>,
@@ -105,6 +125,7 @@ impl From<InternedProject> for LoweredOp {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, FromPyObject)]
 pub struct InternedRechunk{
     name: String,
     chunks: HashMap<InternedVal, ChunkSpec>,
@@ -122,6 +143,7 @@ impl From<InternedRechunk> for LoweredOp {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, FromPyObject)]
 pub struct InternedOpaque{
     name: String
 }
@@ -138,6 +160,7 @@ impl From<InternedOpaque> for LoweredOp {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, FromPyObject)]
 pub struct InternedDrop{
     name: String,
     variables: Vec<InternedVal>,
@@ -155,6 +178,7 @@ impl From<InternedDrop> for LoweredOp {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, FromPyObject)]
 pub struct InternedRename{
     name: String,
     mapping: HashMap<InternedVal, InternedVal>,
@@ -172,6 +196,7 @@ impl From<InternedRename> for LoweredOp {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, FromPyObject)]
 pub struct InternedContextOpen{
     name: String,
 }
@@ -182,6 +207,7 @@ impl From<InternedContextOpen> for FluentOp {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, FromPyObject)]
 pub struct InternedGroupedReduce{
     name: String,
     group_dim: InternedVal,
@@ -196,6 +222,7 @@ impl From<InternedGroupedReduce> for LoweredOp {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, FromPyObject)]
 pub struct InternedWindowedReduce{
     name: String,
     reduce: String,
@@ -208,6 +235,7 @@ impl From<InternedWindowedReduce> for LoweredOp {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, FromPyObject)]
 pub struct InternedWeightedReduce{
     name: String,
     reduce: String,

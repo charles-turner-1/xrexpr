@@ -1,39 +1,53 @@
 use crate::interned_ir::InternedVal;
+use pyo3::prelude::*;
 
+#[derive(FromPyObject)]
 pub struct Scalar{
-    value: InternedVal,
+    value: i64,
     drops_dims: bool,
-    position: Option<InternedVal>
+    position: Option<i64>
 }
 
+#[derive(FromPyObject)]
 pub struct ForwardSlice{
-    start: Option<InternedVal>,
-    stop: Option<InternedVal>,
-    step: Option<InternedVal>,
+    start: Option<i64>,
+    stop: Option<i64>,
+    step: Option<i64>,
 }
 
+#[derive(FromPyObject, Clone)]
+pub struct Slice {
+    start: Option<i64>,
+    stop: Option<i64>,
+    step: Option<i64>,
+}
+
+#[derive(FromPyObject)]
 pub struct GeneralSlice{
-    start: Option<InternedVal>,
-    stop: Option<InternedVal>,
-    step: Option<InternedVal>
+    value: Slice
 }
 
+#[derive(FromPyObject)]
 pub struct Positions{
-    positions: Vec<InternedVal>
+    values: Vec<i64>
 }
 
+#[derive(FromPyObject)]
 pub struct Mask{
-    mask: Vec<bool>
+    values: Vec<bool>
 }
 
+#[derive(FromPyObject)]
 pub struct Label{
-    label: InternedVal
+    value: InternedVal
 }
 
+#[derive(FromPyObject)]
 pub struct Advanced{
-    indices: Vec<InternedVal>
+    dims: Vec<InternedVal>
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Indexer {
     Scalar,
     ForwardSlice,
@@ -44,3 +58,21 @@ pub enum Indexer {
     Advanced
 }
 
+impl FromPyObject<'_, '_> for Indexer {
+    type Error = PyErr;
+    fn extract(obj: pyo3::Borrowed<'_, '_, pyo3::PyAny>) -> Result<Self, Self::Error> {
+        let ty = obj.get_type().name()?;
+        match ty.to_str()? {
+            "Scalar" => Ok(Indexer::Scalar),
+            "ForwardSlice" => Ok(Indexer::ForwardSlice),
+            "GeneralSlice" => Ok(Indexer::GeneralSlice),
+            "Positions" => Ok(Indexer::Positions),
+            "Mask" => Ok(Indexer::Mask),
+            "Label" => Ok(Indexer::Label),
+            "Advanced" => Ok(Indexer::Advanced),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "Cannot convert object of type {} to Indexer", ty
+            ))),
+        }
+    }
+}

@@ -12,7 +12,7 @@ use std::hash::{Hash, Hasher};
 /// Handy for things like `ds.mean()` which are implicitly over all dimensions.
 #[derive(Debug, Clone, Copy)]
 #[pyclass(module = "xrexpr._xrexprs.ir", skip_from_py_object)]
-struct AllDims;
+pub struct AllDims;
 
 impl Display for AllDims {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
