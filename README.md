@@ -3,18 +3,15 @@
 [![Documentation Status](https://readthedocs.org/projects/xrexpr/badge/?version=latest)](https://xrexpr.readthedocs.io/en/latest/)
 
 > [!WARNING]
-> This is a **work in progress**, and I've had Claude (mostly Opus, some Fable) write the code for me. Because of that, it might look good (IDK),
-> but it is certainly not complete or and has not been drive-tested in any meaningful sense of the word. Claims about functionality
-> in this README should be considered probable at best, and aspirational at worst.
-> Use at your own caution (whilst this warning is still up. I'll get rid of it once I'm confident in the codebase).
+> This is a **work in progress**, and has been built with aggressive Claude Opus 4.8 usage. Claims about functionality
+> may be overstated.
+> Proceed with caution when using (whilst this warning is still up. I'll get rid of it once I'm confident in the codebase, although I'm becoming more so).
 > P.S - This is not completely unread AI nonsense. I'm driving the AI pretty closely - but be warned that when you go this fast, things
 > get missed and/or overlooked.
 
 > [!NOTE]
 > **This is not an xarray project.** It isn't affiliated with, endorsed by, or supported by xarray or its
-> maintainers. It just happens to plug into xarray via the accessor API. It also isn't really a *package* yet,
-> despite looking like one: it's closer to an LLM-assisted, unusually deep proof of concept that I'm using to
-> find out whether the idea holds up.
+> maintainers. It just happens to plug into xarray via the accessor API. 
 
 **XREXPR: Xarray Expression Rewriter.** Write the readable chain; run the fast one.
 
