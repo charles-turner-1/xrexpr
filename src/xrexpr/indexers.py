@@ -21,6 +21,7 @@ See ``docs/internals/values.md``.
 """
 
 import numbers
+from abc import ABC, abstractmethod
 from collections.abc import Hashable
 from dataclasses import dataclass
 from typing import Any, ClassVar
@@ -41,8 +42,16 @@ __all__ = [
 ]
 
 
+class GenericIndex(ABC):
+    @abstractmethod
+    def size(self, current: int) -> int: ...
+
+    @abstractmethod
+    def to_raw(self) -> Any: ...
+
+
 @dataclass(frozen=True)
-class Scalar:
+class Scalar(GenericIndex):
     """A single position or label (``isel(time=0)``, ``sel(time="2020")``) — *drops* the dim.
 
     Attributes
@@ -108,7 +117,7 @@ class Scalar:
 
 
 @dataclass(frozen=True)
-class ForwardSlice:
+class ForwardSlice(GenericIndex):
     """A forward, non-negative integer slice (``isel(time=slice(0, 5))``) — composable.
 
     Attributes
@@ -170,7 +179,7 @@ class ForwardSlice:
 
 
 @dataclass(frozen=True)
-class GeneralSlice:
+class GeneralSlice(GenericIndex):
     """An integer slice with a negative bound or reversed step (``isel(time=slice(-3, None))``).
 
     Attributes
@@ -216,7 +225,7 @@ class GeneralSlice:
 
 
 @dataclass(frozen=True)
-class Positions:
+class Positions(GenericIndex):
     """A concrete enumeration of integer positions (``isel(time=[0, 2, 4])``) — composable.
 
     Attributes
@@ -259,7 +268,7 @@ class Positions:
 
 
 @dataclass(frozen=True)
-class Mask:
+class Mask(GenericIndex):
     """A boolean mask (``isel(time=[True, False, ...])`` or a bool array) — sizes by True count.
 
     Attributes
@@ -313,7 +322,7 @@ class Mask:
 
 
 @dataclass(frozen=True)
-class Label:
+class Label(GenericIndex):
     """A coordinate label, label slice, or label sequence (``sel(time="2020")``) — irreducibly open.
 
     Attributes
@@ -372,7 +381,7 @@ class Label:
 
 
 @dataclass(frozen=True)
-class Advanced:
+class Advanced(GenericIndex):
     """An ``xr.DataArray``/``xr.Variable`` indexer — xarray's *advanced* indexing.
 
     Attributes
