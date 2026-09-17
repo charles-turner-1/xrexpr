@@ -165,6 +165,7 @@ class ForwardSlice(GenericIndex):
         int
             The number of positions the slice selects.
         """
+        breakpoint()
         return len(range(*self.to_raw().indices(current)))
 
     def to_raw(self) -> slice:
@@ -363,11 +364,32 @@ class Label(GenericIndex):
             for a label slice, whose extent is a fact about coordinate values. See the
             class notes on why no caller should reach that fallback.
         """
+        ks = self.known_size
+        return (
+            ks if ks is not None else current
+        )  # a label slice needs coord values to size — leave it unchanged
+
+    @property
+    def known_size(self) -> int | None:
+        """Return the length of the labelled dim, exactly where the labels are enumerated.
+
+        Parameters
+        ----------
+        current : int
+            The dim's length before this indexer is applied.
+
+        Returns
+        -------
+        int
+            The sequence's own length for an array or list/tuple of labels; ``current``
+            for a label slice, whose extent is a fact about coordinate values. See the
+            class notes on why no caller should reach that fallback.
+        """
         if isinstance(self.value, np.ndarray):
             return int(self.value.size)
         if isinstance(self.value, (list | tuple)):
             return len(self.value)
-        return current  # a label slice needs coord values to size — leave it unchanged
+        return None
 
     def to_raw(self) -> Any:
         """Return the xarray-facing value: the label payload itself.
