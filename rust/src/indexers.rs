@@ -1,61 +1,96 @@
 use crate::interned_ir::InternedVal;
 use pyo3::prelude::*;
 
-#[derive(FromPyObject)]
-pub struct Scalar{
-    value: i64,
-    drops_dims: bool,
-    position: Option<i64>
+trait GenericIndex {
+    fn size(&self) -> Option<i64>;
 }
 
-#[derive(FromPyObject)]
+#[derive(FromPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct ForwardSlice{
     start: Option<i64>,
     stop: Option<i64>,
     step: Option<i64>,
 }
 
-#[derive(FromPyObject, Clone)]
+
+impl GenericIndex for ForwardSlice {
+    fn size(&self) -> Option<i64> {
+        match (self.start, self.stop, self.step) {
+            // range(start, stop, step)
+            (Some(start), Some(stop), Some(step)) => {
+                if step == 0 {
+                    None
+                } else if step > 0 {
+                    Some((stop - start + step - 1) / step)
+                } else {
+                    Some((start - stop - step - 1) / (-step))
+                }
+            },
+            // range(start, stop)
+            (Some(start), Some(stop), None) => {
+                if stop >= start {
+                    Some(stop - start)
+                } else {
+                    None
+                }
+            },
+            // range(stop) 
+            (None, Some(stop), None) => Some(stop),
+            // Can't determine
+            _ => None,
+        }
+    }
+}
+
+#[derive(FromPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
+pub struct Scalar{
+    value: i64,
+    drops_dim: bool,
+    position: Option<i64>
+}
+
+
+#[derive(FromPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Slice {
     start: Option<i64>,
     stop: Option<i64>,
     step: Option<i64>,
 }
 
-#[derive(FromPyObject)]
+#[derive(FromPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct GeneralSlice{
     value: Slice
 }
 
-#[derive(FromPyObject)]
+#[derive(FromPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Positions{
     values: Vec<i64>
 }
 
-#[derive(FromPyObject)]
+#[derive(FromPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Mask{
     values: Vec<bool>
 }
 
-#[derive(FromPyObject)]
+#[derive(FromPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Label{
     value: InternedVal
 }
 
-#[derive(FromPyObject)]
+#[derive(FromPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Advanced{
     dims: Vec<InternedVal>
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Indexer {
-    Scalar,
-    ForwardSlice,
-    GeneralSlice,
-    Positions,
-    Mask,
-    Label,
-    Advanced
+    Scalar(Scalar),
+    ForwardSlice(ForwardSlice),
+    GeneralSlice(GeneralSlice),
+    Positions(Positions),
+    Mask(Mask),
+    Label(Label),
+    Advanced(Advanced),
 }
 
 impl FromPyObject<'_, '_> for Indexer {
