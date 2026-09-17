@@ -165,7 +165,6 @@ class ForwardSlice(GenericIndex):
         int
             The number of positions the slice selects.
         """
-        breakpoint()
         return len(range(*self.to_raw().indices(current)))
 
     def to_raw(self) -> slice:
