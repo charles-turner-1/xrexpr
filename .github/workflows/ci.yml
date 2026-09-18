@@ -76,3 +76,20 @@ jobs:
         with:
           token: ${{ secrets.codecov_token }}
           files: ./coverage.xml
+
+  test-rs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4.2.2
+
+      # test-nonumbagg is the leanest env carrying the test feature (where test-rs lives);
+      # the Rust tests need only the toolchain and libpython, neither numbagg nor dev tooling.
+      - name: Setup pixi environment
+        uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          environments: test-nonumbagg
+          frozen: true
+
+      - name: Run the Rust unit tests
+        run: pixi run test-rs
