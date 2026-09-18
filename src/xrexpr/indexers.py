@@ -363,11 +363,26 @@ class Label(GenericIndex):
             for a label slice, whose extent is a fact about coordinate values. See the
             class notes on why no caller should reach that fallback.
         """
+        ks = self.known_size
+        return (
+            ks if ks is not None else current
+        )  # a label slice needs coord values to size — leave it unchanged
+
+    @property
+    def known_size(self) -> int | None:
+        """Return the length of the labelled dim, exactly where the labels are enumerated.
+
+        Returns
+        -------
+        int | None
+            The sequence's own length for an array or list/tuple of labels; None otherwise.
+            See the class notes on why no caller should reach that fallback.
+        """
         if isinstance(self.value, np.ndarray):
             return int(self.value.size)
         if isinstance(self.value, (list | tuple)):
             return len(self.value)
-        return current  # a label slice needs coord values to size — leave it unchanged
+        return None
 
     def to_raw(self) -> Any:
         """Return the xarray-facing value: the label payload itself.

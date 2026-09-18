@@ -14,7 +14,7 @@ the plan for what comes after them.)*
 - [x] W5 — Elementwise + its cross rules
 - [x] W6 — Scan gains its dims
 - [~] W7 — small wins (§1, §2, §3, §5, §9, §10 done — the rule strand complete; §9/#117 modelled `keepdims`)
-- [ ] W8 — PyO3 spike (now ungated; unscheduled)
+- [→] W8 — Rust port **committed** (2026-08-28, reverses the gate) — see the foot checkpoint and [`08-rust-gate.md`](./08-rust-gate.md)
 - [x] W10 — documentation site
 
 ## Where the codebase stands
@@ -540,3 +540,37 @@ property checks the kept-at-1 dims exactly; the builder-closer refusal is pinned
 Still open: the "schema lies" items **#162** and, tracked as an *optimisation* now rather
 than a bug, **#166** (#60's vectorized-modelling half — #60 itself closed, correctness having
 shipped in #159); and **W8** (#106). Deferred by design: #91, #107.
+
+## Checkpoint — W8 committed (2026-08-28)
+
+This one **is** a revision, not a status entry: it reverses a decision above. Every earlier
+line that calls W8 "ungated, unscheduled," "a spike rather than a commitment," or lists
+**#106** under "deferred by design" is **superseded here** — those were true when written and
+are kept for the record, but the current state is the one below.
+
+**The Rust port is committed.** xrexpr becomes a native Rust/Python package: the optimiser
+core moves to a PyO3 crate, maturin becomes the build backend, and the pure-Python optimiser
+is retained only as a differential oracle. This is a maintainer decision — not a new speed
+case (the ledger is unchanged: `optimize` runs once per `collect()` over ~10-node plans). Its
+three grounds and the full plan are in [`08-rust-gate.md`](./08-rust-gate.md), rewritten the
+same day; in brief:
+
+- **The gate conditions were all met** — W4 and W2 phase 1 landed with the structural
+  programme, and prerequisite 3 (a contributor to own `cargo`/`maturin`) is now satisfied by
+  the maintainer, for whom building a native package is an explicit goal. So the gate is being
+  *opened*, not overridden.
+- **The fallback clause is withdrawn.** No pure-Python wheel, no `XREXPR_RUST` opt-in; the
+  extension is mandatory, distributed as prebuilt wheels for the three
+  `[tool.pixi.workspace]` platforms with an sdist fallback that compiles.
+- **The seam does not move.** record (`to_opnode`) and replay (`_replay`) stay Python; only
+  `optimize` and the IR types it reasons over cross to Rust. The differential property test
+  (`optimize_rs == optimize_py`, node-for-node, error parity) is the one hard gate on
+  faithfulness and matters more now that no Python fallback ships.
+
+Three migration decisions the reversal surfaces are tracked in `08`: versioneer vs. maturin's
+version source, the now-absent non-string-dim-key fallback, and whether the Python optimiser
+is deleted or kept in `tests/` as the oracle. The accepted costs (a permanent wheel matrix, a
+compiler in the dev/CI loop, loss of the compiler-free install) are recorded there too.
+
+Still open, unchanged by this: the "schema lies" items **#162** and **#166**. Deferred by
+design: **#91** (GroupedMap), **#107** (weighted-select rule).

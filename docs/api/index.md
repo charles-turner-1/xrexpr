@@ -79,7 +79,6 @@ dim*, deliberately distinct from `None`, which means *unknown*.
    AllDims
    ALL_DIMS
    ContextOpenName
-   frozendict
 ```
 
 ## Recognising a call

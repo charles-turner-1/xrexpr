@@ -1,0 +1,15 @@
+[package]
+name = "xrexprs"
+version = "0.1.0"
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "_xrexprs"       # Module name - needs to match what we have in pyproject.toml and also cargo.toml
+crate-type = ["cdylib"]
+
+[dependencies]
+# abi3-py310 builds against the stable ABI with a 3.10 floor (matches requires-python),
+# so one wheel per platform covers every supported CPython. extension-module keeps pyo3
+# from linking libpython, which is required for an importable extension.
+pyo3 = { version = "0.29.0", features = ["abi3-py310", "extension-module"] }

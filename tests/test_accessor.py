@@ -147,7 +147,8 @@ def test_recording_holds_no_schema_and_the_optimiser_folds_it(ds):
     chain = ds.plan.mean("lat").isel(time=0)
     assert not hasattr(chain, "_schema")
 
-    entering = _schemas(chain._ops, chain._base_schema())
+    base = chain._base_schema()
+    entering = _schemas(chain._ops, base)
     assert [dict(s.sizes) for s in entering] == [
         {"time": 4, "lat": 3, "lon": 5},  # what mean("lat") sees
         {"time": 4, "lon": 5},  # what isel(time=0) sees

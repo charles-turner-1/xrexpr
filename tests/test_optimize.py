@@ -21,6 +21,7 @@ import pytest
 import xarray as xr
 from frozendict import frozendict
 
+from xrexpr._xrexprs.ir import ALL_DIMS
 from xrexpr.chunks import NoChange, SingleSize
 from xrexpr.exceptions import InvalidExpressionError
 from xrexpr.indexers import classify

@@ -48,6 +48,8 @@ class _PyOnly: ...
 # rust version of the optimiser.
 PyOnly = Annotated[T, _PyOnly]
 
+# Mirror the Rust Enum DimSet for readability.
+DimSet = frozenset[InternedVal] | AllDims
 
 __all__ = [
     "InternedContextOpen",
@@ -76,7 +78,7 @@ class InternedReduce:
     """Interned :class:`~xrexpr.ir.Reduce` — ``consumes`` relabeled, ``keepdims`` materialized."""
 
     name: str
-    consumes: frozenset[InternedVal] | AllDims = frozenset()
+    consumes: DimSet = frozenset()
     keepdims: bool = False
     args: PyOnly[tuple[Any, ...]] = ()
     kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
@@ -97,7 +99,7 @@ class InternedScan:
     """Interned :class:`~xrexpr.ir.Scan` — ``dims`` relabeled, ``AllDims`` preserved."""
 
     name: Literal["cumsum", "cumprod", "diff"]
-    dims: frozenset[InternedVal] | AllDims = frozenset()
+    dims: DimSet = frozenset()
     args: PyOnly[tuple[Any, ...]] = ()
     kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
 
@@ -211,7 +213,7 @@ class InternedWeightedReduce:
     name: Literal["weighted"]
     reduce: str
     weight_dims: frozenset[InternedVal] = frozenset()
-    consumes: frozenset[InternedVal] | AllDims = frozenset()
+    consumes: DimSet = frozenset()
     args: PyOnly[tuple[Any, ...]] = ()
     kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
     reduce_args: PyOnly[tuple[Any, ...]] = ()
