@@ -19,20 +19,9 @@ from xarray.testing import assert_equal
 import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
 from xrexpr.accessor import _EAGER_ATTRS, Explanation, LazyProxy
 from xrexpr.exceptions import InvalidExpressionError
-from xrexpr.ir import (
-    ALL_DIMS,
-    ContextOpen,
-    Drop,
-    Elementwise,
-    GroupedReduce,
-    Opaque,
-    Project,
-    Reduce,
-    Rename,
-    Select,
-    WeightedReduce,
-    WindowedReduce,
-)
+from xrexpr.ir import (ALL_DIMS, ContextOpen, Drop, Elementwise, GroupedReduce,
+                       Opaque, Project, Reduce, Rename, Select, WeightedReduce,
+                       WindowedReduce)
 from xrexpr.lower import emit
 from xrexpr.optimize import _schemas, optimize
 from xrexpr.schema import SchemaState
@@ -147,7 +136,8 @@ def test_recording_holds_no_schema_and_the_optimiser_folds_it(ds):
     chain = ds.plan.mean("lat").isel(time=0)
     assert not hasattr(chain, "_schema")
 
-    entering = _schemas(chain._ops, chain._base_schema())
+    base = chain._base_schema()
+    entering = _schemas(chain._ops, base)
     assert [dict(s.sizes) for s in entering] == [
         {"time": 4, "lat": 3, "lon": 5},  # what mean("lat") sees
         {"time": 4, "lon": 5},  # what isel(time=0) sees

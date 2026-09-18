@@ -26,7 +26,7 @@ from typing import Any, Literal
 
 from frozendict import frozendict
 
-from xrexpr._xrexprs.ir import ALL_DIMS, AllDims, Reduce
+from xrexpr._xrexprs.ir import ALL_DIMS, AllDims
 from xrexpr.chunks import ChunkSpec, classify_chunk
 from xrexpr.indexers import Indexer, classify
 
