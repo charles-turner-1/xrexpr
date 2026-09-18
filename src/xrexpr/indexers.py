@@ -372,17 +372,11 @@ class Label(GenericIndex):
     def known_size(self) -> int | None:
         """Return the length of the labelled dim, exactly where the labels are enumerated.
 
-        Parameters
-        ----------
-        current : int
-            The dim's length before this indexer is applied.
-
         Returns
         -------
-        int
-            The sequence's own length for an array or list/tuple of labels; ``current``
-            for a label slice, whose extent is a fact about coordinate values. See the
-            class notes on why no caller should reach that fallback.
+        int | None
+            The sequence's own length for an array or list/tuple of labels; None otherwise.
+            See the class notes on why no caller should reach that fallback.
         """
         if isinstance(self.value, np.ndarray):
             return int(self.value.size)

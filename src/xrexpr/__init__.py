@@ -7,8 +7,9 @@ point and ``xrexpr.optimize`` for the rewrite rules.
 """
 
 from . import _version
-from . import \
-    accessor as accessor  # registers the ``.plan`` accessor on both types
+from . import accessor as accessor
+
+# registers the ``.plan`` accessor on both types. `as` bit to shut up flake8 about unused import, since the accessor is registered on import
 from .exceptions import InvalidExpressionError
 
 __all__ = ["InvalidExpressionError"]

@@ -19,9 +19,20 @@ from xarray.testing import assert_equal
 import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
 from xrexpr.accessor import _EAGER_ATTRS, Explanation, LazyProxy
 from xrexpr.exceptions import InvalidExpressionError
-from xrexpr.ir import (ALL_DIMS, ContextOpen, Drop, Elementwise, GroupedReduce,
-                       Opaque, Project, Reduce, Rename, Select, WeightedReduce,
-                       WindowedReduce)
+from xrexpr.ir import (
+    ALL_DIMS,
+    ContextOpen,
+    Drop,
+    Elementwise,
+    GroupedReduce,
+    Opaque,
+    Project,
+    Reduce,
+    Rename,
+    Select,
+    WeightedReduce,
+    WindowedReduce,
+)
 from xrexpr.lower import emit
 from xrexpr.optimize import _schemas, optimize
 from xrexpr.schema import SchemaState

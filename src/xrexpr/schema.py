@@ -32,15 +32,37 @@ from typing_extensions import assert_never
 from xrexpr._xrexprs.ir import ALL_DIMS, AllDims
 from xrexpr.indexers import Advanced, Indexer, classify
 from xrexpr.intern import InternedVal, Interner
-from xrexpr.ir import (ContextOpen, DimSet, Drop, Elementwise, FluentOp,
-                       GroupedReduce, LoweredOp, Opaque, Project, Rechunk,
-                       Reduce, Rename, Scan, Select, WeightedReduce,
-                       WindowedReduce)
+from xrexpr.ir import (
+    ContextOpen,
+    DimSet,
+    Drop,
+    Elementwise,
+    FluentOp,
+    GroupedReduce,
+    LoweredOp,
+    Opaque,
+    Project,
+    Rechunk,
+    Reduce,
+    Rename,
+    Scan,
+    Select,
+    WeightedReduce,
+    WindowedReduce,
+)
 from xrexpr.operations import CHUNK_OPTION_KWARGS as _CHUNK_OPTION_KWARGS
 from xrexpr.operations import SELECT_OPTION_KWARGS as _SELECT_OPTION_KWARGS
-from xrexpr.operations import (ContextSpec, DropSpec, ElementwiseSpec,
-                               ProjectSpec, RechunkSpec, ReduceSpec,
-                               RenameSpec, ScanSpec, SelectSpec)
+from xrexpr.operations import (
+    ContextSpec,
+    DropSpec,
+    ElementwiseSpec,
+    ProjectSpec,
+    RechunkSpec,
+    ReduceSpec,
+    RenameSpec,
+    ScanSpec,
+    SelectSpec,
+)
 from xrexpr.operations import spec as op_spec
 
 __all__ = ["SchemaState", "apply_schema", "resolve_dims", "to_opnode"]
