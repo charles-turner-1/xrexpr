@@ -188,6 +188,8 @@ packaging = "*"
 typing_extensions = "*"
 versioneer = ">=0.29,<0.30"
 maturin = ">=1.15.0,<2"
+# edition = "2024" in rust/Cargo.toml needs a recent toolchain.
+rust = ">=1.85"
 
 [tool.pixi.pypi-dependencies]
 xrexpr = { editable = true, path = "." }
@@ -220,6 +222,11 @@ numbagg = "*"
 [tool.pixi.feature.test.tasks]
 test = { cmd = "pytest tests", description = "Run tests" }
 test-cov = { cmd = "coverage run -m --source=xrexpr pytest tests && coverage xml", description = "Run tests with coverage and generate xml report" }
+# --no-default-features drops extension-module so the test binary links libpython (see the
+# [features] comment in rust/Cargo.toml); the rpath then points the loader at the env's
+# libpython at run time -- $CONDA_PREFIX/lib is where pixi's python keeps it, and -Wl,-rpath
+# is understood by both the macOS and Linux linkers.
+test-rs = { cmd = "RUSTFLAGS=\"-C link-arg=-Wl,-rpath,$CONDA_PREFIX/lib\" cargo test --manifest-path rust/Cargo.toml --no-default-features", description = "Run the Rust unit tests" }
 
 [tool.pixi.feature.dev.dependencies]
 pre-commit = ">=4.2.0,<5"
