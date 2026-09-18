@@ -51,7 +51,6 @@ __all__ = [
     "Select",
     "WeightedReduce",
     "WindowedReduce",
-    "frozendict",
 ]
 
 

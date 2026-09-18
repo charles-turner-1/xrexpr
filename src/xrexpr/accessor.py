@@ -25,9 +25,10 @@ from functools import wraps
 from typing import Any
 
 import xarray as xr
+from frozendict import frozendict
 
 from xrexpr.explain import format_plan
-from xrexpr.ir import ContextOpen, FluentOp, LoweredOp, Opaque, Project, frozendict
+from xrexpr.ir import ContextOpen, FluentOp, LoweredOp, Opaque, Project
 from xrexpr.lower import Call, emit, to_lower_ir
 from xrexpr.optimize import optimize
 from xrexpr.schema import SchemaState, to_opnode
