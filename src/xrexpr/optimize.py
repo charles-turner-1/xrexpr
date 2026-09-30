@@ -25,7 +25,9 @@ from collections.abc import Callable, Hashable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Literal, TypeGuard
 
+import xarray as xr
 from frozendict import frozendict
+from packaging.version import Version
 from typing_extensions import assert_never
 
 from xrexpr._xrexprs.ir import ALL_DIMS, AllDims
@@ -69,6 +71,11 @@ from xrexpr.ir import (
 from xrexpr.schema import SchemaState, apply_schema, resolve_dims
 
 __all__ = ["optimize"]
+
+#: ``xarray`` 2026.09.0 works around dask's divide-by-zero failure when a rechunk
+#: containing ``"auto"`` sees an empty dimension (pydata/xarray#11486).  Older
+#: versions must keep the original rechunk-before-select order.
+AUTOCHUNK_EMPTY_DIMS_SAFE = Version(xr.__version__) >= Version("2026.9.0")
 
 #: What the rules rewrite — a **lowered** plan. Spelled with
 #: :data:`~xrexpr.ir.LoweredOp` rather than :data:`~xrexpr.ir.Op` because that is the
@@ -1249,12 +1256,12 @@ def pushdown_selects_past_rechunks(
       the stated purpose rather than a leftover.
 
     What the rule does **not** do is repair a spec it moved past. The specs that would need
-    repairing — ``"auto"`` and a byte target, whose meaning changes with the extent — are
-    refused by ``_pushable_rechunk`` instead, because measurement says no repair exists:
-    naming the emptied dim ``"auto"``, xarray's own fix in `pydata/xarray#11486
-    <https://github.com/pydata/xarray/pull/11486>`_, does not help, since dask's
-    ``auto_chunks`` pins a zero-length auto dim to ``(0,)`` and *recurses*, and on the second
-    pass it is no longer ``"auto"``. See :class:`~xrexpr.chunks.Auto`.
+    repairing — a byte target and every non-empty ``"auto"`` selection, whose meaning
+    changes with the extent — are refused by ``_pushable_rechunk``. The one narrow exception
+    is a select that the recorded positional indexer proves empty: xarray 2026.09.0's
+    `pydata/xarray#11486 <https://github.com/pydata/xarray/pull/11486>`_ replaces the auto
+    request with the full zero-byte shape before dask sees it. See
+    :func:`_empty_autochunk_is_pushable`.
 
     Unlike :func:`pushdown_selects` this never raises: a rechunk cannot make a select
     unreplayable, only slower. One hop per call.
@@ -1263,7 +1270,7 @@ def pushdown_selects_past_rechunks(
         match nodes[i], nodes[i + 1]:
             case (Rechunk() as rechunk, Select() as select) if _pushable_rechunk(
                 rechunk
-            ):
+            ) or _empty_autochunk_is_pushable(rechunk, select):
                 kept = {
                     dim: spec
                     for dim, spec in rechunk.chunks.items()
@@ -1280,6 +1287,56 @@ def pushdown_selects_past_rechunks(
                     moved = [select]
                 return list(nodes[:i]) + moved + list(nodes[i + 2 :])
     return None
+
+
+def _empty_autochunk_is_pushable(rechunk: Rechunk, select: Select) -> bool:
+    """Report whether xarray can safely rechunk an array the select definitely empties.
+
+    ``"auto"`` normally barriers because it is resolved from the extent of the array it
+    receives.  A select that is *provably empty* is the one useful exception: xarray
+    2026.09.0 and later replace auto chunks with the full zero-byte shape before dask can
+    divide by zero (pydata/xarray#11486).  This deliberately does not admit byte targets
+    or explicit block sequences, whose replay still depends on the pre-select extent.
+    """
+    if not AUTOCHUNK_EMPTY_DIMS_SAFE or not _select_provably_empties(select):
+        return False
+    if any(key not in rechunk.chunks for key in rechunk.kwargs):
+        return False
+
+    specs: list[ChunkSpec] = list(rechunk.chunks.values())
+    if rechunk.uniform is not None:
+        specs.append(rechunk.uniform)
+
+    has_auto = False
+    for spec in specs:
+        match spec:
+            case Auto():
+                has_auto = True
+            case SingleSize() | FullDim() | NoChange():
+                continue
+            case BlockSeq() | ByteSize() | OpaqueChunk():
+                return False
+            case _:
+                assert_never(spec)
+    return has_auto
+
+
+def _select_provably_empties(select: Select) -> bool:
+    """Report whether one positional indexer leaves its dimension with zero elements.
+
+    This reads only the recorded indexer, never source data or a schema extent.  Empty
+    positional lists, all-false masks, and forward slices ending at zero are empty for
+    every input length.  Other indexers remain conservative.
+    """
+    for indexer in select.indexer.values():
+        match indexer:
+            case Positions(values=()):
+                return True
+            case Mask(values=values) if not any(values):
+                return True
+            case ForwardSlice(stop=0):
+                return True
+    return False
 
 
 def _pushable_rechunk(node: Rechunk) -> bool:
@@ -1316,9 +1373,11 @@ def _pushable_rechunk(node: Rechunk) -> bool:
       length, so a select in front leaves a spec that cannot replay at all; ``"auto"`` and a
       byte target are resolved by *dividing* a byte budget by the array's own extent, so a
       select in front changes what they mean — and if it empties a dim, into a
-      ``ZeroDivisionError`` where the eager chain succeeds (issue #121, and the notes on
-      :class:`~xrexpr.chunks.Auto`). Someone writing either is already reasoning about
-      chunking against the data as it stands, so nothing crosses such a call, scalar selects
+      ``ZeroDivisionError`` where the eager chain succeeds on xarray before 2026.09.0
+      (issue #121, and the notes on :class:`~xrexpr.chunks.Auto`). The separate
+      :func:`_empty_autochunk_is_pushable` admits only the corresponding fixed-version,
+      provably-empty auto case. Someone writing either is already reasoning about chunking
+      against the data as it stands, so nothing else crosses such a call, scalar selects
       included.
     - **extent-independent** specs cross. A fixed size is that size on any array, ``-1`` is
       one block whatever its length, and ``None`` keeps whatever is there. None of the three
