@@ -92,4 +92,4 @@ jobs:
           frozen: true
 
       - name: Run the Rust unit tests
-        run: pixi run test-rs
+        run: pixi run -e test-nonumbagg test-rs
