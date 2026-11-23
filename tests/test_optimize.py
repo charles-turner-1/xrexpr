@@ -27,7 +27,7 @@ from xrexpr.exceptions import InvalidExpressionError
 from xrexpr.indexers import classify
 from xrexpr.ir import ALL_DIMS, GroupedReduce, WeightedReduce, WindowedReduce
 from xrexpr.lower import Call, emit
-from xrexpr.optimize import dim_effect, optimize
+from xrexpr.optimize import AUTOCHUNK_EMPTY_DIMS_SAFE, dim_effect, optimize
 from xrexpr.schema import SchemaState, to_opnode
 
 
@@ -1029,6 +1029,18 @@ def test_extent_dependent_uniform_rechunk_forms_are_barriers(schema):
     for arg in ("auto", "10MB", (100, 400, 500)):
         plan = [_node("chunk", arg), _node("isel", time=0)]
         assert [n.name for n in optimize(plan, schema)] == ["chunk", "isel"]
+
+
+def test_an_emptying_select_can_cross_an_auto_rechunk_after_xarray_fix(schema):
+    """The 2026.09.0 gate permits only a select that provably empties an auto rechunk.
+
+    ``[]`` is an exact empty positional indexer without consulting the source shape. Other
+    extent-dependent specs and non-emptying selects remain barriers; the accessor suite
+    verifies both the eager replay and the uniform ``chunk("auto")`` spelling.
+    """
+    plan = [_node("chunk", {"time": "auto"}), _node("isel", lat=[])]
+    expected = ["isel", "chunk"] if AUTOCHUNK_EMPTY_DIMS_SAFE else ["chunk", "isel"]
+    assert [node.name for node in optimize(plan, schema)] == expected
 
 
 def test_a_uniform_float_size_is_an_opaque_barrier(schema):

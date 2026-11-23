@@ -34,7 +34,7 @@ from xrexpr.ir import (
     WindowedReduce,
 )
 from xrexpr.lower import emit
-from xrexpr.optimize import _schemas, optimize
+from xrexpr.optimize import AUTOCHUNK_EMPTY_DIMS_SAFE, _schemas, optimize
 from xrexpr.schema import SchemaState
 
 #: xrexpr itself never needs dask, but replaying a ``chunk()`` call does -- without a
@@ -853,58 +853,57 @@ def test_unparseable_byte_target_fails_exactly_as_eager_does(chunky_ds):
 
 
 @requires_dask
-def test_an_emptying_select_does_not_cross_an_auto_rechunk(chunky_ds):
-    """A select that empties a dim stays behind an ``"auto"`` rechunk, and the chain matches eager.
+def test_an_emptying_select_crosses_an_auto_rechunk_when_xarray_supports_it(chunky_ds):
+    """An emptying select crosses an ``"auto"`` rechunk only with xarray's zero-dim fix.
 
     Notes
     -----
-    Issue #121, end to end. ``isel(lat=[])`` keeps ``lat`` at length 0. Eagerly the rechunk
-    runs first, on data that is still full, and only then is the dim emptied; hoisted, it
-    would be handed a zero-size array and asked to size ``time``'s blocks against it —
-    ``ZeroDivisionError`` where the eager chain succeeds.
-
-    Both halves matter. Replaying equal to eager says the plan runs at all; the order
-    assertion says it runs because the rule *refused the hop*, not because dask happened to
-    tolerate it. The refusal is not specific to an emptying select — every select is
-    refused, because ``"auto"`` is extent-dependent — which
-    :func:`test_a_harmless_select_also_stays_behind_an_auto_rechunk` pins from the other
-    side.
+    ``isel(lat=[])`` keeps ``lat`` at length 0. Before xarray 2026.09.0, hoisting it hands
+    the auto rechunk a zero-size array and dask raises ``ZeroDivisionError``. xarray's
+    pydata/xarray#11486 replaces that auto request with the zero-byte full shape, so the
+    same hop is safe on newer versions. A non-emptying select remains a barrier; see
+    :func:`test_a_harmless_select_also_stays_behind_an_auto_rechunk`.
     """
     ds = chunky_ds
     chain = ds.plan.chunk({"time": "auto"}).isel(lat=[])
 
     assert_equal(chain.collect(), ds.chunk({"time": "auto"}).isel(lat=[]).compute())
     text = chain.explain()
-    assert text.index("chunk") < text.index("isel")
+    if AUTOCHUNK_EMPTY_DIMS_SAFE:
+        assert text.index("isel") < text.index("chunk")
+    else:
+        assert text.index("chunk") < text.index("isel")
 
 
 @requires_dask
-def test_an_emptying_select_does_not_cross_a_uniform_auto_rechunk(chunky_ds):
-    """The same refusal for ``chunk("auto")``, which names no dim — and the crash it prevents.
+def test_an_emptying_select_crosses_a_uniform_auto_rechunk_when_xarray_supports_it(
+    chunky_ds,
+):
+    """The same version-gated exemption applies to the uniform ``chunk("auto")`` spelling.
 
     Notes
     -----
-    ``chunk("auto")`` rides in ``args`` rather than ``chunks``, but it is the same request
-    and carries the same hazard. It only *looks* safe on a small array: ``auto_chunks`` pins
-    every dim below ``limit ** (1 / ndim)`` and returns before it can divide.
-
-    So ``array.chunk-size`` is doing the work a multi-hundred-megabyte fixture otherwise
-    would — at 1 kB this dataset is over the target, and hoisting ``isel(lat=[])`` in front
-    raises where the eager order returns. The setting is load-bearing, not incidental:
-    without it this test passes against a rule that makes the hop, which is what the
-    ``pytest.raises`` below asserts it is not doing.
+    The uniform form rides in ``args`` rather than ``chunks``, but xarray passes it to the
+    same chunk manager. At a 1 kB target an old xarray version raises after the hop; 2026.09.0
+    and later take the same safe full-shape fallback as the mapping form.
     """
     import dask
 
     ds = chunky_ds
     with dask.config.set({"array.chunk-size": "1kB"}):
-        with pytest.raises(ZeroDivisionError):  # the divergence, if the hop were made
-            ds.isel(lat=[]).chunk("auto")
+        if AUTOCHUNK_EMPTY_DIMS_SAFE:
+            assert ds.isel(lat=[]).chunk("auto").chunks["lat"] == (0,)
+        else:
+            with pytest.raises(ZeroDivisionError):
+                ds.isel(lat=[]).chunk("auto")
 
         chain = ds.plan.chunk("auto").isel(lat=[])
         assert_equal(chain.collect(), ds.chunk("auto").isel(lat=[]).compute())
         text = chain.explain()
-        assert text.index("chunk") < text.index("isel")
+        if AUTOCHUNK_EMPTY_DIMS_SAFE:
+            assert text.index("isel") < text.index("chunk")
+        else:
+            assert text.index("chunk") < text.index("isel")
 
 
 @requires_dask

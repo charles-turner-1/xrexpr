@@ -94,6 +94,8 @@ from xrexpr.lower import Call as Lowered
 from xrexpr.lower import emit, to_lower_ir
 from xrexpr.operations import CONTEXT_METHODS, OP_TABLE, ReduceSpec, ScanSpec
 from xrexpr.optimize import (
+    AUTOCHUNK_EMPTY_DIMS_SAFE,
+    _empty_autochunk_is_pushable,
     eliminate_projection_before_coord,
     optimize,
     push_projection_past_drop,
@@ -756,7 +758,8 @@ def _dim_chunk_specs(n):
     Parameters
     ----------
     n : int
-        The dim's current length, which is at least 1 — see :func:`_rechunks`.
+        The dim's current length. A zero-length dim permits only symbolic forms: explicit
+        positive block sizes and block sequences cannot describe it.
 
     Returns
     -------
@@ -764,6 +767,8 @@ def _dim_chunk_specs(n):
         A strategy over raw specs covering each modelled variant: a block size, the two
         symbolic forms, and an explicit sequence of block lengths.
     """
+    if n == 0:
+        return st.sampled_from([-1, None, "auto"])
     return st.one_of(
         st.sampled_from([-1, None, "auto"]),
         st.integers(min_value=1, max_value=n),
@@ -779,10 +784,9 @@ def _rechunks(draw, obj):
     ----------
     obj : xr.Dataset
         The dataset the call will be applied to, drawn against its *current* sizes. Every
-        dim is non-empty — the caller checks, because dask's auto-chunking divides by the
-        largest block and so raises ``ZeroDivisionError`` on an array with a zero-length
-        dim. Empty selections are generated on purpose here, so that combination has to be
-        avoided rather than assumed away.
+        dim may be empty on xarray 2026.09.0 and later. That version works around dask's
+        auto-chunking divide-by-zero for a zero-length dimension; older xarray versions
+        keep the historical exclusion in :func:`_calls`.
 
     Returns
     -------
@@ -856,8 +860,8 @@ def _calls(draw, ds, max_ops=4, builders=False):
         kind = draw(st.sampled_from(AFTER_CHUNK if chunked else kinds))
 
         if kind == "chunk":
-            if not all(current.sizes.values()):
-                continue  # an empty dim: dask cannot auto-chunk it -- see ``_rechunks``
+            if not AUTOCHUNK_EMPTY_DIMS_SAFE and not all(current.sizes.values()):
+                continue  # xarray before 2026.09.0 cannot auto-chunk an empty dim
             call = draw(_rechunks(current))
             current = _apply(current, [call])
             calls.append(call)
@@ -1271,7 +1275,7 @@ def test_optimised_plan_matches_eager_evaluation_under_a_tiny_chunk_target(case)
 @SETTINGS
 @given(any_plans())
 def test_no_rule_moves_a_select_in_front_of_an_extent_sized_rechunk(case):
-    """No rule moves a select from *after* an extent-dependent rechunk to *before* it.
+    """No rule moves a select before an extent-dependent rechunk, except xarray's safe empty-auto case.
 
     Notes
     -----
@@ -1289,6 +1293,11 @@ def test_no_rule_moves_a_select_in_front_of_an_extent_sized_rechunk(case):
     leaves a chain the user wrote that way alone, since replaying it faithfully means
     chunking exactly what they asked to chunk.
 
+    xarray 2026.09.0 is one deliberately narrow exception: a provably empty positional
+    select may cross an otherwise-auto-only rechunk, because pydata/xarray#11486 replaces
+    the unsafe dask auto request with the full zero-byte shape. The policy helper excludes
+    precisely that pair from both counts.
+
     ``<=`` rather than ``==`` because merging is free to shrink the count:
     ``merge_adjacent_selects`` folds two selects into one, and a select spent entirely on a
     dropped dim disappears.
@@ -1298,15 +1307,16 @@ def test_no_rule_moves_a_select_in_front_of_an_extent_sized_rechunk(case):
 
     def crossings(nodes):
         rechunks = [
-            i
+            (i, n)
             for i, n in enumerate(nodes)
             if isinstance(n, Rechunk) and _extent_sized(n)
         ]
         return sum(
-            i < j
+            i < j and not _empty_autochunk_is_pushable(rechunk, select)
             for i, n in enumerate(nodes)
             if isinstance(n, Select)
-            for j in rechunks
+            for j, rechunk in rechunks
+            for select in (n,)
         )
 
     event(
