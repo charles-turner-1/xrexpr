@@ -73,6 +73,19 @@ __all__ = ["SchemaState", "apply_schema", "resolve_dims", "to_opnode"]
 #: *exact* on every supported version rather than modelling only the fixed behaviour.
 SCAN_DROPS_SCANNED_COORDS = Version(xr.__version__) < Version("2026.4.0")
 
+#: ``Dataset.weighted(...).<reduction>`` kept only the coordinates some *data variable*
+#: carried before pydata/xarray#11562 (issue #11560): it ran ``Dataset.map`` and rebuilt
+#: the coordinates from the per-variable results, so a coordinate no data variable spans
+#: (``time`` once ``drop_vars`` removes the last ``time``-carrying variable, or an aux
+#: ``region(lat)`` next to only ``temperature(time)``) was dropped, and a dim left with
+#: nothing but that coordinate went with it. The fix restores every coordinate the
+#: reduction does not touch, matching a plain reduce. Gated on ``2026.9.1.dev86``, the
+#: version setuptools-scm gives the merge commit (``dev85`` still drops), so builds from
+#: ``main`` are modelled exactly too and the gate needs no edit at the next release,
+#: whatever it is called. The ``WeightedReduce`` arm of :func:`apply_schema` reproduces
+#: the old behaviour on older versions, as ``SCAN_DROPS_SCANNED_COORDS`` does for scans.
+WEIGHTED_DROPS_UNCARRIED_COORDS = Version(xr.__version__) < Version("2026.9.1.dev86")
+
 T = TypeVar("T", bound=Hashable)
 
 
@@ -448,7 +461,10 @@ def apply_schema(
     - :class:`~xrexpr.ir.WeightedReduce` aggregates over its ``consumes`` like a plain
       reduce, then mints every surviving weight dim onto each **variable** that lacks it
       and marks every weight dim's extent unknown — the weights broadcast in the dims a
-      variable lacks and align (so possibly *shrink*) the ones it shares;
+      variable lacks and align (so possibly *shrink*) the ones it shares. On xarray before
+      pydata/xarray#11562 (:data:`WEIGHTED_DROPS_UNCARRIED_COORDS`) it first drops every
+      coordinate no data variable spans, the version-gated bug reproduced so the schema
+      stays exact;
     - :class:`~xrexpr.ir.Scan` mostly preserves the schema, with two exceptions: ``diff``
       *shrinks* its dim, and on xarray before 2026.4.0 (:data:`SCAN_DROPS_SCANNED_COORDS`)
       ``cumsum``/``cumprod`` **drop** every coordinate over the scanned dim while keeping
@@ -560,6 +576,13 @@ def apply_schema(
             # *values*, which this layer does not read. ``None`` rather than a guess.
             sizes[grouped.new_dim] = None
         case WeightedReduce() as weighted:
+            if WEIGHTED_DROPS_UNCARRIED_COORDS:
+                # Read off the *entering* schema: ``Dataset.map`` hands each data variable
+                # over as a DataArray carrying the coordinates its own dims span, and the
+                # result's coordinates are rebuilt from those alone. See the constant.
+                uncarried = coord_names - _carried_coords(variables, coord_names)
+                coord_names -= uncarried
+                variables = {k: v for k, v in variables.items() if k not in uncarried}
             match weighted.consumes:
                 case AllDims():
                     # A bare weighted closer, like a bare ``mean()``: the weight dims go too.
@@ -688,6 +711,37 @@ def _aggregated(
         if not (name in coord_names and not over.isdisjoint(var_dims))
     }
     return kept, coord_names & set(kept)
+
+
+def _carried_coords(
+    variables: dict[Hashable, tuple[Hashable, ...]], coord_names: set[Hashable]
+) -> set[Hashable]:
+    """Name the coordinates some data variable carries, as ``ds[name]`` would attach them.
+
+    Parameters
+    ----------
+    variables : dict
+        The schema's variables, name → dims.
+    coord_names : set of Hashable
+        Which of those names are coordinates.
+
+    Returns
+    -------
+    set of Hashable
+        Every coordinate whose dims are a subset of at least one data variable's dims.
+        A 0-d coordinate is carried by any data variable, and by nothing when there are
+        none.
+
+    Notes
+    -----
+    This is the coordinate set ``Dataset.map`` rebuilds its result from, which is what
+    weighted reductions returned before pydata/xarray#11562 (see
+    :data:`WEIGHTED_DROPS_UNCARRIED_COORDS`). Verified against xarray 2026.7.0.
+    """
+    data_dims = [set(d) for n, d in variables.items() if n not in coord_names]
+    return {
+        c for c in coord_names if any(set(variables[c]) <= dims for dims in data_dims)
+    }
 
 
 def _indexed(

@@ -30,6 +30,7 @@ from xrexpr.ir import (
     WeightedReduce,
     WindowedReduce,
 )
+import xrexpr.schema as schema_module
 from xrexpr.schema import SchemaState, apply_schema
 
 
@@ -726,11 +727,127 @@ def test_several_minted_dims_land_in_a_deterministic_order(ds):
 
 
 def test_weighting_an_unknown_size_stays_unknown():
-    """A weight dim whose size was already unknown stays unknown after the fold."""
-    unknown = _dim_coords_only({"time": None, "lat": 3})
+    """A weight dim whose size was already unknown stays unknown after the fold.
+
+    Notes
+    -----
+    ``tas`` carries ``time`` so the dim survives on every xarray: with dim coordinates
+    alone, a pre-pydata/xarray#11562 weighted reduce drops every coordinate (nothing
+    carries them) and ``time`` with them, see
+    :data:`~xrexpr.schema.WEIGHTED_DROPS_UNCARRIED_COORDS`.
+    """
+    unknown = SchemaState(
+        variables={"time": ("time",), "lat": ("lat",), "tas": ("time", "lat")},
+        coord_names=frozenset({"time", "lat"}),
+        sizes={"time": None, "lat": 3},
+    )
     w = xr.DataArray([1.0], dims="time")
     after = apply_schema(unknown, _weighted(frozenset({"lat"}), frozenset({"time"}), w))
     assert after.sizes["time"] is None
+
+
+def _orphaning_cases():
+    """Datasets where a weighted reduce leaves a coordinate no data variable carries.
+
+    Returns
+    -------
+    list of pytest.param
+        ``(ds, weights, consumes, coords_before_fix, coords_after_fix)`` per case, each
+        verified eagerly against xarray 2026.7.0 (before pydata/xarray#11562) and against
+        its merge commit (after).
+    """
+    wt = xr.DataArray([1.0], dims="time")
+    wl = xr.DataArray([1.0, 1.0, 1.0], dims="lat")
+    return [
+        pytest.param(
+            # #193: ``time`` is left with only its index coord after ``drop_vars``
+            xr.Dataset(
+                {"elevation": ("lat", [0.0, 1.0, 2.0])},
+                coords={"time": [0], "lat": [0, 1, 2]},
+            ),
+            wl,
+            frozenset({"lat"}),
+            set(),
+            {"time"},
+            id="orphaned-dim-coord",
+        ),
+        pytest.param(
+            # an aux coord over a dim only the coords span
+            xr.Dataset(
+                {"temperature": ("time", [1.0])},
+                coords={
+                    "time": [0],
+                    "lat": [0, 1, 2],
+                    "region": ("lat", [0.0, 1.0, 2.0]),
+                },
+            ),
+            wt,
+            frozenset({"time"}),
+            set(),
+            {"lat", "region"},
+            id="uncarried-aux-coord",
+        ),
+        pytest.param(
+            # a 0-d coord is carried by any data variable, so it survives in both eras
+            xr.Dataset(
+                {"e": ("lat", [1.0, 2.0, 3.0])},
+                coords={"lat": [0, 1, 2], "s": 5, "time": [0]},
+            ),
+            wl,
+            frozenset({"lat"}),
+            {"s"},
+            {"s", "time"},
+            id="scalar-coord-carried",
+        ),
+        pytest.param(
+            # no data variable: nothing carries anything, the 0-d coord included
+            xr.Dataset(coords={"lat": [0, 1, 2], "s": 5}),
+            wl,
+            ALL_DIMS,
+            set(),
+            {"s"},
+            id="no-data-vars",
+        ),
+    ]
+
+
+@pytest.mark.parametrize("drops", [True, False], ids=["before-fix", "after-fix"])
+@pytest.mark.parametrize("ds, w, consumes, before, after", _orphaning_cases())
+def test_weighted_reduce_models_uncarried_coords_per_xarray_version(
+    monkeypatch, drops, ds, w, consumes, before, after
+):
+    """Before pydata/xarray#11562 a weighted reduce keeps only carried coords; after, all untouched ones.
+
+    Notes
+    -----
+    Both eras are pinned whatever xarray is installed, by flipping
+    :data:`~xrexpr.schema.WEIGHTED_DROPS_UNCARRIED_COORDS`; the eager check below covers
+    the installed version end to end.
+    """
+    monkeypatch.setattr(schema_module, "WEIGHTED_DROPS_UNCARRIED_COORDS", drops)
+    folded = apply_schema(
+        SchemaState.from_dataset(ds), _weighted(consumes, frozenset(w.dims), w)
+    )
+    expected = before if drops else after
+    assert set(folded.coords) == expected
+    # Every data variable ends 0-d in these cases, so the surviving dims are exactly the
+    # surviving coordinates' dims: a dim left spanned by nothing goes with its coordinate.
+    assert set(folded.sizes) == {d for c in expected for d in ds[c].dims}
+
+
+@pytest.mark.parametrize("ds, w, consumes, before, after", _orphaning_cases())
+def test_weighted_reduce_schema_matches_installed_xarray(
+    ds, w, consumes, before, after
+):
+    """The tracked schema agrees with an eager weighted reduce on the installed xarray."""
+    folded = apply_schema(
+        SchemaState.from_dataset(ds), _weighted(consumes, frozenset(w.dims), w)
+    )
+    dims = None if isinstance(consumes, AllDims) else sorted(consumes)
+    real = ds.weighted(w).mean(dim=dims)
+    assert set(folded.coords) == set(real.coords)
+    assert set(folded.sizes) == set(real.sizes)
+    assert set(folded.data_vars) == set(real.data_vars)
 
 
 def test_scan_leaves_schema_unchanged(ds):
