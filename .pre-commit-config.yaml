@@ -40,3 +40,13 @@ repos:
         - xarray
         - numpy
         - frozendict
+
+  - repo: https://github.com/Apakottur/unref-pre-commit
+    rev: v0.5.1
+    hooks:
+    - id: unref
+      # Dead code finder. Checks the whole project on every run (the hook sets
+      # pass_filenames: false), because a definition is unused only if *no* file
+      # references it. The versioneer-generated files are excluded in [tool.unref] in
+      # pyproject.toml. No project environment is needed: the findings are the same with
+      # the pixi env or with the hook's own venv, which is what the CI pre-commit job has.
