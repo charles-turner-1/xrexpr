@@ -1297,6 +1297,20 @@ def _empty_autochunk_is_pushable(rechunk: Rechunk, select: Select) -> bool:
     2026.09.0 and later replace auto chunks with the full zero-byte shape before dask can
     divide by zero (pydata/xarray#11486).  This deliberately does not admit byte targets
     or explicit block sequences, whose replay still depends on the pre-select extent.
+
+    Parameters
+    ----------
+    rechunk : Rechunk
+        The rechunk the select would hop left past.
+    select : Select
+        The select immediately after it.
+
+    Returns
+    -------
+    bool
+        Whether the swap is safe: xarray carries the fix, ``select`` provably empties a
+        dim, and every chunk spec is ``"auto"`` or extent-independent, with at least one
+        ``"auto"``.
     """
     if not AUTOCHUNK_EMPTY_DIMS_SAFE or not _select_provably_empties(select):
         return False
@@ -1327,6 +1341,16 @@ def _select_provably_empties(select: Select) -> bool:
     This reads only the recorded indexer, never source data or a schema extent.  Empty
     positional lists, all-false masks, and forward slices ending at zero are empty for
     every input length.  Other indexers remain conservative.
+
+    Parameters
+    ----------
+    select : Select
+        The select whose recorded indexer to read.
+
+    Returns
+    -------
+    bool
+        Whether some indexer selects zero elements whatever the dimension's length.
     """
     for indexer in select.indexer.values():
         match indexer:
