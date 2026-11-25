@@ -70,8 +70,6 @@ __all__ = [
     "InternedWindowedReduce",
 ]
 
-_V = TypeVar("_V")
-
 
 @dataclass(frozen=True)
 class InternedReduce:
