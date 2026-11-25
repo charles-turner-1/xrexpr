@@ -168,6 +168,93 @@ def test_bare_reduce_records_all_dims_symbolically(ds):
     assert node.args == () and node.kwargs == frozendict()  # replays as bare mean()
 
 
+#: Every way to spell "all dims" with xarray's ``...``, for a reduce and a scan, as
+#: ``(label, chain)`` pairs applied to both the plan and the eager dataset.
+ELLIPSIS_ALL_DIMS_CHAINS = [
+    ("mean(...)", lambda d: d.mean(...)),
+    ("mean(dim=...)", lambda d: d.mean(dim=...)),
+    ("mean(..., keepdims=True)", lambda d: d.mean(..., keepdims=True)),
+    ("reduce(np.mean, ...)", lambda d: d.reduce(np.mean, ...)),
+    ("cumsum(...)", lambda d: d.cumsum(...)),
+    ("cumsum(dim=...)", lambda d: d.cumsum(dim=...)),
+    ("isel(time=0).mean(...)", lambda d: d.isel(time=0).mean(...)),
+    ("cumsum(...).isel(time=0)", lambda d: d.cumsum(...).isel(time=0)),
+    ("project then mean(...)", lambda d: d[["elevation"]].mean(dim=...)),
+]
+
+
+@pytest.mark.parametrize(
+    "chain",
+    [c for _, c in ELLIPSIS_ALL_DIMS_CHAINS],
+    ids=[i for i, _ in ELLIPSIS_ALL_DIMS_CHAINS],
+)
+def test_ellipsis_dim_reduces_over_every_dim_and_matches_eager(ds, chain):
+    """A bare ``...`` dim spec means every dim, as in xarray, and replays equal.
+
+    Notes
+    -----
+    Before the fix ``...`` parsed as a dim *named* ``Ellipsis``, so the plan replayed a
+    reduce over nothing: ``ds.plan.mean(...)`` came back with every dim intact.
+    """
+    assert_equal(chain(ds.plan).collect(), chain(ds))
+
+
+@pytest.mark.parametrize("spelling", ["positional", "kwarg"])
+@pytest.mark.parametrize("method", ["mean", "cumsum"])
+def test_ellipsis_dim_records_all_dims_symbolically(ds, method, spelling):
+    """``...`` records the same ``ALL_DIMS`` sentinel as a bare call, and replays bare."""
+    proxy = getattr(ds.plan, method)
+    node = (proxy(...) if spelling == "positional" else proxy(dim=...))._ops[0]
+    dims = node.consumes if method == "mean" else node.dims
+    assert dims is ALL_DIMS
+    assert emit([node])[0].args == () and emit([node])[0].kwargs == frozendict()
+
+
+def test_ellipsis_reduce_then_select_on_any_dim_raises(ds):
+    """``mean(...)`` then a select raises, exactly as a bare ``mean()`` does: no dim survives."""
+    with pytest.raises(InvalidExpressionError):
+        ds.plan.mean(...).isel(time=0).collect()
+
+
+#: An ``...`` *inside* a dim collection. xarray exempts it from the Dataset existence
+#: check, where it then matches no dim, so these reduce only the named dims (or none).
+ELLIPSIS_IN_LIST_CHAINS = [
+    ("mean([lat, ...])", lambda d: d.mean(dim=["lat", ...])),
+    ("mean([...])", lambda d: d.mean(dim=[...])),
+    ("mean((...,))", lambda d: d.mean(dim=(...,))),
+    ("reduce(np.mean, [lat, ...])", lambda d: d.reduce(np.mean, ["lat", ...])),
+    ("cumsum([lat, ...])", lambda d: d.cumsum(dim=["lat", ...])),
+    ("mean([lat, ...]).isel(time=0)", lambda d: d.mean(dim=["lat", ...]).isel(time=0)),
+    ("isel(lon=0).mean([lat, ...])", lambda d: d.isel(lon=0).mean(dim=["lat", ...])),
+    ("mean([...]).isel(lat=0)", lambda d: d.mean(dim=[...]).isel(lat=0)),
+]
+
+
+@pytest.mark.parametrize(
+    "chain",
+    [c for _, c in ELLIPSIS_IN_LIST_CHAINS],
+    ids=[i for i, _ in ELLIPSIS_IN_LIST_CHAINS],
+)
+def test_ellipsis_inside_a_dim_list_matches_eager_dataset(ds, chain):
+    """An ``...`` inside a dim list is a literal element, inert on a Dataset as in xarray."""
+    assert_equal(chain(ds.plan).collect(), chain(ds))
+
+
+def test_ellipsis_inside_a_dim_list_raises_on_a_dataarray_as_eager_does(ds):
+    """A DataArray rejects ``...`` inside a dim list eagerly, and the plan must not launder that.
+
+    Notes
+    -----
+    This is why :func:`~xrexpr.schema._dim_spec` keeps the element rather than stripping
+    it: a stripped header would replay as ``mean(dim=["lat"])`` and succeed.
+    """
+    da = ds["temperature"]
+    with pytest.raises(ValueError, match="Ellipsis"):
+        da.mean(dim=["lat", ...])
+    with pytest.raises(ValueError, match="Ellipsis"):
+        da.plan.mean(dim=["lat", ...]).collect()
+
+
 def test_getitem_records_projection_node(ds):
     """``ds.plan["temperature"]`` records a ``Project`` node naming the variable."""
     from xrexpr.ir import Project
