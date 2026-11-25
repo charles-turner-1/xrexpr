@@ -185,3 +185,52 @@ impl FromPyObject<'_, '_> for Indexer {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adjust_indices_matches_forward_and_reverse_slices() {
+        assert_eq!(adjust_indices(0, 10, NonZeroI64::new(1).unwrap(), 10), 10);
+        assert_eq!(adjust_indices(1, 9, NonZeroI64::new(2).unwrap(), 10), 4);
+        assert_eq!(adjust_indices(-8, -1, NonZeroI64::new(2).unwrap(), 10), 4);
+        assert_eq!(adjust_indices(9, 0, NonZeroI64::new(-2).unwrap(), 10), 5);
+    }
+
+    #[test]
+    fn slice_indexers_report_the_selected_size() {
+        let forward = Indexer::ForwardSlice(ForwardSlice {
+            start: Some(2),
+            stop: Some(9),
+            step: NonZeroU64::new(2),
+        });
+        let general = Indexer::GeneralSlice(GeneralSlice {
+            value: Slice {
+                start: Some(-8),
+                stop: Some(-1),
+                step: NonZeroI64::new(2),
+            },
+        });
+
+        assert_eq!(forward.size(10), Some(4));
+        assert_eq!(general.size(10), Some(4));
+    }
+
+    #[test]
+    fn collection_and_label_indexers_report_known_sizes() {
+        let positions = Indexer::Positions(Positions {
+            values: vec![1, 3, 5],
+        });
+        let mask = Indexer::Mask(Mask {
+            values: vec![true, false, true],
+        });
+        let known_label = Indexer::Label(Label { size: Some(7) });
+        let unknown_label = Indexer::Label(Label { size: None });
+
+        assert_eq!(positions.size(99), Some(3));
+        assert_eq!(mask.size(99), Some(2));
+        assert_eq!(known_label.size(99), Some(7));
+        assert_eq!(unknown_label.size(99), None);
+    }
+}
