@@ -278,3 +278,12 @@ checks = [
 #   and nothing about the sections depends on which one you pick.
 # - ES01/SA01/EX01 (an extended summary / See Also / Examples on every object). Most
 #   private helpers here need none of the three, and requiring them buys padding.
+
+# unref (pre-commit hook ``unref``)
+# --------------------------------
+# Dead code finder. ``versioneer.py`` and ``_version.py`` are versioneer-generated: their
+# setuptools command hooks (``run``, ``initialize_options``, ...) are called by name and
+# their git helpers are installed at runtime, so unref reports all of them as unused.
+# They are excluded rather than fixed, since neither file is edited by hand.
+[tool.unref]
+exclude = ["versioneer.py", "src/xrexpr/_version.py"]
