@@ -1325,7 +1325,7 @@ def _dim_spec(
     -------
     DimSet
         The named dims as a frozenset, or :data:`~xrexpr.ir.ALL_DIMS` when the call named
-        none.
+        none or passed xarray's ``...`` (every dim).
 
     Notes
     -----
@@ -1333,7 +1333,17 @@ def _dim_spec(
     depends on where in the plan the op ends up running, and this function is not the
     place that knows. That covers ``.reduce(func)`` and a bare ``cumsum()`` as much as
     ``mean()``: a bare pass over every dim is a bare pass whatever spells it. (``diff``
-    makes its dim a required positional, so its bare case can't arise.)
+    makes its dim a required positional, so its bare case can't arise.) A bare ``...``
+    (``mean(...)``, ``cumsum(dim=...)``) is xarray's other spelling of every dim, so it
+    records :data:`~xrexpr.ir.ALL_DIMS` too; read as a name it would yield
+    ``{Ellipsis}``, a reduce over no real dim, and the plan would replay the wrong call.
+
+    An ``...`` *inside* a collection (``mean(dim=["lat", ...])``) is not special-cased: it
+    stays in the set as a literal element. That matches xarray, which exempts it from the
+    Dataset existence check, so it reduces nothing there, but rejects it on a DataArray
+    (``Ellipsis not found in array dimensions``). Keeping the element means the replayed
+    header carries it, and each container behaves as it does eagerly. Stripping it would
+    quietly turn the DataArray error into a success.
 
     ``keepdims=True`` needs no special case here: the named dims are exactly the same
     set whether they are removed or kept at size 1, so this returns them unchanged and the
@@ -1346,7 +1356,8 @@ def _dim_spec(
         dim = args[position]
     else:
         dim = None
-    if dim is None:  # bare ``mean()`` / ``mean(dim=None)`` → every dim, resolved later
+    # bare ``mean()`` / ``mean(dim=None)`` / ``mean(...)`` → every dim, resolved later
+    if dim is None or dim is ...:
         return ALL_DIMS
     return _as_dim_set(dim)
 

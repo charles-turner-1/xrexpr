@@ -1006,14 +1006,21 @@ def _calls(draw, ds, max_ops=4, builders=False):
             # apply (``max`` over an empty dim raises with or without ``keepdims``), so the
             # ``_drawable_reduces`` filter above needs no adjustment.
             extra = {"keepdims": True} if draw(st.booleans()) else {}
+            # A reduce over every current dim may be spelled with xarray's ``...``, which
+            # must record ``ALL_DIMS`` rather than a dim named ``Ellipsis``. Only the
+            # spelling changes: ``dims`` still names every axis, so the drawability filter
+            # above is exactly the one the explicit list would get.
+            spec = (
+                ... if set(dims) == set(current.sizes) and draw(st.booleans()) else dims
+            )
             # ``.reduce`` is spelled ``reduce(func, dim)``, and generated **positionally**
             # on purpose: that is the shape #96 fixed, where the function used to be read
             # as the dim spec. The kwarg spelling was never affected and is pinned by the
             # hand-written suite instead.
             call = (
-                Call(name, REDUCE_METHOD_FUNC, dims, **extra)
+                Call(name, REDUCE_METHOD_FUNC, spec, **extra)
                 if name == "reduce"
-                else Call(name, dim=dims, **extra)
+                else Call(name, dim=spec, **extra)
             )
         else:
             # No dim is indexed twice anywhere in the chain — not merely twice in a row.
