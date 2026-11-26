@@ -190,6 +190,7 @@ versioneer = ">=0.29,<0.30"
 maturin = ">=1.15.0,<2"
 # edition = "2024" in rust/Cargo.toml needs a recent toolchain.
 rust = ">=1.85"
+rust-src = ">=1.98.1,<2"
 
 [tool.pixi.pypi-dependencies]
 xrexpr = { editable = true, path = "." }
