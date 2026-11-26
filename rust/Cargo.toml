@@ -21,3 +21,7 @@ pyo3 = { version = "0.29.0", features = ["abi3-py310"] }
 # Linux does not, and fails to link).
 default = ["extension-module"]
 extension-module = ["pyo3/extension-module"]
+
+[dev-dependencies]
+# Property tests for the slice sizes in src/indexers.rs, checked against CPython itself.
+proptest = "1.12.0"
