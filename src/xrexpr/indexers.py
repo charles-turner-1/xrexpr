@@ -1,21 +1,25 @@
-"""The *value* sum type — a closed taxonomy over what one ``isel``/``sel`` indexer is.
+"""The indexer value type: the closed set of shapes an ``isel``/``sel`` indexer takes.
 
-``Select.indexer`` maps each dim to one indexer value, and a raw one is a sum type in
-disguise: exactly one of six shapes. This module makes the taxonomy a *type*, so
-:func:`classify` is the sole constructor and is **total**, and the facts that follow
-become methods rather than re-decisions at every call site in
-``ir.py``/``optimize.py``/``schema.py``: :attr:`drops_dim`, :meth:`size`, :meth:`to_raw`.
+``Select.indexer`` maps each dim to one indexer, and a raw indexer is always one of a
+handful of shapes. This module makes those shapes explicit types:
 
-Whether two indexers *compose* is deliberately **not** modelled here: composition is a
-policy the optimiser chooses to prove, not an intrinsic fact of a value, so it stays a
-``match`` in ``optimize.py``. What this module guarantees is the discriminant that policy
-matches on. :class:`ForwardSlice` earns its own variant so the "forward, non-negative
-bounds" carve-out the composer needs is a **constructor invariant** rather than a guard
-re-run at every call site, and :class:`Label` is this layer's escape hatch, for ``sel``
-labels that cannot be reasoned about positionally.
+- :func:`classify` is the only way to build one, and it accepts any value.
+- The facts that follow from a shape are methods (:attr:`drops_dim`, :meth:`size`,
+  :meth:`to_raw`), so ``ir.py``/``optimize.py``/``schema.py`` don't each re-decide them.
 
-:meth:`size` has one boundary: a dim of unknown length, or a ``sel`` label slice, answers
-"unknown" one level up at ``schema._selected_size``, which guards every call into it.
+Whether two indexers *compose* isn't decided here. That's a policy the optimiser chooses
+(which compositions it's willing to prove), not a fact about a value, so it lives in a
+``match`` in ``optimize.py``. This module just provides the variants that ``match``
+works on. Two of them exist specifically for it:
+
+- :class:`ForwardSlice` exists so "forward, non-negative bounds", which the composer
+  needs, is guaranteed by the constructor rather than re-checked at every use.
+- :class:`Label` is the fallback for ``sel`` labels that can't be reasoned about
+  positionally.
+
+:meth:`size` doesn't handle unknowns. A dim of unknown length, or a ``sel`` label slice,
+is answered as "unknown" one level up in ``schema._selected_size``, which guards every
+call into it.
 
 See ``docs/internals/values.md``.
 """
@@ -54,7 +58,7 @@ class GenericIndex(ABC):
 
 @dataclass(frozen=True)
 class Scalar(GenericIndex):
-    """A single position or label (``isel(time=0)``, ``sel(time="2020")``) — *drops* the dim.
+    """A single position or label (``isel(time=0)``, ``sel(time="2020")``). *Drops* the dim.
 
     Attributes
     ----------
@@ -64,7 +68,7 @@ class Scalar(GenericIndex):
         is a :data:`~xrexpr.payload.Payload` it can only carry. Which one is decided by
         :attr:`position`, so the field is not annotated either way.
     drops_dim : bool
-        Always ``True``: a scalar index removes the dim it addresses.
+        Always ``True``: a scalar index removes the dim it indexes.
     """
 
     value: Any
@@ -72,25 +76,25 @@ class Scalar(GenericIndex):
 
     @property
     def position(self) -> int | None:
-        """The integer position this scalar selects, or ``None`` if it is a coordinate label.
+        """The integer position this scalar selects, or ``None`` if it's a coordinate label.
 
         Returns
         -------
         int or None
-            The position, or ``None`` for a label — which the composer cannot reason
-            about positionally.
+            The position, or ``None`` for a label, which the composer can't reason about
+            positionally.
 
         Notes
         -----
-        The one question the composer asks of a scalar — ``isel(time=3)`` composes
-        arithmetically, ``sel(time="2020")`` cannot — so it lives here rather than being
-        re-decided by ``isinstance`` at each composition site, exactly as
-        :attr:`drops_dim` answers the scalar test for ``ir.py``.
+        The one thing the composer asks of a scalar: ``isel(time=3)`` composes
+        arithmetically, ``sel(time="2020")`` can't. Having it here means composition
+        sites don't each check ``isinstance``, in the same way :attr:`drops_dim` answers
+        "does this drop the dim?" for ``ir.py``.
         """
         return self.value if _is_int(self.value) else None
 
     def size(self, current: int) -> int:
-        """Never returns: a scalar has no size, because it keeps no dim.
+        """Never returns: a scalar keeps no dim, so it has no size.
 
         Parameters
         ----------
@@ -105,8 +109,8 @@ class Scalar(GenericIndex):
         Raises
         ------
         AssertionError
-            Always. Callers must consult :attr:`drops_dim` first; ``apply_schema``
-            does, and drops the dim rather than sizing it.
+            Always. Callers must check :attr:`drops_dim` first. ``apply_schema`` does,
+            and drops the dim instead of sizing it.
         """
         raise AssertionError("a scalar indexer drops its dim; its size is undefined")
 
@@ -123,12 +127,12 @@ class Scalar(GenericIndex):
 
 @dataclass(frozen=True)
 class ForwardSlice(GenericIndex):
-    """A forward, non-negative integer slice (``isel(time=slice(0, 5))``) — composable.
+    """A forward, non-negative integer slice (``isel(time=slice(0, 5))``). Composable.
 
     Attributes
     ----------
     start, stop, step : int or None
-        The slice bounds. ``step`` is at least 1 and the bounds are non-negative.
+        The slice bounds. ``step`` is at least 1, and the bounds are non-negative.
     drops_dim : bool
         Always ``False``: a slice keeps its dim, at a new size.
 
@@ -139,10 +143,10 @@ class ForwardSlice(GenericIndex):
 
     Notes
     -----
-    The non-negative/forward property is an invariant: :func:`classify` mints this variant
-    only when the bounds need no dim length to resolve, and ``__post_init__`` rejects any
-    construction that would violate it. That is exactly what lets the composer reason about
-    it arithmetically without knowing how long the dim is.
+    Forward and non-negative is guaranteed: :func:`classify` only creates this variant
+    when the bounds need no dim length to resolve, and ``__post_init__`` rejects
+    anything else. That's what lets the composer do arithmetic on it without knowing the
+    dim's length.
     """
 
     start: int | None = None
@@ -185,7 +189,7 @@ class ForwardSlice(GenericIndex):
 
 @dataclass(frozen=True)
 class GeneralSlice(GenericIndex):
-    """An integer slice with a negative bound or reversed step (``isel(time=slice(-3, None))``).
+    """An integer slice with a negative bound or reversed step (``slice(-3, None)``).
 
     Attributes
     ----------
@@ -196,8 +200,9 @@ class GeneralSlice(GenericIndex):
 
     Notes
     -----
-    Sizable — ``slice.indices`` resolves it against a known dim length — but *not* composable,
-    since a negative bound counts from the end, which the composer doesn't carry.
+    Can be sized (``slice.indices`` resolves it against a known length), but not
+    composed: a negative bound counts from the end, and the composer doesn't know where
+    the end is.
     """
 
     value: slice
@@ -236,8 +241,8 @@ class Positions(GenericIndex):
     Attributes
     ----------
     values : tuple of int
-        The selected positions, in order. A ``tuple`` rather than a list so the enclosing
-        node stays hashable and comparable.
+        The selected positions, in order. A ``tuple`` rather than a list so the
+        enclosing node stays hashable and comparable.
     drops_dim : bool
         Always ``False``: an enumeration keeps its dim, at a new size.
     """
@@ -274,7 +279,7 @@ class Positions(GenericIndex):
 
 @dataclass(frozen=True)
 class Mask(GenericIndex):
-    """A boolean mask (``isel(time=[True, False, ...])`` or a bool array) — sizes by True count.
+    """A boolean mask (``isel(time=[True, False, ...])`` or a bool array). Sized by its ``True`` count.
 
     Attributes
     ----------
@@ -285,13 +290,12 @@ class Mask(GenericIndex):
 
     Notes
     -----
-    Stored as a ``tuple`` for the same reason :class:`Positions` is, and it matters more here.
-    Held verbatim, an ndarray-backed mask makes the *node containing it* compare and hash
-    wrongly: ``Mask(arr) == Mask(arr)`` returns an array rather than a bool, so
-    ``Select(...) == Select(...)`` raises ``ValueError: truth value ... is ambiguous`` instead of
-    answering. Plan equality is a real operation (the idempotence property in
-    ``test_properties.py`` asserts it), so a variant that breaks it is a landmine, not a
-    curiosity.
+    Stored as a ``tuple``, like :class:`Positions`, and it matters more here. Stored as
+    an ndarray, a mask makes the *node containing it* compare and hash wrongly:
+    ``Mask(arr) == Mask(arr)`` returns an array rather than a bool, so comparing two
+    ``Select`` nodes raises ``ValueError: truth value ... is ambiguous``. Plans do get
+    compared (the idempotence property in ``test_properties.py`` does it), so this would
+    be a real bug.
     """
 
     values: tuple[bool, ...]
@@ -328,7 +332,7 @@ class Mask(GenericIndex):
 
 @dataclass(frozen=True)
 class Label(GenericIndex):
-    """A coordinate label, label slice, or label sequence (``sel(time="2020")``) — irreducibly open.
+    """A coordinate label, label slice, or label sequence (``sel(time="2020")``). Not positional.
 
     Attributes
     ----------
@@ -336,26 +340,26 @@ class Label(GenericIndex):
         The label, label slice or label sequence, verbatim. A
         :data:`~xrexpr.payload.Payload`: the Rust reasoner sees only :attr:`known_size`.
     drops_dim : bool
-        Always ``False``: a label *scalar* is a :class:`Scalar`, so what reaches this
-        variant keeps its dim.
+        Always ``False``. A scalar label is a :class:`Scalar`, so anything that reaches
+        this variant keeps its dim.
 
     Notes
     -----
-    The value-layer counterpart of :class:`~xrexpr.ir.Opaque`: it keeps its dim but the
+    The value-level equivalent of :class:`~xrexpr.ir.Opaque`: it keeps its dim, but the
     optimiser can't reason about it positionally (no length, no composition). A label
-    *sequence* still sizes exactly, by its own length.
+    *sequence* can still be sized exactly, by its own length.
 
-    A label *slice* cannot be sized here at all — its extent is a fact about coordinate
-    values — and ``apply_schema`` does not ask: it answers ``None`` (unknown) for any
-    slice under a ``sel``, this variant included. :meth:`size`'s keep-the-current-size
-    fallback exists only for a caller reaching past the schema layer.
+    A label *slice* can't be sized here at all, since its extent depends on coordinate
+    values. ``apply_schema`` doesn't ask: it returns ``None`` (unknown) for any slice
+    under a ``sel``, including this variant. :meth:`size`'s keep-the-current-size
+    fallback is only for callers that go around the schema layer.
     """
 
     value: Payload[Any]
     drops_dim: ClassVar[bool] = False
 
     def size(self, current: int) -> int:
-        """Return the length of the labelled dim, exactly where the labels are enumerated.
+        """Return the labelled dim's length, exactly where the labels are listed.
 
         Parameters
         ----------
@@ -365,9 +369,9 @@ class Label(GenericIndex):
         Returns
         -------
         int
-            The sequence's own length for an array or list/tuple of labels; ``current``
-            for a label slice, whose extent is a fact about coordinate values. See the
-            class notes on why no caller should reach that fallback.
+            The sequence's own length for an array, list or tuple of labels. ``current``
+            for a label slice, whose extent depends on coordinate values. See the class
+            notes on why no caller should reach that fallback.
         """
         ks = self.known_size
         return (
@@ -376,12 +380,13 @@ class Label(GenericIndex):
 
     @property
     def known_size(self) -> int | None:
-        """Return the length of the labelled dim, exactly where the labels are enumerated.
+        """Return the labelled dim's length, if the labels are listed.
 
         Returns
         -------
         int | None
-            The sequence's own length for an array or list/tuple of labels; None otherwise.
+            The sequence's own length for an array, list or tuple of labels; ``None``
+            otherwise.
         """
         if isinstance(self.value, np.ndarray):
             return int(self.value.size)
@@ -402,39 +407,40 @@ class Label(GenericIndex):
 
 @dataclass(frozen=True)
 class Advanced(GenericIndex):
-    """An ``xr.DataArray``/``xr.Variable`` indexer — xarray's *advanced* indexing.
+    """An ``xr.DataArray``/``xr.Variable`` indexer: xarray's *advanced* indexing.
 
     Attributes
     ----------
     dims : tuple of Hashable
-        The indexer array's own dims. The array itself is *not* stored, so the variant
-        stays hashable (a raw ``DataArray`` is not) and ``Select`` with it stays hashable
-        too.
+        The indexer array's own dims. The array itself isn't stored, so the variant (and
+        a ``Select`` holding it) stays hashable, which a raw ``DataArray`` isn't.
     drops_dim : bool
-        Always ``False`` — but this is a placeholder, not the truth. Whether the dim is
-        dropped depends on the *dim being indexed*, which this value does not carry:
-        **orthogonal** indexing (``dims`` contains that dim) keeps it, resized;
-        **vectorized** indexing (``dims`` is a fresh name) drops it and adds the array's
-        dims. That decision needs the dim key, which lives one level up, so it is not
-        modelled here.
+        Always ``False``, but that's a placeholder, not the truth. Whether the dim is
+        dropped depends on *which dim is being indexed*, which this value doesn't know.
+        **Orthogonal** indexing (``dims`` contains that dim) keeps it, resized.
+        **Vectorized** indexing (``dims`` is a new name) drops it and adds the array's
+        dims. Deciding needs the dim key, which lives one level up, so it isn't modelled
+        here.
 
     Notes
     -----
-    In practice this variant represents a **vectorized** indexer only. ``classify`` is
-    dim-blind, so it mints an :class:`Advanced` for *any* ``DataArray``/``Variable``; but
-    before a select's indexers reach it, ``schema._select_indexer`` normalises the
-    *orthogonal* ones — a 0-d array (scalar) or a 1-d array named after the dim it indexes —
-    to their plain ``.values``, since those index identically to a bare ``ndarray`` (see
-    ``schema._orthogonal_advanced``). What remains an :class:`Advanced` is an indexer that
-    drops its dim and mints the array's dims, which no positional indexer expresses.
+    In practice this only ever represents a **vectorized** indexer. ``classify`` doesn't
+    know the dim, so it creates an :class:`Advanced` for *any*
+    ``DataArray``/``Variable``. But before a select's indexers get here,
+    ``schema._select_indexer`` converts the *orthogonal* ones (a 0-d array, or a 1-d
+    array named after the dim it indexes) to plain ``.values``, since they index the
+    same way a bare ``ndarray`` would (see ``schema._orthogonal_advanced``). What's left
+    as :class:`Advanced` drops its dim and adds the array's dims, which no positional
+    indexer can express.
 
-    Every select carrying one records :class:`~xrexpr.ir.Opaque` at ``schema.to_opnode``
-    (``schema._select_has_advanced``): a lone indexer cannot move the trust boundary — only
-    an op can — and neither ``drops_dim`` nor a fixed :meth:`size` can honestly describe an
-    effect that mints dims. So this variant is never emitted on a live plan: it *represents*
-    the value and *signals* the demotion. Without it the ``_scalar`` catch-all in
-    :func:`classify` would model the array as a dim-dropping :class:`Scalar`, which is both
-    wrong and unhashable. Modelling vectorized indexing as a live ``Select`` is #60.
+    Any select holding one is recorded as :class:`~xrexpr.ir.Opaque` by
+    ``schema.to_opnode`` (``schema._select_has_advanced``). An indexer can't end the
+    trusted prefix (only an op can), and neither ``drops_dim`` nor a fixed :meth:`size`
+    can describe an effect that adds dims. So this variant never appears on a live plan.
+    It exists to *represent* the value and *trigger* the demotion. Without it, the
+    ``_scalar`` catch-all in :func:`classify` would treat the array as a dim-dropping
+    :class:`Scalar`, which is wrong and unhashable. Modelling vectorized indexing as a
+    live ``Select`` is #60.
     """
 
     dims: tuple[Hashable, ...]
@@ -456,15 +462,15 @@ class Advanced(GenericIndex):
         Raises
         ------
         AssertionError
-            Always. A select carrying this variant is :class:`~xrexpr.ir.Opaque`, so
-            ``apply_schema`` never sizes it; the effect is dim-dependent and unmodelled.
+            Always. A select holding this variant is :class:`~xrexpr.ir.Opaque`, so
+            ``apply_schema`` never sizes it.
         """
         raise AssertionError(
             "an advanced indexer is never emitted; its select is Opaque"
         )
 
     def to_raw(self) -> Any:
-        """Never returns: the array is not stored, and the op replays as Opaque.
+        """Never returns: the array isn't stored, and the op replays as ``Opaque``.
 
         Returns
         -------
@@ -474,22 +480,22 @@ class Advanced(GenericIndex):
         Raises
         ------
         AssertionError
-            Always. The verbatim ``DataArray`` lives on the :class:`~xrexpr.ir.Opaque`
-            node's ``args``/``kwargs``, which is what replays; this variant is never on a
-            live plan to be emitted.
+            Always. The verbatim ``DataArray`` lives in the :class:`~xrexpr.ir.Opaque`
+            node's ``args``/``kwargs``, which is what replays. This variant is never on
+            a live plan.
         """
         raise AssertionError(
             "an advanced indexer is never emitted; its select is Opaque"
         )
 
 
-#: One dim's indexer, as a closed sum. ``match`` over this binds the shape the optimiser and
-#: schema layers reason about; :func:`classify` is the sole constructor from raw values.
+#: One dim's indexer, as a closed union. The optimiser and schema layers ``match`` on
+#: it; :func:`classify` is the only way to build one from a raw value.
 Indexer = Scalar | ForwardSlice | GeneralSlice | Positions | Mask | Label | Advanced
 
 
 def _is_int(x: Any) -> bool:
-    """Report whether ``x`` is an integer *position*, numpy-typed or not.
+    """Report whether ``x`` is an integer *position*, numpy or Python.
 
     Parameters
     ----------
@@ -499,40 +505,45 @@ def _is_int(x: Any) -> bool:
     Returns
     -------
     bool
-        ``True`` for an integer position, ``False`` for anything else — booleans
+        ``True`` for an integer position, ``False`` for anything else, booleans
         included.
 
     Notes
     -----
-    ``isinstance(x, int)`` is too narrow: numpy integers fall out of ``argmin``, ``np.where``
-    and ``arr.values[i]`` routinely, and a ``np.int64`` bound misfiled as a label makes its
-    slice both mis-sized and uncomposable. ``numbers.Integral`` covers every numpy width;
-    ``bool`` is excluded because it is an ``int`` subclass but means a *mask*, not a position.
-    (``np.bool_`` is not ``Integral``, so it needs no exclusion.)
+    ``isinstance(x, int)`` is too narrow. numpy integers come out of ``argmin``,
+    ``np.where`` and ``arr.values[i]`` all the time, and an ``np.int64`` bound mistaken
+    for a label makes its slice both wrongly sized and uncomposable.
+    ``numbers.Integral`` covers every numpy width. ``bool`` is excluded because,
+    although it's an ``int`` subclass, it means a *mask*, not a position. (``np.bool_``
+    isn't ``Integral``, so it needs no exclusion.)
     """
     return isinstance(x, numbers.Integral) and not isinstance(x, bool)
 
 
 def _scalar(value: Any) -> Scalar:
-    """Build a :class:`Scalar`, narrowing an integer position to plain ``int``.
+    """Build a :class:`Scalar`, converting an integer position to plain ``int``.
 
     Parameters
     ----------
     value : Any
-        The raw scalar index — a position or a coordinate label.
+        The raw scalar index: a position or a coordinate label.
 
     Returns
     -------
     Scalar
-        The variant, with an integer position narrowed to ``int`` and a label kept as is.
+        The variant. An integer position becomes ``int``; a label is kept as is.
 
     Notes
     -----
-    The same normalisation :class:`Positions` and :class:`ForwardSlice` already apply, for the
-    same two reasons: an ``np.int64`` position must compare equal to the ``int`` spelling of
-    the same selection (golden plan assertions, and plan equality in general), and a variant
-    holding a numpy *array* is unhashable — which would silently make the enclosing ``Select``
-    unhashable too. Labels pass through untouched.
+    Same normalisation :class:`Positions` and :class:`ForwardSlice` apply, for two
+    reasons:
+
+    - an ``np.int64`` position must compare equal to the ``int`` spelling of the same
+      selection (expected-plan assertions, and plan equality in general);
+    - a variant holding a numpy *array* is unhashable, which would silently make the
+      enclosing ``Select`` unhashable too.
+
+    Labels pass through unchanged.
     """
     return Scalar(int(value) if _is_int(value) else value)
 
@@ -548,8 +559,8 @@ def _is_forward(s: slice) -> bool:
     Returns
     -------
     bool
-        ``True`` when every bound resolves without knowing the dim's length — the
-        invariant :class:`ForwardSlice` is built on.
+        ``True`` if every bound resolves without knowing the dim's length. This is the
+        guarantee :class:`ForwardSlice` is built on.
     """
     if s.step is not None and (not _is_int(s.step) or s.step < 1):
         return False
@@ -567,44 +578,47 @@ def _classify_slice(s: slice) -> ForwardSlice | GeneralSlice | Label:
     Returns
     -------
     ForwardSlice or GeneralSlice or Label
-        :class:`ForwardSlice` when the bounds are forward and non-negative,
-        :class:`GeneralSlice` for another integer slice, and :class:`Label` when a bound
-        is not an integer at all — a label slice, which is not positional.
+        :class:`ForwardSlice` for forward, non-negative bounds; :class:`GeneralSlice`
+        for any other integer slice; :class:`Label` if a bound isn't an integer at all
+        (a label slice, which isn't positional).
     """
     bounds = (s.start, s.stop, s.step)
     if not all(b is None or _is_int(b) for b in bounds):
         return Label(s)  # a label slice (e.g. sel) — not positional
     if _is_forward(s):
-        # normalise to plain ``int`` so the variant's declared field types stay honest and a
-        # numpy-bounded slice compares equal to the same slice written by hand
+        # Convert to plain ``int`` so the field types match their annotations, and a
+        # numpy-bounded slice compares equal to the same slice written by hand.
         return ForwardSlice(*(None if b is None else int(b) for b in bounds))
     return GeneralSlice(s)
 
 
 def classify(value: Any) -> Indexer:
-    """Sort a raw ``isel``/``sel`` indexer value into its :data:`Indexer` variant.
+    """Sort a raw ``isel``/``sel`` indexer into its :data:`Indexer` variant.
 
     Parameters
     ----------
     value : Any
-        One dim's indexer, exactly as it was passed to ``isel``/``sel``: a position, a
-        label, a slice, a sequence, or an array.
+        One dim's indexer, exactly as passed to ``isel``/``sel``: a position, a label, a
+        slice, a sequence, or an array.
 
     Returns
     -------
     Indexer
-        The matching variant. Anything the taxonomy cannot reason about positionally
-        becomes a :class:`Label`, the value layer's escape hatch.
+        The matching variant. Anything that can't be reasoned about positionally becomes
+        a :class:`Label`.
 
     Notes
     -----
-    The single place the value taxonomy is decided. Order matters twice: a boolean sequence is a
-    :class:`Mask`, not :class:`Positions`, even though ``bool`` is an ``int`` subclass, so the
-    all-boolean test runs before the all-integer one; and a 0-d array is a :class:`Scalar`
-    rather than an enumeration, so the rank check runs before the dtype dispatch.
+    The one place indexer values are classified. Order matters in two places:
 
-    Integer-ness is decided by ``_is_int`` throughout, so numpy-typed positions and bounds
-    classify the same way their Python equivalents do.
+    - a boolean sequence is a :class:`Mask`, not :class:`Positions`, even though
+      ``bool`` is an ``int`` subclass, so the all-boolean check runs before the
+      all-integer one;
+    - a 0-d array is a :class:`Scalar`, not a list, so the rank check runs before the
+      dtype checks.
+
+    Integer checks use ``_is_int`` throughout, so numpy positions and bounds classify
+    the same as their Python equivalents.
     """
     if isinstance(value, slice):
         return _classify_slice(value)
@@ -614,11 +628,11 @@ def classify(value: Any) -> Indexer:
                 value.item() if np.issubdtype(value.dtype, np.integer) else value
             )
         if value.dtype == bool:
-            # Only a 1-d mask is a mask. xarray rejects a higher-rank boolean array as a
-            # single-dim indexer outright ("Unlabeled multi-dimensional array cannot be used
-            # for indexing"), so there is no valid plan containing one — it goes to ``Label``,
-            # the variant for values the optimiser cannot reason about, and the error still
-            # surfaces from xarray at replay in its own words.
+            # Only a 1-d boolean array is a mask. xarray rejects a higher-rank boolean
+            # array as a single-dim indexer ("Unlabeled multi-dimensional array cannot
+            # be used for indexing"), so no valid plan contains one. It goes to
+            # ``Label`` (the variant for values the optimiser can't reason about), and
+            # xarray raises its own error at replay.
             if value.ndim != 1:
                 return Label(value)
             return Mask(tuple(bool(x) for x in value.tolist()))
@@ -633,8 +647,8 @@ def classify(value: Any) -> Indexer:
         return Label(value)  # a label sequence, or a mixed one
     if isinstance(value, xr.DataArray | xr.Variable):
         # A DataArray/Variable indexer is xarray's advanced indexing, whose dim effect
-        # depends on the indexed dim (see ``Advanced``). Represent it rather than letting
-        # it fall to the ``_scalar`` catch-all, which would model it as a dim-dropping
-        # ``Scalar`` -- wrong, and unhashable.
+        # depends on the dim being indexed (see ``Advanced``). Represent it explicitly.
+        # Falling through to the ``_scalar`` catch-all would treat it as a dim-dropping
+        # ``Scalar``, which is wrong and unhashable.
         return Advanced(dims=tuple(value.dims))
     return _scalar(value)  # anything else drops its dim

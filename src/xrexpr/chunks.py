@@ -1,23 +1,22 @@
-"""The *chunk* value sum type — a closed taxonomy over what one dim's chunk spec is.
+"""The chunk spec *value* type: a closed set of shapes one dim's chunk spec can take.
 
-``Rechunk.chunks`` maps each named dim to one spec. A raw chunk spec is a sum type in
-disguise (a size, a symbolic request, an explicit block sequence), so this module makes
-the taxonomy a *type*: :func:`classify_chunk` is the sole constructor and is **total**,
-and what follows from a variant is a method (:meth:`to_raw`) rather than a re-decision at
-every call site. The variants are one per *behaviour*, not one per spelling, which is why
-``None`` (keep the existing blocks) and ``-1`` (fuse them into one) are two of them.
+``Rechunk.chunks`` maps each named dim to one spec. A raw chunk spec is one of a few
+shapes (a size, a symbolic request like ``"auto"``, an explicit list of blocks), so this
+module makes them explicit types. :func:`classify_chunk` is the only way to build one
+and accepts any value, and :meth:`to_raw` turns a variant back into what xarray expects.
 
-Whether a spec may be *crossed* by a select is deliberately **not** modelled here:
-pushability is a policy the optimiser chooses (``optimize._pushable_rechunk``), not an
-intrinsic fact of a value. What this module owns is the discriminant that policy matches
-on, which happens to be **extent-dependence** — :class:`Auto`, :class:`ByteSize` and
-:class:`BlockSeq` are the specs dask resolves by measuring the array it is handed. Each
-variant's notes say which it is; none carries a flag saying what the optimiser should
-therefore do.
+There's one variant per *behaviour*, not per spelling. That's why ``None`` (keep the
+existing blocks) and ``-1`` (merge them into one block) are separate variants.
+
+Whether a select may move past a spec isn't decided here. That's the optimiser's policy
+(``optimize._pushable_rechunk``). What this module provides is the property that policy
+uses: **extent-dependence**. :class:`Auto`, :class:`ByteSize` and :class:`BlockSeq` are
+the specs dask sizes by measuring the array it's given. Each variant's notes say whether
+it's extent-dependent; none of them says what the optimiser should do about it.
 
 See ``docs/internals/values.md`` for the classification tree, and
-``docs/guide/rechunking.md`` for the raw-to-variant table, measured against the pinned
-xarray/dask rather than reasoned about.
+``docs/guide/rechunking.md`` for the raw-value-to-variant table (measured against the
+pinned xarray/dask).
 """
 
 import numbers
@@ -41,7 +40,7 @@ __all__ = [
 
 @dataclass(frozen=True)
 class SingleSize:
-    """A uniform block size (``chunk({"time": 100})``) — every block that long but the last.
+    """A fixed block size (``chunk({"time": 100})``): every block that long except the last.
 
     Attributes
     ----------
@@ -55,11 +54,11 @@ class SingleSize:
 
     Notes
     -----
-    The lower bound is a constructor invariant rather than a guard re-run downstream, the
-    same move :class:`~xrexpr.indexers.ForwardSlice` makes: ``0`` raises
-    ``ZeroDivisionError`` inside dask and a negative other than ``-1`` raises, so no valid
-    plan holds one. :func:`classify_chunk` sends those to :class:`OpaqueChunk` instead, and
-    the invariant is what makes that unconstructible by hand as well.
+    The lower bound is checked by the constructor rather than downstream, as
+    :class:`~xrexpr.indexers.ForwardSlice` does. ``0`` raises ``ZeroDivisionError``
+    inside dask, and any negative other than ``-1`` raises too, so no valid plan has
+    one. :func:`classify_chunk` sends those to :class:`OpaqueChunk`, and the constructor
+    check stops anyone building one by hand.
     """
 
     size: int
@@ -81,21 +80,21 @@ class SingleSize:
 
 @dataclass(frozen=True)
 class Auto:
-    """A request for dask to pick block sizes (``chunk({"time": "auto"})``).
+    """A request for dask to choose block sizes (``chunk({"time": "auto"})``).
 
     Notes
     -----
-    Carries no payload: the sizes are dask's to choose, against its configured byte target.
-    That it re-picks against whatever array it is handed is precisely why it is
-    *extent-dependent*, the property :class:`BlockSeq` shares — dask divides the byte budget
-    by the array's own extent, so what the spec means changes when the data does.
+    No payload: dask picks the sizes against its configured byte target. Because it
+    picks them from whatever array it receives, it's *extent-dependent* (like
+    :class:`BlockSeq`): dask divides the byte budget by the array's own size, so the
+    spec's meaning changes when the data does.
 
-    Measured against xarray 2026.7.0 / dask 2026.7.1, that is not merely a change of answer.
-    ``auto_chunks`` computes ``largest_block = prod(cs if Number else max(cs) for cs in
-    chunks if cs != "auto")``, so a dim with nothing in it makes the division a
-    ``ZeroDivisionError`` — and an emptied dim that *was* ``"auto"`` reaches it anyway, since
-    dask pins every dim below ``limit ** (1 / ndim)`` and *recurses*, and on the second pass
-    it is no longer ``"auto"``:
+    Measured against xarray 2026.7.0 / dask 2026.7.1, it's worse than a different
+    answer. ``auto_chunks`` computes ``largest_block = prod(cs if Number else max(cs)
+    for cs in chunks if cs != "auto")``, so an empty dim makes that a
+    ``ZeroDivisionError``. An emptied dim that *was* ``"auto"`` hits it too: dask pins
+    every dim below ``limit ** (1 / ndim)`` and *recurses*, and on the second pass that
+    dim is no longer ``"auto"``:
 
     ==================================== ========= =========================
     ``chunk`` then empty a dim, hoisted  at 1 kB   at 128 MiB
@@ -105,10 +104,10 @@ class Auto:
     3-D ``{lon: auto}``, lat             raises    raises
     ==================================== ========= =========================
 
-    Whether it raises therefore depends on the configured ``array.chunk-size`` and on the
-    rank — nothing a plan can read — which is why no narrower discriminant exists and the
-    whole variant is a barrier. The one exception is a select that provably empties the
-    dim, on xarray 2026.09.0 and later (``optimize._empty_autochunk_is_pushable``).
+    Whether it raises depends on the configured ``array.chunk-size`` and on the number
+    of dims, neither of which a plan can see. So there's no narrower test, and the whole
+    variant blocks selects. The one exception is a select that provably empties the dim,
+    on xarray 2026.09.0 and later (``optimize._empty_autochunk_is_pushable``).
     """
 
     def to_raw(self) -> str:
@@ -133,12 +132,12 @@ class ByteSize:
 
     Notes
     -----
-    :class:`Auto` with an explicit target rather than dask's configured one, so it is a
-    separate variant only because it has a payload to carry back to replay — and it is
-    extent-dependent for the same reason, dividing that target by the array's own extent.
-    Whether the string parses is dask's judgement, made at replay: an unparseable one raises
-    ``ValueError: Could not interpret ... as a byte unit`` there, which is a better error
-    than anything this layer could invent.
+    :class:`Auto` with an explicit target instead of dask's configured one. It's only a
+    separate variant because it has a value to carry back to replay, and it's
+    extent-dependent for the same reason (it divides that target by the array's size).
+    Whether the string parses is left to dask at replay. An unparseable one raises
+    ``ValueError: Could not interpret ... as a byte unit`` there, which is a better
+    error than anything this layer could produce.
     """
 
     value: str
@@ -160,9 +159,9 @@ class FullDim:
 
     Notes
     -----
-    Distinct from :class:`NoChange` in behaviour, not just spelling: on an
-    already-chunked dim ``-1`` collapses the existing blocks into one and ``None`` leaves
-    them alone. Verified against the pinned xarray/dask — see the module docstring.
+    Behaves differently from :class:`NoChange`, not just spelled differently: on a dim
+    that's already chunked, ``-1`` merges the blocks into one and ``None`` leaves them
+    alone. Checked against the pinned xarray/dask (see the module docstring).
     """
 
     def to_raw(self) -> int:
@@ -182,9 +181,8 @@ class NoChange:
 
     Notes
     -----
-    The identity spec for one dim. It names the dim without asking anything of it, which
-    is why it survives a select unchanged. See :class:`FullDim` on why the two are
-    separate variants.
+    The identity spec for one dim. It names the dim but asks nothing of it, which is why
+    it survives a select unchanged. See :class:`FullDim` for why the two are separate.
     """
 
     def to_raw(self) -> None:
@@ -200,27 +198,26 @@ class NoChange:
 
 @dataclass(frozen=True)
 class BlockSeq:
-    """Explicit block lengths (``chunk({"time": (100, 400, 500)})``) — must sum to the dim.
+    """Explicit block lengths (``chunk({"time": (100, 400, 500)})``). Must sum to the dim.
 
     Attributes
     ----------
     sizes : tuple of int
-        The block lengths, in order. A ``tuple`` rather than a list so the enclosing node
-        stays hashable and comparable, as :class:`~xrexpr.indexers.Positions` is.
+        The block lengths, in order. A ``tuple`` rather than a list so the enclosing
+        node stays hashable and comparable, like :class:`~xrexpr.indexers.Positions`.
 
     Raises
     ------
     ValueError
-        On construction with no blocks: dask rejects an empty tuple outright.
+        On construction with no blocks: dask rejects an empty tuple.
 
     Notes
     -----
-    Extent-dependent, as :class:`Auto` and :class:`ByteSize` are, and the most obviously so:
-    a select moving in front would shrink the dim and leave blocks that no longer add up.
-    The three differ only in how they fail — this one cannot replay at all, where the other
-    two replay to a different answer or to a ``ZeroDivisionError``. That the shared property
-    makes all three a barrier is the rule's judgement, not this class's — see the module
-    docstring.
+    Extent-dependent, like :class:`Auto` and :class:`ByteSize`, and the most obvious
+    case: a select moved in front would shrink the dim, and the blocks would no longer
+    add up. The three fail differently. This one can't replay at all; the other two
+    replay to a different answer or a ``ZeroDivisionError``. Treating all three as
+    barriers is the optimiser's decision, not this class's (see the module docstring).
     """
 
     sizes: tuple[int, ...]
@@ -230,35 +227,35 @@ class BlockSeq:
             raise ValueError("BlockSeq needs at least one block")
 
     def to_raw(self) -> tuple[int, ...]:
-        """Return the xarray-facing value: the block lengths as a ``tuple``.
+        """Return the value xarray expects: the block lengths as a ``tuple``.
 
         Returns
         -------
         tuple of int
-            :attr:`sizes`, unchanged — xarray accepts a tuple of block lengths here,
-            unlike the sequence indexers of ``xrexpr.indexers``, which must be lists.
+            :attr:`sizes`, unchanged. xarray accepts a tuple of block lengths here,
+            unlike the list indexers in ``xrexpr.indexers``, which must be lists.
         """
         return self.sizes
 
 
 @dataclass(frozen=True)
 class OpaqueChunk:
-    """Any chunk spec the taxonomy doesn't model — replayed verbatim, never crossed.
+    """Any chunk spec the taxonomy doesn't model. Replayed verbatim, never crossed.
 
     Attributes
     ----------
     value : Payload[Any]
-        The spec, exactly as it was passed to ``chunk``. A :data:`~xrexpr.payload.Payload`:
-        the Rust reasoner never reads it.
+        The spec, exactly as passed to ``chunk``. A :data:`~xrexpr.payload.Payload`: the
+        Rust reasoner never reads it.
 
     Notes
     -----
-    The value layer's counterpart of :class:`~xrexpr.ir.Opaque`, reached by a spelling
-    xarray tolerates but does not document (a whole float, ``True``) and by one it rejects
-    (``0``, ``-2``, a set). Holding it verbatim keeps replay faithful in the first case and
-    keeps the error xarray's own in the second. Like :class:`~xrexpr.indexers.Label`, it
-    can hold an unhashable payload, which makes the enclosing node unhashable too — the
-    conditional hashability ``ir.py``'s module docstring already describes.
+    The value-level equivalent of :class:`~xrexpr.ir.Opaque`. Two kinds of value end up
+    here: spellings xarray tolerates but doesn't document (a whole float, ``True``), and
+    ones it rejects (``0``, ``-2``, a set). Keeping the value verbatim makes replay
+    faithful for the first kind, and keeps xarray's own error for the second. Like
+    :class:`~xrexpr.indexers.Label`, it can hold an unhashable value, which makes the
+    enclosing node unhashable too (see ``ir.py``'s module docstring).
     """
 
     value: Payload[Any]
@@ -274,13 +271,13 @@ class OpaqueChunk:
         return self.value
 
 
-#: One dim's chunk spec, as a closed sum. ``match`` over this binds the shape the optimiser
-#: reasons about; :func:`classify_chunk` is the sole constructor from raw values.
+#: One dim's chunk spec, as a closed union. The optimiser matches on it;
+#: :func:`classify_chunk` is the only way to build one from a raw value.
 ChunkSpec = SingleSize | Auto | ByteSize | FullDim | NoChange | BlockSeq | OpaqueChunk
 
 
 def _is_int(x: Any) -> bool:
-    """Report whether ``x`` is an integer *block length*, numpy-typed or not.
+    """Report whether ``x`` is an integer *block length*, numpy or Python.
 
     Parameters
     ----------
@@ -290,16 +287,16 @@ def _is_int(x: Any) -> bool:
     Returns
     -------
     bool
-        ``True`` for an integer, ``False`` for anything else — booleans included.
+        ``True`` for an integer, ``False`` for anything else, booleans included.
 
     Notes
     -----
-    The rule ``indexers._is_int`` applies to positions, for the same two
-    reasons: ``numbers.Integral`` covers every numpy width, so an ``np.int64`` block length
-    classifies like the ``int`` spelling of the same request; and ``bool`` is excluded
-    despite subclassing ``int``, because ``chunk({"time": True})`` asking for blocks of 1
-    is a mistake rather than a request, and :class:`OpaqueChunk` is where mistakes go.
-    Spelled out here rather than imported so neither module owns the other's rule.
+    The same rule ``indexers._is_int`` uses for positions, for the same two reasons.
+    ``numbers.Integral`` covers every numpy width, so an ``np.int64`` block length
+    classifies like the ``int`` spelling. And ``bool`` is excluded even though it
+    subclasses ``int``, because ``chunk({"time": True})`` (blocks of 1) is a mistake,
+    and mistakes go to :class:`OpaqueChunk`. It's written out here rather than imported
+    so neither module depends on the other.
     """
     return isinstance(x, numbers.Integral) and not isinstance(x, bool)
 
@@ -310,26 +307,25 @@ def classify_chunk(value: Any) -> ChunkSpec:
     Parameters
     ----------
     value : Any
-        The dim's chunk spec, exactly as it was passed to ``chunk``: a size, ``-1``,
-        ``None``, ``"auto"``, a byte-target string, or a sequence of block lengths.
+        The dim's chunk spec, exactly as passed to ``chunk``: a size, ``-1``, ``None``,
+        ``"auto"``, a byte-target string, or a sequence of block lengths.
 
     Returns
     -------
     ChunkSpec
-        The matching variant. Anything the taxonomy does not model becomes an
-        :class:`OpaqueChunk`, so the function is total.
+        The matching variant. Anything not modelled becomes an :class:`OpaqueChunk`, so
+        every input gets an answer.
 
     Notes
     -----
-    The single place the chunk taxonomy is decided. Order matters once: ``-1`` is a
-    :class:`FullDim` rather than a :class:`SingleSize`, so the sentinel is tested before
-    the size is, and every remaining non-positive integer falls through to
-    :class:`OpaqueChunk` rather than violating :class:`SingleSize`'s invariant.
+    The one place chunk specs are classified. Order matters once: ``-1`` is a
+    :class:`FullDim`, not a :class:`SingleSize`, so it's checked before sizes. Every
+    other non-positive integer falls through to :class:`OpaqueChunk` rather than failing
+    :class:`SingleSize`'s check.
 
-    Integer-ness is decided by ``_is_int`` throughout, so numpy-typed lengths classify
-    the same way their Python equivalents do — and a block sequence normalises to
-    ``tuple[int, ...]`` for the hashability reason :class:`~xrexpr.indexers.Mask`
-    documents.
+    Integer checks use ``_is_int``, so numpy lengths classify the same as Python ones. A
+    block sequence is converted to ``tuple[int, ...]`` for the hashability reason
+    :class:`~xrexpr.indexers.Mask` explains.
     """
     if value is None:
         return NoChange()
