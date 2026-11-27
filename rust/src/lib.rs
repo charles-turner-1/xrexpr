@@ -4,6 +4,7 @@ mod ir;
 mod interned_ir;
 mod indexers;
 mod chunks;
+mod payload;
 
 /// A Python module implemented in Rust.
 #[pymodule]
@@ -14,7 +15,7 @@ mod _xrexprs {
     use crate::ir::ir;
 
     #[pymodule_export]
-    use crate::interned_ir::{view_fluent_plan, view_lowered_plan};
+    use crate::interned_ir::{roundtrip_fluent_plan, roundtrip_lowered_plan};
 
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {

@@ -1,6 +1,8 @@
+use crate::payload::PayloadRef;
 use pyo3::prelude::*;
-use pyo3::types::PyTuple;
+use pyo3::types::{PyDict, PyTuple};
 
+/// One dim's chunk spec: the Rust side of `xrexpr.chunks.ChunkSpec`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChunkSpec {
     SingleSize(i32),
@@ -9,7 +11,8 @@ pub enum ChunkSpec {
     FullDim,
     NoChange,
     BlockSeq(Vec<i64>),
-    OpaqueChunk,
+    /// A spec nothing models. Its value is a payload: Rust can carry it, not read it.
+    OpaqueChunk(PayloadRef),
 }
 
 impl FromPyObject<'_, '_> for ChunkSpec {
@@ -23,34 +26,46 @@ impl FromPyObject<'_, '_> for ChunkSpec {
             "FullDim" => Ok(ChunkSpec::FullDim),
             "NoChange" => Ok(ChunkSpec::NoChange),
             "BlockSeq" => Ok(ChunkSpec::BlockSeq(obj.getattr("sizes")?.extract()?)),
-            "OpaqueChunk" => Ok(ChunkSpec::OpaqueChunk),
+            "OpaqueChunk" => Ok(ChunkSpec::OpaqueChunk(obj.getattr("value")?.extract()?)),
             _ => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-                "Cannot convert object of type {} to ChunkSpec", ty
+                "Cannot convert object of type {} to ChunkSpec",
+                ty
             ))),
         }
     }
 }
 
-/// Rust's *view* of a chunk spec, as a `(variant, payload)` tuple: `("SingleSize", 10)`,
-/// `("Auto", None)`. Not a `ChunkSpec` rebuilt -- `OpaqueChunk` keeps no payload here, so
-/// there is nothing to rebuild it from. Used by the boundary test (`interned_ir::view_*`).
+/// Converts to `(variant, fields)`, e.g. `("SingleSize", {"size": 10})` or
+/// `("Auto", {})`, which `xrexpr.intern.crossing.from_rust` rebuilds into the Python spec.
+/// The field names are the Python dataclass fields.
 impl<'py> IntoPyObject<'py> for ChunkSpec {
     type Target = PyTuple;
     type Output = Bound<'py, PyTuple>;
     type Error = PyErr;
 
     fn into_pyobject(self, py: Python<'py>) -> PyResult<Self::Output> {
-        // Each arm's payload is a different Rust type, so each is converted to a Python
-        // object (`Bound<PyAny>`) first, giving every arm the same tuple type.
-        let (variant, payload) = match self {
-            ChunkSpec::SingleSize(size) => ("SingleSize", size.into_pyobject(py)?.into_any()),
-            ChunkSpec::Auto => ("Auto", py.None().into_bound(py)),
-            ChunkSpec::ByteSize(value) => ("ByteSize", value.into_pyobject(py)?.into_any()),
-            ChunkSpec::FullDim => ("FullDim", py.None().into_bound(py)),
-            ChunkSpec::NoChange => ("NoChange", py.None().into_bound(py)),
-            ChunkSpec::BlockSeq(sizes) => ("BlockSeq", sizes.into_pyobject(py)?.into_any()),
-            ChunkSpec::OpaqueChunk => ("OpaqueChunk", py.None().into_bound(py)),
+        let fields = PyDict::new(py);
+        let variant = match self {
+            ChunkSpec::SingleSize(size) => {
+                fields.set_item("size", size)?;
+                "SingleSize"
+            }
+            ChunkSpec::Auto => "Auto",
+            ChunkSpec::ByteSize(value) => {
+                fields.set_item("value", value)?;
+                "ByteSize"
+            }
+            ChunkSpec::FullDim => "FullDim",
+            ChunkSpec::NoChange => "NoChange",
+            ChunkSpec::BlockSeq(sizes) => {
+                fields.set_item("sizes", sizes)?;
+                "BlockSeq"
+            }
+            ChunkSpec::OpaqueChunk(value) => {
+                fields.set_item("value", value)?;
+                "OpaqueChunk"
+            }
         };
-        (variant, payload).into_pyobject(py)
+        (variant, fields).into_pyobject(py)
     }
 }
