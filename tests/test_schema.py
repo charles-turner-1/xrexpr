@@ -1,16 +1,17 @@
 """Tests for the logical schema layer.
 
-``SchemaState`` is snapshotted from a real dataset and then evolved by
-``apply_schema`` using only :data:`~xrexpr.ir.Op` metadata — no array data is touched.
-The nodes here are built by hand, which also documents the contract ``apply_schema``
-relies on: a scalar select drops its dim (``Select.consumes``, derived from ``indexer``);
-a non-scalar select leaves the dim in ``indexer`` only.
+A ``SchemaState`` is taken from a real dataset and then updated by ``apply_schema``
+using only node metadata; no array data is read. Nodes here are built by hand, which
+also shows what ``apply_schema`` relies on: a scalar select drops its dim
+(``Select.consumes``, derived from ``indexer``), and a non-scalar select only has the
+dim in ``indexer``.
 
-``variables`` (every variable, coordinate or not, → the dims it spans) is the store, and
-``sizes``/``dim_names``/``data_vars``/``coords`` derive from it. So a schema **cannot** be built from dim
-sizes alone — a dim exists only because some variable spans it, and sizes for unspanned
-dims are pruned away. :func:`_dim_coords_only` builds the minimal schema with a given set
-of dims for the tests that care about sizes rather than variables.
+``variables`` (every variable, coordinate or not, mapped to its dims) is what's stored,
+and ``sizes``/``dim_names``/``data_vars``/``coords`` are derived from it. So you
+**can't** build a schema from dim sizes alone: a dim only exists because some variable
+spans it, and sizes for dims nothing spans are dropped. :func:`_dim_coords_only` builds
+the smallest schema with given dims, for tests that care about sizes rather than
+variables.
 """
 
 import numpy as np
@@ -35,25 +36,24 @@ from xrexpr.schema import SchemaState, apply_schema
 
 
 def _dim_coords_only(sizes, extra_coords=()):
-    """Build the minimal schema with dims ``sizes``: one dim coordinate each, no data vars.
+    """Build the smallest schema with dims ``sizes``: one dim coordinate each, no data vars.
 
     Parameters
     ----------
     sizes : Mapping
-        The dims and their extents, ``None`` for an unknown one.
+        The dims and their lengths, ``None`` for an unknown one.
     extra_coords : iterable of Hashable, optional
         Scalar (0-d) coordinate names, as ``ds.assign_coords(ref=1.0)`` would add.
 
     Returns
     -------
     SchemaState
-        Equivalent to ``xr.Dataset(coords={d: range(n) for d, n in sizes.items()})``.
+        The same as ``xr.Dataset(coords={d: range(n) for d, n in sizes.items()})``.
 
     Notes
     -----
-    Spelled out because ``variables`` is the store: ``SchemaState(sizes=sizes)`` alone would
-    derive *no* dims and prune every size away, which is the phantom-dim state the shape
-    forbids.
+    Needed because ``variables`` is what's stored. ``SchemaState(sizes=sizes)`` on its
+    own would derive *no* dims and drop every size.
     """
     return SchemaState(
         variables={d: (d,) for d in sizes} | {c: () for c in extra_coords},
@@ -102,9 +102,9 @@ def test_keepdims_reduce_keeps_dim_at_size_one_and_drops_its_coord(ds):
     Notes
     -----
     Verified against xarray 2026.7.0: ``ds.mean("lat", keepdims=True)`` keeps ``lat`` at
-    size 1 in every variable that had it, yet drops the ``lat`` coordinate — a reduced dim
-    has no meaningful label. Contrast :func:`test_reduce_removes_dim_and_its_coord`, where a
-    plain reduce removes the dim outright.
+    size 1 in every variable that had it, yet drops the ``lat`` coordinate — a reduced
+    dim has no meaningful label. Contrast :func:`test_reduce_removes_dim_and_its_coord`,
+    where a plain reduce removes the dim outright.
     """
     schema = SchemaState.from_dataset(ds)
     node = Reduce(
@@ -137,8 +137,8 @@ def test_bare_reduce_removes_every_dim_and_coord(ds):
 
     Notes
     -----
-    ``apply_schema`` is where the deferred ``ALL_DIMS`` expansion is finally cashed in,
-    against a schema that is exact rather than the recorder's guess.
+    ``apply_schema`` is where the postponed ``ALL_DIMS`` finally gets expanded, against
+    a schema that's exact rather than a guess made while recording.
     """
     schema = SchemaState.from_dataset(ds)
     after = apply_schema(schema, Reduce(name="mean", consumes=ALL_DIMS))
@@ -152,8 +152,8 @@ def test_bare_reduce_expands_against_the_schema_it_is_given(ds):
 
     Notes
     -----
-    "Every dim *at this point*": fold a select in first and the sentinel resolves to what
-    is left.
+    "Every dim *at this point*": fold a select in first and the sentinel resolves to
+    what is left.
     """
     schema = apply_schema(
         SchemaState.from_dataset(ds), Select(name="isel", indexer={"time": 0})
@@ -268,10 +268,10 @@ def test_integer_labelled_sel_slice_is_unknown_not_under_reported(ds):
 
     Notes
     -----
-    The sharp case: integer bounds are indistinguishable from positional ones, so
-    ``classify`` mints a ``ForwardSlice`` and its size reads them as positions. Against a
-    length-4 dim, ``sel(time=slice(20, 30))`` sized as **0** — an under-report, the
-    direction a size-driven rule could act on.
+    The tricky case. Integer label bounds look the same as positions, so ``classify``
+    makes a ``ForwardSlice``, whose size reads them as positions. Against a length-4 dim
+    that would size ``sel(time=slice(20, 30))`` as **0**: an under-report, the direction
+    a size-based rule could act on.
     """
     schema = SchemaState.from_dataset(ds)
     node = Select(name="sel", indexer={"time": slice(20, 30)})
@@ -287,12 +287,12 @@ def test_positional_isel_slice_is_still_sized_exactly(ds):
 
 
 def test_unknown_size_propagates_through_a_later_select(ds):
-    """Selecting on a dim of unknown size leaves it unknown, and never coerces it to zero.
+    """Selecting on a dim of unknown size leaves it unknown, and never turns it into zero.
 
     Notes
     -----
-    Unknown in, unknown out — the failure mode the ``var_dims`` docstring warns about for
-    the variable-level counterpart. A known size beside it is unaffected.
+    Unknown in, unknown out. This is the size equivalent of what the ``var_dims``
+    docstring warns about for variables. A known size next to it is unaffected.
     """
     unknown = _dim_coords_only({"time": None, "lat": 3})
     after = apply_schema(unknown, Select(name="isel", indexer={"time": slice(0, 2)}))
@@ -313,17 +313,17 @@ def test_scalar_select_still_drops_a_dim_of_unknown_size(ds):
     unknown = _dim_coords_only({"time": None, "lat": 3})
     after = apply_schema(unknown, Select(name="isel", indexer={"time": 0}))
     assert "time" not in after.sizes
-    # The *dim* goes without needing a size; the coordinate survives as 0-d, which is a
-    # separate rule (see ``test_scalar_isel_removes_dim_but_keeps_the_coord``) and is
-    # asserted here only so this test cannot pass by dropping too much.
+    # The *dim* goes without needing a size. The coordinate survives as 0-d, which is a
+    # separate rule (see ``test_scalar_isel_removes_dim_but_keeps_the_coord``), asserted
+    # here only so this test can't pass by dropping too much.
     assert after.coords == {"time", "lat"}
     assert after.variables["time"] == ()
 
 
 # --- grouped reduces -----------------------------------------------------------------
-# The arm was derived from what xarray actually does rather than from first principles,
-# so it is checked the same way: fold the schema, run the chain, compare. Anything else
-# would only re-assert the assumption the arm was written from.
+# The arm was written from what xarray actually does, so it's checked the same way: fold
+# the schema, run the chain, compare. Checking it any other way would only restate the
+# assumptions the arm was written from.
 
 
 @pytest.fixture
@@ -390,9 +390,8 @@ def test_grouped_reduce_arm_agrees_with_xarray(dated_ds, calls, node):
 
     Notes
     -----
-    The arm was derived from what xarray actually does rather than from first principles,
-    so it is checked the same way: fold the schema, run the chain, compare. Anything else
-    would only re-assert the assumption the arm was written from.
+    The arm was written from what xarray actually does, so it's checked the same way:
+    fold the schema, run the chain, compare.
     """
     eager = dated_ds
     for name, args in calls:
@@ -408,12 +407,12 @@ def test_grouped_reduce_arm_agrees_with_xarray(dated_ds, calls, node):
 
 
 def test_grouped_reduce_mints_a_dim_of_unknown_size(dated_ds):
-    """The minted dim has unknown extent, while untouched dims keep their known sizes.
+    """The new dim has unknown length, while untouched dims keep their known sizes.
 
     Notes
     -----
-    The group count is a fact about coordinate *values*, which this layer does not read —
-    exactly the gap ``int | None`` was added for.
+    The number of groups depends on coordinate *values*, which this layer doesn't read.
+    This is the case ``int | None`` sizes exist for.
     """
     node = GroupedReduce(
         name="groupby", group_dim="time", new_dim="month", reduce="mean"
@@ -426,13 +425,13 @@ def test_grouped_reduce_mints_a_dim_of_unknown_size(dated_ds):
 def test_grouped_reduce_adds_the_new_dim_to_a_variable_that_lacked_the_group_dim(
     dated_ds,
 ):
-    """A variable that never carried the group dim still gains the minted one.
+    """A variable that never had the group dim still gets the new one.
 
     Notes
     -----
-    ``elevation(lat, lon)`` comes back as ``(month, lat, lon)``. Verified against xarray
-    above; asserted directly here because it is the part a reader would most expect to be
-    wrong.
+    ``elevation(lat, lon)`` comes back as ``(month, lat, lon)``. Checked against xarray
+    above, and asserted directly here because it's the part a reader would most expect
+    to be wrong.
     """
     node = GroupedReduce(
         name="groupby", group_dim="time", new_dim="month", reduce="mean"
@@ -485,8 +484,8 @@ def test_windowed_reduce_arm_agrees_with_xarray(dated_ds, calls, node):
 
     Notes
     -----
-    ``time`` is 24 here, so ``trim`` and ``pad`` agree; the odd-length case below is what
-    actually tells the two roundings apart.
+    ``time`` is 24 here, so ``trim`` and ``pad`` agree; the odd-length case below is
+    what actually tells the two roundings apart.
     """
     eager = dated_ds
     for name, args, kwargs in calls:
@@ -559,9 +558,9 @@ def test_windowing_an_unknown_size_stays_unknown():
 
 
 # --- weighted reduces ----------------------------------------------------------------
-# Derived from xarray the same way the two arms above were: the weights' dim effect is the
-# part of this node that is *not* a plain reduce's, so it is compared against what
-# evaluation produces rather than against the assumption the arm was written from.
+# Checked against xarray the same way as the arms above. The weights' dim effect is the
+# part of this node that *isn't* a plain reduce's, so it's compared against what
+# evaluation produces, not against the assumptions the arm was written from.
 
 
 def _weighted(consumes, weight_dims, weights):
@@ -594,8 +593,8 @@ def _weighted(consumes, weight_dims, weights):
 @pytest.mark.parametrize(
     ("weights", "consumes"),
     [
-        # every weight dim consumed: nothing survives to be marked unknown, so the arm is
-        # exactly a plain reduce's and the schema stays fully exact
+        # every weight dim consumed: nothing survives to be marked unknown, so the arm
+        # is exactly a plain reduce's and the schema stays fully exact
         (lambda ds: ds["lat"] * ds["lon"], frozenset({"lat", "lon"})),
         # a weight dim *survives*: aligned here, but the arm cannot know that
         (lambda ds: ds["lat"] * ds["lon"], frozenset({"lat"})),
@@ -606,10 +605,10 @@ def _weighted(consumes, weight_dims, weights):
             ),
             frozenset({"lat"}),
         ),
-        # weights carrying a dim *one* variable has and another lacks: ``temperature``
-        # already spans ``time`` while ``elevation`` does not, and the broadcast reaches
-        # both. The mint is per variable, not per dataset: testing the dim against the
-        # dataset would skip ``elevation`` because a sibling still carries it.
+        # weights with a dim *one* variable has and another lacks: ``temperature``
+        # already spans ``time`` while ``elevation`` doesn't, and the broadcast reaches
+        # both. The dim is added per variable, not per dataset: checking the dim against
+        # the dataset would skip ``elevation`` because another variable still has it.
         (
             lambda ds: xr.DataArray(
                 [1.0, 2.0, 3.0, 4.0], dims="time", coords={"time": ds["time"]}
@@ -625,10 +624,9 @@ def test_weighted_reduce_arm_agrees_with_xarray(ds, weights, consumes):
 
     Notes
     -----
-    Derived from xarray the same way the two arms above were: the weights' dim effect is
-    the part of this node that is *not* a plain reduce's, so it is compared against what
-    evaluation produces rather than against the assumption the arm was written from.
-    Coords are asserted as a *subset*: a broadcast weight dim need carry no coord.
+    Checked against xarray like the arms above: the weights' dim effect is the part of
+    this node that isn't a plain reduce's. Coords are compared as a *subset*, because a
+    broadcast weight dim needn't have a coord.
     """
     w = weights(ds)
     eager = ds.weighted(w)
@@ -653,9 +651,9 @@ def test_a_surviving_weight_dim_is_sized_unknown_not_guessed(ds):
 
     Notes
     -----
-    The weights align with the dataset, so a shared dim can *shrink* — verified below. An
-    extent this layer cannot compute is ``None`` rather than the current size, which would
-    be an over-report of a dim a rewrite might act on.
+    The weights align with the dataset, so a shared dim can *shrink* (checked below). A
+    length this layer can't compute is ``None``. Keeping the current size would
+    over-report a dim a rewrite might act on.
     """
     w = ds["lat"] * ds["lon"]
     node = _weighted(frozenset({"lat"}), frozenset({"lat", "lon"}), w)
@@ -672,9 +670,9 @@ def test_misaligned_weights_really_do_shrink_a_shared_dim(ds):
 
     Notes
     -----
-    The fact the unknown above exists for, pinned against xarray so it is a verified claim
-    rather than a defensive guess: ``dot`` aligns, so weights covering two of three
-    ``lat`` labels inner-join and the dim comes back shorter.
+    Why the unknown above is needed, checked against xarray so it's a fact rather than a
+    precaution: ``dot`` aligns, so weights covering two of three ``lat`` labels
+    inner-join and the dim comes back shorter.
     """
     w = xr.DataArray([1.0, 2.0], dims="lat", coords={"lat": [0, 1]})
     eager = ds.weighted(w).mean("lon")
@@ -689,13 +687,13 @@ def test_misaligned_weights_really_do_shrink_a_shared_dim(ds):
 
 
 def test_a_broadcast_weight_dim_reaches_a_variable_that_could_not_have_had_it(ds):
-    """A weight dim the dataset lacks is broadcast onto every variable, unsized.
+    """A weight dim the dataset lacks is broadcast onto every variable, with unknown size.
 
     Notes
     -----
     The part a reader would most expect to be wrong: ``elevation`` has no ``member`` and
-    no way to acquire one, yet comes back carrying it — because ``dot`` broadcasts.
-    Asserted directly as well as via the derivation above.
+    no way to get one, yet comes back with it, because ``dot`` broadcasts. Asserted
+    directly as well as through the comparison above.
     """
     w = xr.DataArray([1.0, 2.0], dims="member", coords={"member": [0, 1]})
     node = _weighted(frozenset({"lat"}), frozenset({"member"}), w)
@@ -707,14 +705,14 @@ def test_a_broadcast_weight_dim_reaches_a_variable_that_could_not_have_had_it(ds
 
 
 def test_several_minted_dims_land_in_a_deterministic_order(ds):
-    """Several minted dims arrive sorted by ``str``, so two identical folds compare equal.
+    """Several new dims come out sorted by ``str``, so two identical folds compare equal.
 
     Notes
     -----
-    The minted set is a set, and ``SchemaState`` is a *value*: an iteration-order-dependent
-    dim tuple would make two snapshots folded from identical inputs unequal between
-    processes (set order over strings varies with ``PYTHONHASHSEED``). Dim order carries
-    no meaning here, so a stable one is free — but it has to be asserted to stay stable.
+    The new dims are a set, and ``SchemaState`` is compared by value. A dim tuple that
+    depended on set iteration order could make two identical folds unequal across
+    processes (set order over strings varies with ``PYTHONHASHSEED``). The order doesn't
+    mean anything, so making it stable is free, but it has to be tested to stay stable.
     """
     w = xr.DataArray(np.ones((2, 2, 2)), dims=("run", "member", "ens"))
     node = _weighted(frozenset({"lat"}), frozenset(w.dims), w)
@@ -751,8 +749,8 @@ def _orphaning_cases():
     -------
     list of pytest.param
         ``(ds, weights, consumes, coords_before_fix, coords_after_fix)`` per case, each
-        verified eagerly against xarray 2026.7.0 (before pydata/xarray#11562) and against
-        its merge commit (after).
+        verified eagerly against xarray 2026.7.0 (before pydata/xarray#11562) and
+        against its merge commit (after).
     """
     wt = xr.DataArray([1.0], dims="time")
     wl = xr.DataArray([1.0, 1.0, 1.0], dims="lat")
@@ -829,7 +827,8 @@ def test_weighted_reduce_models_uncarried_coords_per_xarray_version(
     expected = before if drops else after
     assert set(folded.coords) == expected
     # Every data variable ends 0-d in these cases, so the surviving dims are exactly the
-    # surviving coordinates' dims: a dim left spanned by nothing goes with its coordinate.
+    # surviving coordinates' dims: a dim left spanned by nothing goes with its
+    # coordinate.
     assert set(folded.sizes) == {d for c in expected for d in ds[c].dims}
 
 
@@ -858,13 +857,13 @@ def test_scan_leaves_schema_unchanged(ds):
 
 
 def test_elementwise_leaves_schema_exactly_unchanged(ds):
-    """An ``Elementwise`` preserves every variable, coordinate and size — the arm is exact.
+    """An ``Elementwise`` keeps every variable, coordinate and size: the arm is exact.
 
     Notes
     -----
-    Unlike :class:`~xrexpr.ir.Opaque` (which ``apply_schema`` treats as variable-preserving
-    only by *assumption*, past the trust boundary), a per-element op genuinely changes no
-    dim, size or variable, so every field of the snapshot is identical after it.
+    Unlike :class:`~xrexpr.ir.Opaque` (which ``apply_schema`` only *assumes* keeps
+    everything, past the trust boundary), a per-element op really changes no dim, size
+    or variable, so every field of the snapshot is identical afterwards.
     """
     schema = SchemaState.from_dataset(ds)
     after = apply_schema(schema, Elementwise(name="fillna", args=(0,)))
@@ -874,17 +873,17 @@ def test_elementwise_leaves_schema_exactly_unchanged(ds):
 
 
 def test_schema_threads_through_a_chain(ds):
-    """Two ops in sequence, one aggregating and one indexing — and they differ on coords.
+    """Two ops in sequence, one aggregating and one indexing, which treat coords differently.
 
     .. code-block:: python
 
         ds.mean("lat").isel(time=0).sizes    # {'lon': 5}
         ds.mean("lat").isel(time=0).coords   # lon, time
 
-    Verified against xarray 2026.7.0, and the pair is worth having in one test: ``lat``'s
-    coordinate is **dropped** by the aggregation, while ``time``'s survives the scalar
-    select as a 0-d coordinate. Same dim removed either way, opposite coordinate outcome —
-    the distinction only a coordinate carrying dims can express.
+    Checked against xarray 2026.7.0. Worth having in one test: ``lat``'s coordinate is
+    **dropped** by the aggregation, while ``time``'s survives the scalar select as a 0-d
+    coordinate. A dim is removed both times, with opposite results for the coordinate.
+    Only a coordinate that has dims can express that difference.
     """
     schema = SchemaState.from_dataset(ds)
     schema = apply_schema(schema, Reduce(name="mean", args=("lat",), consumes=["lat"]))
@@ -927,13 +926,12 @@ def test_scalar_select_strips_the_dim_from_every_variable(ds):
 
 
 def test_project_drops_the_dims_the_survivors_no_longer_span(ds):
-    """Projecting a variable that lacks ``time`` orphans ``time``, which xarray drops outright.
+    """Projecting a variable that lacks ``time`` leaves ``time`` unspanned, and xarray drops it.
 
     Notes
     -----
-    The tempting expectation is ``after.sizes == schema.sizes`` — that a projection narrows
-    only the variables. It doesn't. Checked against evaluation, which is what caught the
-    wrong version of this assertion.
+    It's tempting to expect ``after.sizes == schema.sizes``, i.e. that a projection only
+    narrows the variables. It doesn't, as comparing against evaluation shows.
     """
     schema = SchemaState.from_dataset(ds)
     after = apply_schema(schema, Project(name="__getitem__", variables=("elevation",)))
@@ -955,21 +953,22 @@ def test_project_keeping_every_dim_leaves_the_schema_alone(ds):
 
 
 def test_project_of_an_unknown_name_is_declined_whole(ds):
-    """An unmodellable projection gains no information, so the schema is left as it was.
+    """A projection the schema can't model tells it nothing, so the schema is left as it was.
 
-    ``ds[["nope"]]`` raises ``KeyError`` in xarray, so this state is only reachable when
-    something untracked introduced the name — an ``Opaque`` such as ``assign`` — which puts
-    the plan past ``optimize._trusted_prefix`` and out of reach of the variable-level rules
-    regardless.
+    ``ds[["nope"]]`` raises ``KeyError`` in xarray, so this state can only arise when
+    something untracked created the name (an ``Opaque`` such as ``assign``). That puts
+    the plan past ``optimize._trusted_prefix``, out of reach of the variable-level rules
+    anyway.
 
-    Restricting ``data_vars`` to the known names (so ``{}``) would leave ``time`` spanned
-    by nothing, so the derived dims would drop it — under-reporting, the unsafe direction.
+    Restricting ``data_vars`` to the known names (so ``{}``) would leave ``time``
+    spanned by nothing, so the derived dims would drop it. That's under-reporting, the
+    dangerous direction.
 
-    Declining the whole projection keeps the safe direction on dims — the assertion below,
-    and ``test_project_of_an_unknown_name_leaves_dims_alone`` — at the cost of reporting
-    variables that a modellable projection would have removed. Sound here because an
-    unmodellable ``Project`` is, at this layer, what an ``Opaque`` is: a node after which
-    nothing is claimed.
+    Ignoring the whole projection keeps the dims on the safe side (the assertion below,
+    and ``test_project_of_an_unknown_name_leaves_dims_alone``), at the cost of reporting
+    variables a modelled projection would have removed. That's fine here, because at
+    this layer an unmodellable ``Project`` is like an ``Opaque``: nothing is claimed
+    after it.
     """
     schema = SchemaState.from_dataset(ds)
     after = apply_schema(schema, Project(name="__getitem__", variables=("nope",)))
@@ -981,9 +980,9 @@ def test_project_of_an_unknown_name_leaves_dims_alone(ds):
 
     Notes
     -----
-    The guard on the arm: an untracked name (a coord, or something an unmodelled op
-    introduced) makes the spanned-dims union an *under*-report, which is the unsafe
-    direction. Unknown name -> keep every dim, as before.
+    The guard on the arm. An untracked name (a coord, or something an unmodelled op
+    created) would make the union of spanned dims an *under*-report, the dangerous
+    direction. So with an unknown name, every dim is kept.
     """
     schema = SchemaState.from_dataset(ds)
     after = apply_schema(schema, Project(name="__getitem__", variables=("nope",)))
@@ -1003,8 +1002,8 @@ def test_var_dims_is_none_for_an_unknown_name(ds):
 
     Notes
     -----
-    "don't know" -- a coord, or a variable an unmodelled op introduced. Callers must
-    read this as "no rewrite", not as "no dims".
+    ``None`` means "don't know": the name might be a coord, or a variable an unmodelled
+    op created. Callers must treat it as "no rewrite", not as "no dims".
     """
     schema = SchemaState.from_dataset(ds)
     assert schema.var_dims(["lat"]) is None  # a coord, not a data variable

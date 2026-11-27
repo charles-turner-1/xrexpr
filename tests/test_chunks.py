@@ -1,19 +1,20 @@
-"""Tests for the chunk *value* sum type (:mod:`xrexpr.chunks`).
+"""Tests for the chunk spec value type (:mod:`xrexpr.chunks`).
 
-:func:`classify_chunk` is the sole constructor from raw ``chunk`` specs, so the taxonomy is
-pinned here, split the same way ``test_indexers.py`` splits its own.
+:func:`classify_chunk` is the only way to build a chunk spec from a raw ``chunk``
+argument, so the classification is tested here, split the same way as in
+``test_indexers.py``.
 
-**Examples, at the top.** Which raw spelling becomes which variant is a decision, not a
-derivable fact, so it is written out; generating it would mean reimplementing
-``classify_chunk`` in the strategy in order to know the expected answer. The constructor
-invariants (``SingleSize`` below 1, an empty ``BlockSeq``) and the hashability of a
-``Rechunk`` carrying each variant live here too.
+**Examples, at the top.** Which raw spelling becomes which variant is a decision, not
+something you can derive, so it's written out. Generating it would mean reimplementing
+``classify_chunk`` in the strategy to know the expected answer. The constructor checks
+(``SingleSize`` below 1, an empty ``BlockSeq``) and the hashability of a ``Rechunk``
+holding each variant are tested here too.
 
-**Live checks against xarray, at the bottom.** The claims that are *about xarray* are
-asked of xarray rather than asserted from memory: that every variant's ``to_raw`` replays,
-and — the one that decides the shape of the taxonomy — that ``None`` and ``-1`` really are
-two behaviours rather than two spellings of one. That pair is why :class:`NoChange` and
-:class:`FullDim` both exist, so it is pinned rather than left in a module docstring.
+**Live checks against xarray, at the bottom.** Claims that are *about xarray* are
+checked against xarray rather than from memory: that every variant's ``to_raw`` replays,
+and that ``None`` and ``-1`` really behave differently rather than being two spellings
+of one thing. That difference is why :class:`NoChange` and :class:`FullDim` are separate
+variants, so it's tested rather than just stated in a docstring.
 """
 
 import importlib.util
@@ -38,8 +39,9 @@ from xrexpr.chunks import (
 )
 from xrexpr.ir import Rechunk
 
-#: xrexpr itself never needs dask, but replaying a ``chunk()`` call does -- without a chunk
-#: manager xarray raises rather than chunking, so the live checks below are skipped.
+#: xrexpr itself never needs dask, but replaying a ``chunk()`` call does -- without a
+#: chunk manager xarray raises rather than chunking, so the live checks below are
+#: skipped.
 requires_dask = pytest.mark.skipif(
     importlib.util.find_spec("dask") is None, reason="dask is not installed"
 )
@@ -70,16 +72,16 @@ def test_auto_classifies_as_auto():
 
 @pytest.mark.parametrize("raw", ["100MB", "10MiB", "1GB", "banana", ""])
 def test_byte_target_strings_classify_as_byte_size(raw):
-    """Any other string is a byte target, carried verbatim for dask to parse at replay.
+    """Any other string is a byte target, kept verbatim for dask to parse at replay.
 
     Notes
     -----
-    Nonsense included, which is the case that makes "verbatim" mean something: judging the
-    string would mean importing dask to ask ``parse_bytes``, and dask is optional here. Nor
-    is the boundary guessable — ``""`` parses as one byte and ``"100"`` as a hundred, while
-    ``"auto "`` with a trailing space raises — so a pattern of xrexpr's own would only
-    drift. Declining to look leaves ``Could not interpret 'banana' as a byte unit`` dask's
-    to word, at replay, exactly as an eager ``chunk`` would have raised it.
+    Including nonsense strings, which is what "verbatim" really means here. Checking the
+    string would mean importing dask to call ``parse_bytes``, and dask is optional. Nor
+    can the rule be guessed: ``""`` parses as one byte and ``"100"`` as a hundred, while
+    ``"auto "`` with a trailing space raises. A pattern of our own would drift from
+    dask's. Not checking leaves dask to raise ``Could not interpret 'banana' as a byte
+    unit`` at replay, just as an eager ``chunk`` would.
     """
     assert classify_chunk(raw) == ByteSize(raw)
 
@@ -96,14 +98,14 @@ def test_list_of_lengths_classifies_as_block_seq():
 
 @pytest.mark.parametrize("raw", [0, -2, True, 100.0, {100}, {"a": 1}])
 def test_unmodelled_specs_classify_as_opaque(raw):
-    """Anything outside the taxonomy is an ``OpaqueChunk``, which keeps classification total.
+    """Anything outside the modelled variants is an ``OpaqueChunk``, so every input gets an answer.
 
     Notes
     -----
-    Two kinds arrive here and neither is modelled. ``0`` and ``-2`` are specs xarray
-    rejects, so the plan cannot replay either way and the error stays xarray's to word;
-    ``True`` and ``100.0`` are ones dask happens to accept but xarray's API does not offer,
-    where declining to model costs an optimisation and never correctness.
+    Two kinds of value end up here, and neither is modelled. ``0`` and ``-2`` are specs
+    xarray rejects, so the plan can't replay either way and the error comes from xarray.
+    ``True`` and ``100.0`` are ones dask happens to accept but xarray's API doesn't
+    offer; not modelling them costs an optimisation, never correctness.
     """
     assert classify_chunk(raw) == OpaqueChunk(raw)
 
@@ -118,9 +120,9 @@ def test_empty_sequence_classifies_as_opaque():
     assert classify_chunk(()) == OpaqueChunk(())
 
 
-# Numpy-typed block lengths are not exotic: a dim length read off ``ds.sizes`` arithmetic
-# arrives as ``np.int64``, and an ``isinstance(x, int)`` test would file it as opaque --
-# silently turning a perfectly ordinary rechunk into a barrier.
+# numpy block lengths aren't unusual: arithmetic on ``ds.sizes`` gives ``np.int64``, and
+# an ``isinstance(x, int)`` test would classify it as opaque, quietly turning an
+# ordinary rechunk into a barrier.
 
 
 @pytest.mark.parametrize("raw", [np.int64(100), np.int32(100)])
@@ -152,13 +154,14 @@ def test_bool_is_not_an_integer_size():
 
 @pytest.mark.parametrize("size", [0, -1, -100])
 def test_single_size_rejects_a_non_positive_length(size):
-    """``SingleSize`` cannot be built with a length dask would refuse to divide by.
+    """``SingleSize`` can't be built with a length dask would refuse.
 
     Notes
     -----
-    An invariant rather than a downstream guard, the ``ForwardSlice`` precedent: it is what
-    lets every other site treat a ``SingleSize`` as a usable block length without re-testing
-    it. ``-1`` is excluded here *because* it means something else — see ``FullDim``.
+    Checked in the constructor rather than downstream, like ``ForwardSlice``. That's
+    what lets everything else treat a ``SingleSize`` as a valid block length without
+    re-checking. ``-1`` is excluded here *because* it means something else (see
+    ``FullDim``).
     """
     with pytest.raises(ValueError, match="must be >= 1"):
         SingleSize(size)
@@ -179,14 +182,14 @@ def test_block_seq_rejects_an_empty_sequence():
     ids=["single", "full", "none", "auto", "bytes", "blocks"],
 )
 def test_a_rechunk_bearing_each_variant_compares_and_hashes(raw):
-    """A ``Rechunk`` holding any modelled spec is still equal to its twin, and hashable.
+    """A ``Rechunk`` holding any modelled spec still equals an identical one, and is hashable.
 
     Notes
     -----
-    The ``Mask`` lesson from ``test_indexers.py``, and the reason ``BlockSeq`` stores a
-    tuple: plan equality is a real operation (the idempotence property in
-    ``test_properties.py`` asserts it), so a variant that made the enclosing node compare
-    or hash wrongly would be a landmine rather than a curiosity.
+    Same lesson as ``Mask`` in ``test_indexers.py``, and the reason ``BlockSeq`` stores
+    a tuple. Plans really are compared (the idempotence property in
+    ``test_properties.py`` does it), so a variant that broke equality or hashing of the
+    enclosing node would be a real bug.
     """
     spec = classify_chunk(raw)
     left = Rechunk(name="chunk", chunks=frozendict({"time": spec}))
@@ -196,12 +199,12 @@ def test_a_rechunk_bearing_each_variant_compares_and_hashes(raw):
 
 
 def test_variants_of_different_kinds_are_never_equal():
-    """``FullDim`` and ``NoChange`` are distinct values, not two names for one.
+    """``FullDim`` and ``NoChange`` are different values, not two names for one.
 
     Notes
     -----
-    Both are payload-free, so this is the assertion that they are two *types*. What makes
-    the distinction earn its keep is behavioural, and pinned against xarray below.
+    Neither has a payload, so this checks they're two separate *types*. The reason they
+    need to be is a difference in behaviour, tested against xarray below.
     """
     assert FullDim() != NoChange()
     assert Auto() != ByteSize("auto")
@@ -212,14 +215,14 @@ def test_variants_of_different_kinds_are_never_equal():
 
 @requires_dask
 def test_no_change_and_full_dim_are_different_behaviours():
-    """``None`` keeps an already-chunked dim's blocks where ``-1`` collapses them into one.
+    """``None`` keeps an already-chunked dim's blocks, where ``-1`` merges them into one.
 
     Notes
     -----
-    The fact the taxonomy's shape rests on. If these agreed, the two variants would be one
-    behaviour spelled twice and the module would model them as a single variant; they do
-    not, so it does not. Asked of xarray rather than asserted from the docs, since it is
-    the pinned dask's answer that matters.
+    This is why there are two variants. If they behaved the same, they'd be one
+    behaviour spelled two ways, and the module would model them as one variant. They
+    don't, so it doesn't. Checked against xarray rather than the docs, because what
+    matters is what the pinned dask actually does.
     """
     ds = xr.Dataset({"tas": (("time",), np.zeros(1000))}).chunk({"time": 100})
     assert ds.chunk({"time": NoChange().to_raw()}).chunks["time"] == (100,) * 10
@@ -237,10 +240,10 @@ def test_to_raw_chunks_the_dim_exactly_as_the_original_spelling_did(raw):
 
     Notes
     -----
-    ``to_raw`` is what a rewrite hands back to replay when it rebuilds a rechunk's
-    ``args``, so "xarray accepts it" is not enough — it has to land on the same blocks.
-    That covers the two spellings a variant *normalises*: a list of block lengths comes
-    back as a tuple, which xarray chunks identically.
+    ``to_raw`` is what a rewrite hands back to replay when it rebuilds a rechunk's call,
+    so "xarray accepts it" isn't enough: it has to produce the same blocks. That
+    includes the cases a variant *normalises*: a list of block lengths comes back as a
+    tuple, which xarray chunks the same way.
     """
     ds = xr.Dataset({"tas": (("time",), np.zeros(1000))})
     assert (
@@ -251,13 +254,13 @@ def test_to_raw_chunks_the_dim_exactly_as_the_original_spelling_did(raw):
 
 @requires_dask
 def test_classify_to_raw_round_trips_back_to_the_same_variant():
-    """Classifying a variant's own ``to_raw`` returns that variant, for every variant.
+    """Classifying a variant's own ``to_raw`` gives back that variant, for every variant.
 
     Notes
     -----
-    Idempotence of the pair, which is what lets a rewritten plan be re-recorded or
-    re-optimised without drifting. ``OpaqueChunk`` is included: an unmodelled spec must
-    stay unmodelled rather than sliding into a variant on a second pass.
+    The pair is idempotent, so a rewritten plan can be recorded or optimised again
+    without drifting. ``OpaqueChunk`` is included: an unmodelled spec must stay
+    unmodelled, not turn into a modelled variant on a second pass.
     """
     for spec in (
         SingleSize(100),
@@ -272,14 +275,14 @@ def test_classify_to_raw_round_trips_back_to_the_same_variant():
 
 
 def test_every_variant_is_reachable_from_a_raw_spec():
-    """No variant exists that ``classify_chunk`` never mints — an unreachable arm is dead.
+    """Every variant can be produced by ``classify_chunk``; an unreachable variant is dead code.
 
     Notes
     -----
-    The counterpart of the ``assert_never`` that closes the optimiser's match: mypy pins
-    that every variant is *handled*, and nothing but this pins that every variant is
-    *produced*. Both directions matter, since a variant no raw spec reaches would be a
-    barrier rule nobody could trigger.
+    The other half of the ``assert_never`` in the optimiser's ``match``. mypy checks
+    that every variant is *handled*; only this checks that every variant is *produced*.
+    Both matter: a variant no raw spec reaches would be a barrier rule nobody could
+    trigger.
     """
     reached = {
         type(classify_chunk(raw))

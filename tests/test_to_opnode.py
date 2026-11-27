@@ -1,14 +1,16 @@
-"""Tests for ``to_opnode``: record-time normalisation of a raw call.
+"""Tests for ``to_opnode``: turning one raw recorded call into a node.
 
-These are golden-node assertions: each recorded call, in every dim spelling, must
-resolve to the same :data:`~xrexpr.ir.Op` variant and normalised metadata
-(``consumes`` / ``indexer``) while keeping ``args``/``kwargs`` verbatim for replay.
-The headline case is that a no-dim ``mean()`` consumes :data:`~xrexpr.ir.ALL_DIMS` — the
-symbolic set, *not* an expansion against any schema — so a following select is rejected
-downstream rather than reordered, without freezing dim names the recorder may have wrong.
+Each test checks the exact node produced. Every dim spelling of a call must give the
+same :data:`~xrexpr.ir.Op` kind and parsed metadata (``consumes`` / ``indexer``), while
+``args``/``kwargs`` are kept verbatim for replay.
 
-``to_opnode`` takes no schema: these tests pass none, and the ``schema`` fixture appears
-only where a node is then folded through ``apply_schema``.
+The most important case: a ``mean()`` with no dim consumes :data:`~xrexpr.ir.ALL_DIMS`,
+a symbol, *not* a list of dims expanded against some schema. So a following select is
+rejected later on rather than reordered, and no dim names the recorder might have wrong
+get baked in.
+
+``to_opnode`` takes no schema. These tests pass none; the ``schema`` fixture only
+appears where a node is then folded through ``apply_schema``.
 """
 
 import pytest
@@ -62,9 +64,9 @@ def test_reduce_no_dim_consumes_all_dims_symbolically():
 
     Notes
     -----
-    The headline case: the set is left symbolic rather than expanded against a record-time
-    schema, so a following select is rejected rather than reordered, without freezing dim
-    names the recorder may have wrong. See ``ir``'s module docstring.
+    The dims are left symbolic rather than expanded against a schema at recording time.
+    So a following select is rejected rather than reordered, and no dim names the
+    recorder might have wrong get baked in. See ``ir``'s module docstring.
     """
     node = to_opnode("mean", (), {})
     assert node.consumes is ALL_DIMS
@@ -118,8 +120,8 @@ def test_reduce_keeps_non_dim_kwargs_verbatim(schema):
 
 # --- ``.reduce``, whose first positional is a function ----------------------------
 #
-# ``Dataset.reduce(func, dim, ...)`` is the one tabulated reduction that does not take its
-# dim spec first. Reading ``args[0]`` as one would record the *function* as a dim.
+# ``Dataset.reduce(func, dim, ...)`` is the one tabulated reduction that doesn't take
+# its dim first. Reading ``args[0]`` as the dim would record the *function* as a dim.
 
 
 def test_reduce_method_reads_its_dim_from_the_second_positional(schema):
@@ -147,9 +149,9 @@ def test_bare_reduce_method_consumes_all_dims_symbolically(schema):
 
     Notes
     -----
-    With the dim read off ``args[0]``, the lone function argument would make the call look
-    like a *named* reduce over ``frozenset({func})`` rather than a bare one, so a following
-    select on any real dim would be swapped in front instead of rejected.
+    With the dim read off ``args[0]``, the lone function argument would make the call
+    look like a *named* reduce over ``frozenset({func})`` rather than a bare one, so a
+    following select on any real dim would be swapped in front instead of rejected.
     """
     node = to_opnode("reduce", (sum,), {})
     assert node.consumes is ALL_DIMS
@@ -164,10 +166,10 @@ def test_keepdims_records_a_reduce_carrying_the_flag(schema):
     Notes
     -----
     Verified against xarray 2026.7.0: ``ds.mean("lat", keepdims=True)`` keeps ``lat`` at
-    size 1. ``consumes`` still names the dim -- what differs is that :attr:`Reduce.keepdims`
-    tells ``dim_effect``/``apply_schema`` the dim is *resized to 1* rather than removed, so
-    a valid chain optimises (``07-small-wins.md`` §9), and the ``immovable`` dim effect
-    keeps a select on that dim in place.
+    size 1. ``consumes`` still names the dim -- what differs is that
+    :attr:`Reduce.keepdims` tells ``dim_effect``/``apply_schema`` the dim is *resized to
+    1* rather than removed, so a valid chain optimises (``07-small-wins.md`` §9), and
+    the ``immovable`` dim effect keeps a select on that dim in place.
     """
     node = to_opnode("mean", ("lat",), {"keepdims": True})
     assert isinstance(node, Reduce)
@@ -229,14 +231,14 @@ def test_isel_option_kwarg_not_treated_as_dim(schema):
 
 
 def test_isel_orthogonal_dataarray_indexer_records_a_positional_select(schema):
-    """An orthogonal ``isel(<DataArray dims=(dim,)>)`` normalises to a positional ``Select``.
+    """An orthogonal ``isel(<DataArray dims=(dim,)>)`` becomes a positional ``Select``.
 
     Notes
     -----
-    A same-named ``DataArray`` indexes ``time`` identically to a bare ``ndarray`` of the
-    same positions, so ``_select_indexer`` normalises it to ``.values`` and the ordinary
-    taxonomy classifies it as ``Positions`` — it sizes, composes and reorders like any
-    positional select. The verbatim ``DataArray`` is kept in ``kwargs`` for replay.
+    A ``DataArray`` named after the dim indexes ``time`` exactly like a bare ``ndarray``
+    of the same positions. So ``_select_indexer`` replaces it with ``.values``, and it's
+    classified as ``Positions``: it sizes, composes and reorders like any positional
+    select. The verbatim ``DataArray`` is kept in ``kwargs`` for replay.
     """
     node = to_opnode("isel", (), {"time": xr.DataArray([0, 2], dims="time")})
     assert isinstance(node, Select)
@@ -253,13 +255,14 @@ def test_isel_scalar_dataarray_indexer_drops_its_dim(schema):
 
 
 def test_isel_vectorized_dataarray_indexer_is_opaque(schema):
-    """A vectorized ``isel(<DataArray dims=(new,)>)`` mints a dim, so the select demotes to ``Opaque``.
+    """A vectorized ``isel(<DataArray dims=(new,)>)`` creates a dim, so the select becomes ``Opaque``.
 
     Notes
     -----
-    A fresh-named ``DataArray`` drops ``time`` and mints its own dim — an effect no
-    positional indexer expresses and the schema layer does not model — so the guard
-    (``_select_has_advanced``) refuses it and the call replays verbatim, un-reordered.
+    A ``DataArray`` with a new dim name drops ``time`` and adds its own dim. No
+    positional indexer can express that, and the schema layer doesn't model it, so the
+    guard (``_select_has_advanced``) refuses it and the call replays verbatim, never
+    reordered.
     """
     node = to_opnode("isel", (), {"time": xr.DataArray([0, 1], dims="points")})
     assert isinstance(node, Opaque)
@@ -317,12 +320,12 @@ def test_fillna_scalar_records_elementwise(schema):
 
 
 def test_astype_dtype_records_elementwise(schema):
-    """``astype("float32")`` records an ``Elementwise``: a dtype spelling is a plain value.
+    """``astype("float32")`` records an ``Elementwise``: a dtype name is a plain value.
 
     Notes
     -----
-    The guard is a blocklist, so a ``np.dtype`` instance or a ``type`` passes it too — the
-    reason it is a blocklist rather than an allowlist enumerating dtype spellings.
+    The guard is a blocklist, so a ``np.dtype`` instance or a ``type`` passes too.
+    That's why it's a blocklist rather than an allowlist of every way to write a dtype.
     """
     assert isinstance(to_opnode("astype", ("float32",), {}), Elementwise)
     assert isinstance(to_opnode("astype", (float,), {}), Elementwise)
@@ -338,12 +341,13 @@ def test_clip_scalar_bounds_records_elementwise(schema):
 
 
 def test_fillna_dataarray_arg_is_opaque(schema):
-    """``fillna(<DataArray>)`` fills from another array's values, so it demotes to ``Opaque``.
+    """``fillna(<DataArray>)`` fills from another array's values, so it becomes ``Opaque``.
 
     Notes
     -----
-    A data-shaped fill does not commute with a projection the way a scalar does, so the
-    guard (``_elementwise_safe``) refuses it and the call replays verbatim, un-reordered.
+    Filling from an array doesn't commute with a projection the way a scalar fill does,
+    so the guard (``_elementwise_safe``) refuses it and the call replays verbatim, never
+    reordered.
     """
     other = xr.DataArray([1.0, 2.0, 3.0], dims="lat")
     node = to_opnode("fillna", (other,), {})
@@ -372,14 +376,14 @@ def test_rechunk_kwarg_mapping(schema):
 
 @pytest.mark.parametrize("spec", [100, "auto", -1])
 def test_uniform_rechunk_names_no_dim(schema, spec):
-    """A uniform spec leaves ``chunks`` empty, stays in ``args``, and classifies into ``uniform``.
+    """A uniform spec leaves ``chunks`` empty, stays in ``args``, and is classified into ``uniform``.
 
     Notes
     -----
-    A uniform spec has no dim key a later select could invalidate, so nothing lands in
-    ``chunks`` — but it is still a spec, and ``Rechunk.uniform`` is where the taxonomy sees
-    it. ``chunks`` and ``uniform`` are the two places a ``chunk`` call writes its spec, and
-    exactly one of them is populated.
+    A uniform spec has no dim key a later select could invalidate, so nothing goes in
+    ``chunks``. But it's still a spec, and ``Rechunk.uniform`` is where it's classified.
+    ``chunks`` and ``uniform`` are the two places a ``chunk`` call's spec can go, and
+    only one of them is ever set.
     """
     node = to_opnode("chunk", (spec,), {})
     assert node.chunks == frozendict()
@@ -392,15 +396,15 @@ def test_a_uniform_spec_silences_the_dim_kwargs(schema):
 
     Notes
     -----
-    Measured against xarray 2026.7.0: ``Dataset.chunk`` takes the
-    ``dict.fromkeys(self.dims, chunks)`` branch for any non-Mapping ``chunks`` and never
-    reaches ``either_dict_or_kwargs``, so ``ds.chunk("auto", time=5)`` chunks every dim
-    ``"auto"`` and applies nothing to ``time`` — where the mapping spelling of the same
-    clash, ``ds.chunk({"time": 4}, lat=5)``, raises instead.
+    Measured against xarray 2026.7.0. ``Dataset.chunk`` takes the
+    ``dict.fromkeys(self.dims, chunks)`` path for any non-mapping ``chunks`` and never
+    looks at the kwargs. So ``ds.chunk("auto", time=5)`` chunks every dim ``"auto"`` and
+    ignores ``time``, whereas the mapping form of the same clash, ``ds.chunk({"time":
+    4}, lat=5)``, raises.
 
-    Recording the silenced kwarg is not harmless: it is a spec key, so a rewrite could strip
-    the others around it and rebuild ``args`` from what is left, replaying a call the user
-    never wrote.
+    Recording the ignored kwarg wouldn't be harmless. It would be a spec key, so a
+    rewrite could strip the keys around it and rebuild ``args`` from what's left,
+    replaying a call the user never wrote.
     """
     node = to_opnode("chunk", ("auto",), {"time": 5})
     assert node.chunks == frozendict()
@@ -451,8 +455,8 @@ def test_getitem_names_are_not_validated_at_record_time(schema):
 
     Notes
     -----
-    Whether it may *move* is the optimiser's call, made against ``data_vars`` at that
-    point in the plan — recording is a pure function of the call.
+    Whether it may *move* is for the optimiser to decide, against ``data_vars`` at that
+    point in the plan. Recording only looks at the call.
     """
     node = to_opnode("__getitem__", (["nope"],), {})
     assert isinstance(node, Project) and node.variables == ("nope",)

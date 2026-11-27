@@ -1,16 +1,18 @@
 """Shared fixtures for the test suite.
 
-Both fixtures live here so every module sees the same canonical dataset rather than
-maintaining its own copy — a ``temperature`` variable over
-``("time", "lat", "lon")`` sized ``(4, 3, 5)`` alongside an ``elevation`` variable over
-``("lat", "lon")`` that is *missing* ``time``, with integer ``arange`` coords. The
-second, ``time``-less variable is what the projection-pushdown rule must refuse to
-reorder past a ``time`` reduction, so the metadata modules need it in scope too.
+Both fixtures live here so every module uses the same dataset rather than its own copy:
 
-``ds`` carries random (seeded) values for the modules that evaluate results; ``schema``
-wraps a zeros dataset of the same shape for the modules that only reason about metadata.
-``tests/test_accessor.py`` shadows ``ds`` with a richer variant that adds a non-dimension
-coord, to prove the rewrite preserves auxiliary coords.
+- ``temperature`` over ``("time", "lat", "lon")``, sized ``(4, 3, 5)``;
+- ``elevation`` over ``("lat", "lon")``, *without* ``time``;
+- integer ``arange`` coords.
+
+The second variable, without ``time``, is the one the projection-pushdown rule must not
+move past a ``time`` reduction, so the metadata-only modules need it too.
+
+``ds`` has random (seeded) values, for modules that evaluate results. ``schema`` wraps a
+zeros dataset of the same shape, for modules that only reason about metadata.
+``tests/test_accessor.py`` overrides ``ds`` with a version that adds a non-dimension
+coord, to check that rewrites keep auxiliary coords.
 """
 
 import numpy as np

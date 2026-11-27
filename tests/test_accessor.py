@@ -1,10 +1,9 @@
 """Tests for the ``.plan`` accessor.
 
-Covers recording behaviour and *equality* — ``ds.plan.<chain>.collect()`` matches
-the eager ``ds.<chain>`` for the README pipelines, exercising record → optimise →
-replay end to end. The golden op-list assertions that pin the optimiser itself live
-in ``tests/test_optimize.py`` (it owns ``optimize``); here we only care that the
-accessor records the right nodes and that the pipeline replays to the right result.
+These check recording, and *equality*: ``ds.plan.<chain>.collect()`` matches the eager
+``ds.<chain>``, running record, optimise and replay end to end. Assertions about the
+exact optimised node list belong in ``tests/test_optimize.py``. Here we only check that
+the accessor records the right nodes and that the result is right.
 """
 
 import importlib.util
@@ -48,19 +47,19 @@ requires_matplotlib = pytest.mark.skipif(
     importlib.util.find_spec("matplotlib") is None, reason="matplotlib is not installed"
 )
 
-#: ``rolling_exp`` is the one opener xarray refuses outright without numbagg (an explicit
-#: ``ImportError``, not a slow fallback), so only its *replay* needs this -- the lowering
-#: half of those tests asserts fine either way. Nothing else in the suite needs numbagg
-#: **installed**; the ``test-nonumbagg`` environment exists because numbagg changes
+#: ``rolling_exp`` is the one opener xarray refuses to run without numbagg (an explicit
+#: ``ImportError``, not a slow fallback), so only its *replay* needs this. The lowering
+#: half of those tests passes either way. Nothing else in the suite needs numbagg
+#: **installed**. The ``test-nonumbagg`` environment exists because numbagg changes
 #: reduction *results*, not because it gates features.
 requires_numbagg = pytest.mark.skipif(
     importlib.util.find_spec("numbagg") is None, reason="numbagg is not installed"
 )
 
 
-# A richer dataset than the shared ``conftest.ds``: this module shadows it to add an
-# auxiliary (non-dimension) ``area`` coord, exercising that projection pushdown preserves
-# aux coords when it reorders the plan.
+# This overrides the shared ``conftest.ds`` to add an auxiliary (non-dimension) ``area``
+# coord, so tests can check that projection pushdown keeps aux coords when it reorders
+# the plan.
 @pytest.fixture
 def ds() -> xr.Dataset:
     """A richer dataset than the shared ``conftest.ds``, with an auxiliary ``area`` coord.
@@ -140,9 +139,9 @@ def test_recording_holds_no_schema_and_the_optimiser_folds_it(ds):
 
     Notes
     -----
-    Recording is a pure append -- the proxy carries the base dataset and the plan and
-    nothing else. The single logical-schema fold belongs to the optimiser, which plans from
-    the front and so is the reader whose fold is exact.
+    Recording only appends: the proxy holds the base dataset and the plan, nothing else.
+    The optimiser does the one schema fold, starting from the front of the plan, which
+    is where it's exact.
     """
     chain = ds.plan.mean("lat").isel(time=0)
     assert not hasattr(chain, "_schema")
@@ -193,8 +192,9 @@ def test_ellipsis_dim_reduces_over_every_dim_and_matches_eager(ds, chain):
 
     Notes
     -----
-    Read as a name, ``...`` would be a dim *named* ``Ellipsis``, and the plan would replay a
-    reduce over nothing: ``ds.plan.mean(...)`` would come back with every dim intact.
+    Read as a name, ``...`` would be a dim *named* ``Ellipsis``, and the plan would
+    replay a reduce over nothing: ``ds.plan.mean(...)`` would come back with every dim
+    intact.
     """
     assert_equal(chain(ds.plan).collect(), chain(ds))
 
@@ -319,9 +319,9 @@ def test_keepdims_reduce_then_select_on_kept_dim_matches_eager(ds):
     Notes
     -----
     ``keepdims=True`` keeps ``time`` at size 1. Treated as a plain reduce of ``time``,
-    ``pushdown_selects`` would read the select as indexing a reduced-away dim and raise on a
-    chain that works eagerly. The ``immovable`` dim effect leaves the select in place
-    instead, so it replays equal.
+    ``pushdown_selects`` would read the select as indexing a reduced-away dim and raise
+    on a chain that works eagerly. The ``immovable`` dim effect leaves the select in
+    place instead, so it replays equal.
     """
     got = ds.plan.mean("time", keepdims=True).isel(time=0).collect()
     assert_equal(got, ds.mean("time", keepdims=True).isel(time=0))
@@ -369,8 +369,8 @@ def test_cumsum_then_disjoint_select_matches_eager(ds):
     Notes
     -----
     The optimiser hops ``isel(lat=0)`` in front of ``cumsum("time")``; the two commute
-    because the scan runs independently at each ``lat``, and ``assert_equal`` is what proves
-    the reorder changed no value.
+    because the scan runs independently at each ``lat``, and ``assert_equal`` is what
+    proves the reorder changed no value.
     """
     got = ds.plan.cumsum("time").isel(lat=0).collect()
     assert_equal(got, ds.cumsum("time").isel(lat=0))
@@ -393,8 +393,8 @@ def test_projection_pushdown_equal(ds):
 
     Notes
     -----
-    The rewrite reduces only ``temperature``; the result must still match the eager chain --
-    coords included, which is what ``assert_equal`` checks.
+    The rewrite reduces only ``temperature``; the result must still match the eager
+    chain -- coords included, which is what ``assert_equal`` checks.
     """
     got = ds.plan.mean("time")[["temperature"]].collect()
     assert_equal(got, ds.mean("time")[["temperature"]])
@@ -465,10 +465,11 @@ def test_drop_dimension_coord_keeps_the_dim_and_replays_equal(ds):
 
     Notes
     -----
-    ``drop_vars("time")`` removes the ``time`` coordinate but leaves ``time`` a dimension
-    without coordinates, since ``temperature`` still spans it -- the schema edge that is not
-    a plain ``_aggregated`` drop, and the case the property generator holds out (a
-    coordinate-less dim breaks a later generated ``sel``).
+    ``drop_vars("time")`` removes the ``time`` coordinate but leaves ``time`` as a
+    dimension without a coordinate, because ``temperature`` still spans it. That's the
+    schema case that isn't a plain ``_aggregated`` drop, and the property generator
+    doesn't produce it (a dim without a coordinate breaks a later generated ``sel``), so
+    it's tested here.
     """
     got = ds.plan.drop_vars("time").isel(time=0).collect()
     assert_equal(got, ds.drop_vars("time").isel(time=0))
@@ -480,8 +481,9 @@ def test_a_redundant_drop_is_eliminated_and_replays_equal(ds):
     Notes
     -----
     ``drop_vars("elevation")[["temperature"]]`` collapses to ``[["temperature"]]`` --
-    ``elevation`` is never computed -- via :func:`~xrexpr.optimize.push_projection_past_drop`.
-    The value must still match the eager chain.
+    ``elevation`` is never computed -- via
+    :func:`~xrexpr.optimize.push_projection_past_drop`. The value must still match the
+    eager chain.
     """
     chain = ds.plan.drop_vars("elevation")[["temperature"]]
     optimised = optimize(list(chain._ops), chain._base_schema())
@@ -558,8 +560,8 @@ def test_orthogonal_dataarray_select_records_a_select_and_replays_equal(ds):
 
     Notes
     -----
-    The optimisation payoff: the select is not a barrier, so ``mean("lat").isel(...)``
-    optimises (the select hops the disjoint reduce — pinned structurally in
+    The point is that the select isn't a barrier, so ``mean("lat").isel(...)`` optimises
+    (the select moves in front of the reduce; the exact plan is checked in
     ``test_optimize``) and still equals the eager chain.
     """
     idx = xr.DataArray([0, 2], dims="time")
@@ -598,9 +600,9 @@ def test_scalar_select_crosses_fillna_matches_eager(ds):
 
     Notes
     -----
-    The reorder is what this pins — ``isel`` leads the optimised plan — and ``assert_equal``
-    proves crossing the elementwise op (and the disjoint reduce) changed no value, the
-    dropped ``time`` dim included.
+    Checks that the reorder happens (``isel`` comes first in the optimised plan), and
+    that moving past the elementwise op and the reduce on a different dim changed no
+    value, including the dropped ``time`` dim.
     """
     chain = ds.plan.mean("lat").fillna(0.0).isel(time=0)
     assert [c.name for c in emit(chain._optimized())] == ["isel", "mean", "fillna"]
@@ -630,12 +632,12 @@ def test_a_reduce_is_never_reordered_across_a_fillna_matches_eager():
 
     Notes
     -----
-    ``fillna`` and a reduce do not commute when a NaN is present -- fill-then-average
-    differs from average-then-fill -- so this is the case a hypothetical reduce-crossing
-    bug would break. The shared fixtures carry no NaN, which would make ``fillna`` a no-op
-    and rob an equality check of its teeth, so this builds a dataset with one. A select is
-    threaded through to make the optimiser actually rewrite: it hops to the front past both
-    ops, and the ``fillna``/``mean`` order must survive intact.
+    ``fillna`` and a reduce don't commute when there's a NaN: fill-then-average differs
+    from average-then-fill. So this is the case a reduce-crossing bug would break. The
+    shared fixtures have no NaN, which would make ``fillna`` do nothing and the equality
+    check pointless, so this builds a dataset with one. A select is added so the
+    optimiser actually rewrites something: it moves to the front past both ops, and the
+    ``fillna``/``mean`` order has to survive.
     """
     t = np.arange(24.0).reshape(4, 3, 2)
     t[0, 0, 0] = np.nan
@@ -653,8 +655,8 @@ def test_blocked_projection_still_replays(ds):
 
     Notes
     -----
-    ``elevation`` has no ``time``, so the projection can't move -- but the plan is perfectly
-    valid eagerly.
+    ``elevation`` has no ``time``, so the projection can't move -- but the plan is
+    perfectly valid eagerly.
     """
     got = ds.plan.mean("time")[["elevation"]].collect()
     assert_equal(got, ds.mean("time")[["elevation"]])
@@ -665,10 +667,10 @@ def test_merged_projections_equal(ds):
 
     Notes
     -----
-    ``assert_identical`` rather than ``assert_equal``: the claim the merge rests on is
-    that a projection's *coordinate* pruning composes, so names and attrs are exactly
-    what is under test -- the ``area(lat, lon)`` coord this module's fixture adds is the
-    one a sloppier rule would drop.
+    ``assert_identical`` rather than ``assert_equal``. The merge relies on a
+    projection's *coordinate* pruning composing correctly, so names and attrs are
+    exactly what's under test. The ``area(lat, lon)`` coord this module's fixture adds
+    is the one a sloppier rule would drop.
     """
     got = ds.plan[["temperature", "elevation"]][["temperature"]].collect()
     assert len(ds.plan[["temperature", "elevation"]][["temperature"]]._optimized()) == 1
@@ -687,11 +689,11 @@ def test_a_projection_feeding_a_coord_is_dropped_and_replays_equal(ds):
 
     Notes
     -----
-    ``ds[["temperature"]]["lat"]`` materialises ``temperature`` only to discard it and
-    return the ``lat`` coordinate. ``lat`` survives ``p1`` (``temperature`` spans it), so
-    the optimal plan reads the coord from the base and never touches the data variable --
-    ``eliminate_projection_before_coord`` drops ``p1``. A schema-based rewrite, distinct
-    from the syntactic merge: it proves ``lat`` passes through ``p1`` untouched.
+    ``ds[["temperature"]]["lat"]`` builds ``temperature`` only to throw it away and
+    return the ``lat`` coordinate. ``lat`` survives ``p1`` (``temperature`` spans it),
+    so the best plan reads the coord from the base and never touches the data variable:
+    ``eliminate_projection_before_coord`` drops ``p1``. Unlike the plain merge, this
+    rewrite uses the schema to prove ``lat`` passes through ``p1`` unchanged.
     """
     chain = ds.plan[["temperature"]]["lat"]
     assert [type(n) for n in chain._optimized()] == [Project]
@@ -704,7 +706,8 @@ def test_a_projection_feeding_an_aux_coord_is_dropped_and_replays_equal(ds):
     Notes
     -----
     ``area`` is an auxiliary ``(lat, lon)`` coordinate; ``temperature`` spans both dims,
-    so ``area`` survives ``p1`` and the pair collapses to reading ``area`` from the base.
+    so ``area`` survives ``p1`` and the pair collapses to reading ``area`` from the
+    base.
     """
     chain = ds.plan[["temperature"]]["area"]
     assert [type(n) for n in chain._optimized()] == [Project]
@@ -712,13 +715,14 @@ def test_a_projection_feeding_an_aux_coord_is_dropped_and_replays_equal(ds):
 
 
 def test_a_projection_feeding_a_coord_across_a_select_is_left(ds):
-    """A select between the two projections un-adjoins them, so the pair is left and replays equal.
+    """A select between the two projections separates them, so the pair is left and replays equal.
 
     Notes
     -----
-    With a select in between, ``p1``'s consumer is the select, not the projection, and the
-    two forms genuinely differ (the chain reads ``lat`` from ``p1``'s *selected* result).
-    The rule is adjacency-only, so it declines -- and the plan still replays equal to eager.
+    With a select in between, ``p1`` feeds the select, not the projection, and the two
+    forms really are different (the chain reads ``lat`` from ``p1``'s *selected*
+    result). The rule only looks at adjacent pairs, so it declines, and the plan still
+    equals eager.
     """
     chain = ds.plan[["temperature"]].isel(time=0)["lat"]
     assert [type(n) for n in chain._optimized()].count(Project) == 2
@@ -728,15 +732,15 @@ def test_a_projection_feeding_a_coord_across_a_select_is_left(ds):
 
 
 def test_merging_projections_skips_an_error_from_a_discarded_name(ds):
-    """Merging drops a first projection whose extra name doesn't exist — §8's discarded-work clause.
+    """Merging drops a first projection whose extra name doesn't exist (§8: discarded work may skip errors).
 
     Notes
     -----
-    Eager raises ``KeyError`` building an intermediate the chain throws away one node
-    later; the merged plan asks only for what the chain actually wanted and succeeds. The
-    same licence ``pushdown_projections`` runs on
+    Eagerly this raises ``KeyError`` while building an intermediate the chain throws
+    away one step later. The merged plan only asks for what the chain actually wanted,
+    and succeeds. It's the same allowance ``pushdown_projections`` relies on
     (``test_projection_pushdown_skips_an_error_from_a_discarded_variable``): no value
-    moves, and the skipped error comes from work whose result is discarded.
+    changes, and the skipped error came from work whose result is discarded.
     """
     with pytest.raises(KeyError):
         ds[["temperature", "nope"]][["temperature"]]
@@ -778,13 +782,13 @@ def test_explain_lists_one_line_per_lowered_node(ds):
 
 
 def test_explain_still_answers_what_will_run(ds):
-    """``explain()`` names every emitted call, in order, even at the node-level listing.
+    """``explain()`` lists every emitted call, in order.
 
     Notes
     -----
-    The property the call-level listing had and the node-level one must not give up: every
-    emitted call appears, in order. Derived from ``emit`` rather than restated, so it cannot
-    pass by agreeing with a stale expectation.
+    ``explain()`` shows lowered nodes, but it must still show every call that will run,
+    in order. The expected calls come from ``emit`` rather than being written out, so
+    the test can't pass by matching a stale expectation.
     """
     chain = ds.plan.groupby("time.month").mean().isel(lat=0)
     text = chain.explain()
@@ -793,13 +797,13 @@ def test_explain_still_answers_what_will_run(ds):
 
 
 def test_explain_names_the_opaque_nodes_that_stopped_the_optimiser(ds):
-    """``explain()`` names the ``Opaque`` nodes and states they are unmodelled, answering why nothing moved.
+    """``explain()`` names the ``Opaque`` nodes and says they're unmodelled, answering why nothing moved.
 
     Notes
     -----
-    The question the call-level listing could not answer: *why* did nothing move? An
-    unfusable context is two opaque nodes, and a reader should not have to know which methods
-    are modelled to find that out.
+    An unfusable context becomes two opaque nodes. ``explain()`` should make that
+    visible, so a reader can see *why* nothing moved without knowing which methods are
+    modelled.
     """
     text = ds.plan.groupby("lat").first().mean("time").explain()
     assert text.count("Opaque") == 2
@@ -822,8 +826,8 @@ def test_explain_repr_is_unescaped_text(ds):
 
     Notes
     -----
-    The REPL echoes ``repr()``; it must be the formatted multi-line plan, not the escaped
-    one-line form a plain ``str`` would produce.
+    The REPL echoes ``repr()``; it must be the formatted multi-line plan, not the
+    escaped one-line form a plain ``str`` would produce.
     """
     text = ds.plan.mean("lat").isel(time=0).explain()
     assert isinstance(text, Explanation)
@@ -917,14 +921,13 @@ def test_unparseable_byte_target_fails_exactly_as_eager_does(chunky_ds):
 
     Notes
     -----
-    The other half of the contract ``test_chunks.py`` pins without dask, where every string
-    classifies as a ``ByteSize`` unexamined. This is what unexamined buys: the same
-    ``ValueError`` xarray raises eagerly, in dask's words rather than any xrexpr invented.
+    ``test_chunks.py`` checks that every string classifies as a ``ByteSize`` without
+    being parsed. This is the other half: because it isn't parsed, the error is the same
+    ``ValueError`` xarray raises eagerly, in dask's words.
 
-    Deferred, not lost. Recording the chain succeeds where the eager spelling has already
-    raised, and the rechunk is pushable (a byte target re-picks against whatever data
-    survives), so the select really does hop in front of it here. Neither the deferral nor
-    the rewrite may swallow the failure.
+    The error is deferred, not lost: recording succeeds where the eager chain would
+    already have raised, and the error still has to come out at ``collect``. (A byte
+    target is sized from the array, so it's a barrier and the select stays behind it.)
     """
     ds = chunky_ds
     chain = ds.plan.chunk({"time": "banana"}).isel(time=slice(50, 250))  # records fine
@@ -941,11 +944,11 @@ def test_an_emptying_select_crosses_an_auto_rechunk_when_xarray_supports_it(chun
 
     Notes
     -----
-    ``isel(lat=[])`` keeps ``lat`` at length 0. Before xarray 2026.09.0, hoisting it hands
-    the auto rechunk a zero-size array and dask raises ``ZeroDivisionError``. xarray's
-    pydata/xarray#11486 replaces that auto request with the zero-byte full shape, so the
-    same hop is safe on newer versions. A non-emptying select remains a barrier; see
-    :func:`test_a_harmless_select_also_stays_behind_an_auto_rechunk`.
+    ``isel(lat=[])`` keeps ``lat`` at length 0. Before xarray 2026.09.0, hoisting it
+    hands the auto rechunk a zero-size array and dask raises ``ZeroDivisionError``.
+    xarray's pydata/xarray#11486 replaces that auto request with the zero-byte full
+    shape, so the same hop is safe on newer versions. A non-emptying select remains a
+    barrier; see :func:`test_a_harmless_select_also_stays_behind_an_auto_rechunk`.
     """
     ds = chunky_ds
     chain = ds.plan.chunk({"time": "auto"}).isel(lat=[])
@@ -962,13 +965,13 @@ def test_an_emptying_select_crosses_an_auto_rechunk_when_xarray_supports_it(chun
 def test_an_emptying_select_crosses_a_uniform_auto_rechunk_when_xarray_supports_it(
     chunky_ds,
 ):
-    """The same version-gated exemption applies to the uniform ``chunk("auto")`` spelling.
+    """The same version-gated exception applies to the uniform ``chunk("auto")`` form.
 
     Notes
     -----
-    The uniform form rides in ``args`` rather than ``chunks``, but xarray passes it to the
-    same chunk manager. At a 1 kB target an old xarray version raises after the hop; 2026.09.0
-    and later take the same safe full-shape fallback as the mapping form.
+    The uniform form is stored in ``args`` rather than ``chunks``, but xarray hands it
+    to the same chunk manager. At a 1 kB target, older xarray raises after the hop;
+    2026.09.0 and later use the same safe full-shape fallback as the per-dim form.
     """
     import dask
 
@@ -995,13 +998,14 @@ def test_a_harmless_select_also_stays_behind_an_auto_rechunk(chunky_ds):
 
     Notes
     -----
-    The cost of drawing the line on the *spec* rather than on the pair, stated as a test.
-    ``isel(lat=slice(0, 2))`` cannot empty anything, and it is refused anyway, because
-    whether ``"auto"`` survives a hop is not decidable from the plan: it depends on the
-    configured ``array.chunk-size`` and on the rank — see :class:`~xrexpr.chunks.Auto`.
+    This is the cost of deciding from the *spec* rather than from the pair.
+    ``isel(lat=slice(0, 2))`` can't empty anything, but it's refused anyway, because
+    whether ``"auto"`` survives the hop can't be decided from the plan: it depends on
+    the configured ``array.chunk-size`` and the number of dims (see
+    :class:`~xrexpr.chunks.Auto`).
 
-    An extent-*independent* spec in the same position still crosses, which
-    :func:`test_a_select_crosses_a_sized_rechunk` pins.
+    A size-*independent* spec in the same position still crosses; see
+    :func:`test_a_select_crosses_a_sized_rechunk`.
     """
     ds = chunky_ds
     chain = ds.plan.chunk({"time": "auto"}).isel(lat=slice(0, 2))
@@ -1015,13 +1019,13 @@ def test_a_harmless_select_also_stays_behind_an_auto_rechunk(chunky_ds):
 
 @requires_dask
 def test_a_select_crosses_a_sized_rechunk(chunky_ds):
-    """A select crosses every spec dask does *not* size from the array, emptying or not.
+    """A select crosses every spec dask doesn't size from the array, whether it empties a dim or not.
 
     Notes
     -----
-    The other side of the line, end to end: a fixed size is that size on any array, so the
-    hop is made and the result still matches eager. Without this the refusals above would be
-    consistent with a rule that had simply stopped working.
+    The other side of the line, end to end. A fixed size means the same on any array, so
+    the hop happens and the result still matches eager. Without this test, the refusals
+    above would also be consistent with a rule that had just stopped working.
     """
     ds = chunky_ds
     chain = ds.plan.chunk({"time": 100}).isel(lat=[])
@@ -1043,13 +1047,13 @@ def test_rechunk_and_reduce_pushdown_compose(chunky_ds):
 
 @requires_dask
 def test_adjacent_rechunks_merge_to_one_op_matching_eager(chunky_ds):
-    """Two ``chunk`` calls over disjoint dims fuse to a single ``chunk`` op that matches eager.
+    """Two ``chunk`` calls over different dims merge into one ``chunk`` that matches eager.
 
     Notes
     -----
-    ``chunk({"time": 100}).chunk({"lat": 50})`` is one request written in two calls; the
-    merged node applies both at once, landing on the same topology dask reaches by applying
-    the later call on top of the earlier.
+    ``chunk({"time": 100}).chunk({"lat": 50})`` is one request written as two calls. The
+    merged node applies both at once and produces the same blocks dask does when
+    applying the second call on top of the first.
     """
     ds = chunky_ds
     chain = ds.plan.chunk({"time": 100}).chunk({"lat": 2})
@@ -1086,24 +1090,24 @@ def test_compute_is_alias_for_collect(ds):
 
 
 # --- terminal operations -------------------------------------------------------------
-# ``.plot`` / ``.to_*`` consume the plan into a figure/file/array rather than another
-# link in the chain. They are callable (``ds.plot`` is an accessor with ``__call__``),
-# so without special handling they would be *recorded* and silently never run. They must
-# instead trigger ``collect()`` (firing the rewrite) and delegate to the realised object.
+# ``.plot`` / ``.to_*`` turn the plan into a figure, file, array, etc., rather than
+# extending the chain. They're callable (``ds.plot`` is an accessor with ``__call__``),
+# so without special handling they'd be *recorded* and never run. Instead they must call
+# ``collect()`` (so the rewrite happens) and delegate to the computed object.
 
 
 @pytest.mark.parametrize("term", sorted(_EAGER_ATTRS))
 def test_every_terminal_is_routed_not_recorded(ds, term):
-    """Every name in ``_EAGER_ATTRS`` is routed to the materialised object, never recorded as a plan op.
+    """Every name in ``_EAGER_ATTRS`` is routed to the computed object, never recorded as a plan op.
 
     Notes
     -----
-    Coverage guard over the whole ``_EAGER_ATTRS`` set: catches a typo'd / nonexistent name
-    in the set, or a terminal that gets silently recorded instead of delegated. Route through
-    the chain whose collected result actually carries the terminal -- some are Dataset-only
-    (``to_array``, ``to_stacked_array``), some DataArray-only (``to_series``, ``to_numpy``).
-    Picking by ``hasattr`` keeps this declarative and avoids hardcoded lists that would rot
-    if the set changes.
+    Covers the whole ``_EAGER_ATTRS`` set. It catches a misspelled or nonexistent name
+    in the set, and a terminal that gets recorded instead of delegated. Each name is
+    reached through a chain whose result actually has it: some are Dataset-only
+    (``to_array``, ``to_stacked_array``), some DataArray-only (``to_series``,
+    ``to_numpy``). Choosing by ``hasattr`` avoids hand-written lists that would go stale
+    if the set changed.
     """
     ds_chain = ds.plan.mean("lat")  # collects to a Dataset
     da_chain = ds.plan["temperature"].mean("lat")  # collects to a DataArray
@@ -1124,16 +1128,15 @@ def test_every_terminal_is_routed_not_recorded(ds, term):
     "``_EAGER_ATTRS`` rather than vacuously.",
 )
 def test_unregistered_terminal_is_not_routed(ds):
-    """A name absent from ``_EAGER_ATTRS`` is not routed to the eager-delegate path, xfailed strictly.
+    """A name not in ``_EAGER_ATTRS`` isn't routed to the eager-delegate path (strict xfail).
 
     Notes
     -----
-    The negative of :func:`test_every_terminal_is_routed_not_recorded`: a name absent from
-    ``_EAGER_ATTRS`` must NOT reach the eager-delegate path. It falls through to the
-    record / property branch and (being bogus) raises ``AttributeError`` -- so the routing
-    assertions below never hold. Strict xfail, so if ``to_nowhere`` is ever added to the set
-    (or otherwise made to route) this turns green and fails the suite, forcing a deliberate
-    update.
+    The opposite of :func:`test_every_terminal_is_routed_not_recorded`. A name not in
+    ``_EAGER_ATTRS`` must *not* reach the eager-delegate path. It goes to the
+    record/property branch and, being bogus, raises ``AttributeError``, so the routing
+    assertions never hold. The xfail is strict, so if ``to_nowhere`` were ever added to
+    the set this would start passing and fail the suite, forcing a deliberate update.
     """
     term = "to_nowhere"
     assert term not in _EAGER_ATTRS
@@ -1144,10 +1147,10 @@ def test_unregistered_terminal_is_not_routed(ds):
 
 
 # --- grouped / windowed contexts -----------------------------------------------------
-# ``groupby``/``resample``/``rolling``/... return a builder, not a Dataset, so calls after
-# them mean something different from the same-named Dataset ops. Lowering fuses a
-# recognised opener/closer pair into one semantic node; a pair it can't fuse demotes to
-# ``Opaque``, which no rewrite rule can fire on or across -- correct but unoptimised.
+# ``groupby``/``resample``/``rolling``/... return a builder, not a Dataset, so the call
+# after them means something different from the same-named Dataset method. Lowering
+# fuses a recognised opener/closer pair into one node. A pair it can't fuse becomes
+# ``Opaque``, which no rule can fire on or move across: correct, but not optimised.
 
 
 @pytest.fixture
@@ -1157,11 +1160,11 @@ def dated_ds() -> xr.Dataset:
     Returns
     -------
     xarray.Dataset
-        ``temperature(time, lat, lon)`` with a datetime ``time`` coord -- ``ds`` has an
-        integer one, and ``resample`` needs a real one. ``lon`` and the ``area`` aux coord
-        are here for the fused-reduce pushdown tests: a third dim gives the select somewhere
-        disjoint to go, and a non-dimension coord spanning the selected dims checks the
-        reorder carries it along.
+        ``temperature(time, lat, lon)`` with a datetime ``time`` coord (``ds`` has an
+        integer one, and ``resample`` needs a datetime one). ``lon`` and the ``area``
+        aux coord are for the fused-reduce pushdown tests: a third dim gives a select
+        somewhere independent to go, and an aux coord spanning the selected dims checks
+        that the reorder keeps it.
     """
     rng = np.random.default_rng(0)
     return xr.Dataset(
@@ -1180,10 +1183,10 @@ def test_groupby_then_reduce_then_select_matches_eager(ds):
 
     Notes
     -----
-    Valid *eagerly* -- ``groupby('time').mean()`` reduces within groups, leaving ``lat`` for
-    the later ``isel(lat=0)``. Before the barrier the proxy recorded the grouped ``mean()``
-    as a full-dataset reduce (no dim -> every current dim), so its schema dropped ``lat`` and
-    ``collect()`` raised ``InvalidExpressionError``.
+    Valid eagerly: ``groupby('time').mean()`` reduces within groups, so ``lat`` is still
+    there for the later ``isel(lat=0)``. Treated as a plain Dataset reduce (bare, so
+    over every dim), the grouped ``mean()`` would drop ``lat`` from the schema and
+    ``collect()`` would wrongly raise ``InvalidExpressionError``.
     """
     chain = ds.plan.groupby("time").mean().isel(lat=0)
     assert_equal(chain.collect(), ds.groupby("time").mean().isel(lat=0))
@@ -1194,9 +1197,9 @@ def test_select_after_grouped_reduce_matches_eager(ds):
 
     Notes
     -----
-    The other failure mode: a select on a dim *disjoint* from the bogus ``consumes`` was
-    silently swapped behind the reduce, and replay then looked ``isel`` up on the
-    ``DatasetGroupBy``. Barriered, it replays in the order written.
+    The other way a Dataset-level reading of the closer would go wrong: a select on a
+    dim outside the bogus ``consumes`` would be moved behind the reduce, and replay
+    would then call ``isel`` on the ``DatasetGroupBy``. It replays in the order written.
     """
     chain = ds.plan.groupby("time").mean().isel(time=0)
     assert_equal(chain.collect(), ds.groupby("time").mean().isel(time=0))
@@ -1214,10 +1217,10 @@ def test_context_chain_records_an_opener_then_lowers_to_one_node(ds):
     assert [type(n) for n in lowered] == [GroupedReduce, Select]
     assert not any(isinstance(n, ContextOpen) for n in lowered)
 
-    # ... which is what ``explain()`` shows: one op, still rendered as the
-    # two calls it replays as, in the order they were written. ``time -> time`` is not a
-    # typo and is the reason the annotation exists -- ``groupby("time")`` *re-mints* the
-    # dim, so the ``time`` the trailing ``isel`` indexes is group labels, not the original.
+    # ... which is what ``explain()`` shows: one op, still shown as the two calls it replays
+    # as, in the order written. ``time -> time`` isn't a typo, and it's the reason the
+    # annotation exists: ``groupby("time")`` *re-creates* the dim, so the ``time`` the
+    # trailing ``isel`` indexes holds group labels, not the original values.
     assert chain.explain() == Explanation(
         "plan (2 ops):\n"
         "  1. GroupedReduce  groupby('time').mean()  [time -> time]\n"
@@ -1233,8 +1236,8 @@ def regioned_ds() -> xr.Dataset:
     -------
     xarray.Dataset
         ``temperature(time, lat)`` with a ``region`` coord defined on ``lat``, so
-        ``groupby("region")`` groups along ``lat`` and mints ``region`` -- everyday xarray.
-        ``lat``'s three values give two groups.
+        ``groupby("region")`` groups along ``lat`` and mints ``region`` -- everyday
+        xarray. ``lat``'s three values give two groups.
     """
     rng = np.random.default_rng(0)
     return xr.Dataset(
@@ -1248,15 +1251,15 @@ def regioned_ds() -> xr.Dataset:
 
 
 def test_a_non_dim_coordinate_grouper_does_not_fuse(regioned_ds):
-    """A ``groupby`` on a non-dim coordinate refuses to fuse and falls back to the opaque pair, matching eager.
+    """A ``groupby`` on a non-dim coordinate doesn't fuse; it falls back to the opaque pair and matches eager.
 
     Notes
     -----
-    The grouper's *name* is not the dim it consumes: ``groupby("region")`` consumes ``lat``
-    and mints ``region``, but nothing in the call says so, and fusing on the call's own
-    reading would give ``group_dim="region"`` — a schema claiming ``lat`` survived a
-    grouping that removed it, read by the fold *and* by ``dim_effect``'s ``blocks`` and
-    ``requires``. Refusing puts the pair on the opaque fallback: correct, unoptimised
+    The grouper's *name* isn't the dim it consumes. ``groupby("region")`` consumes
+    ``lat`` and creates ``region``, but the call doesn't say so. Fusing based on the
+    call alone would give ``group_dim="region"``: a schema claiming ``lat`` survived a
+    grouping that removed it, which would mislead both the fold and ``dim_effect``.
+    Refusing sends the pair to the opaque fallback: correct, just not optimised
     (``02-lowering.md`` §5.5).
     """
     chain = regioned_ds.plan.groupby("region").mean()
@@ -1270,9 +1273,9 @@ def test_explain_prints_no_group_arrow_for_a_coordinate_grouper(regioned_ds):
 
     Notes
     -----
-    ``explain()`` renders a fused node's inference as ``[group_dim -> new_dim]``; fused, this
-    pair would state ``[region -> region]`` -- the tool asserting a wrong fact about the
-    data. Unfused, there is no arrow to get wrong.
+    ``explain()`` shows a fused node's dims as ``[group_dim -> new_dim]``. If this pair
+    were fused, it would show ``[region -> region]``, which is wrong about the data.
+    Unfused, there's no arrow to get wrong.
     """
     text = str(regioned_ds.plan.groupby("region").mean().explain())
 
@@ -1296,14 +1299,14 @@ def test_ops_after_an_unfusable_context_are_modelled_again(ds):
 
 
 def test_select_on_a_grouped_nodes_own_dim_stays_put(ds):
-    """A select on a grouped reduce's own (re-minted) dim stays put, replaying to the eager result.
+    """A select on a grouped reduce's own (re-created) dim stays put, replaying to the eager result.
 
     Notes
     -----
-    ``groupby("time")`` mints the dim it grouped over, so ``isel(time=0)`` indexes the
-    *minted* ``time`` -- valid eagerly, and immovable. Pinned end to end because it is the
-    case the select-pushdown rule must decline: hopping this in front would index the
-    original ``time`` instead of the group labels.
+    ``groupby("time")`` re-creates the dim it grouped over, so ``isel(time=0)`` indexes
+    the *new* ``time``. That's valid eagerly, and the select can't move. Tested end to
+    end because it's the case select pushdown must decline: moving it in front would
+    index the original ``time`` instead of the group labels.
     """
     chain = ds.plan.groupby("time").mean().isel(time=0)
     assert [c.name for c in emit(chain._optimized())] == ["groupby", "mean", "isel"]
@@ -1311,14 +1314,14 @@ def test_select_on_a_grouped_nodes_own_dim_stays_put(ds):
 
 
 def test_climatology_select_is_pushed_in_front_of_the_grouping(dated_ds):
-    """A select hops in front of a climatology grouping, so it runs over one latitude and still matches eager.
+    """A select moves in front of a climatology grouping, so it runs over one latitude and still matches eager.
 
     Notes
     -----
-    The payoff the whole lowering workstream was built for: the grouping runs over one
-    latitude instead of over all of them and then discarding the rest. Both halves are
-    asserted -- that the rewrite *fires*, so this cannot pass vacuously, and that it still
-    equals eager.
+    This is the main case fused grouped nodes exist for: the grouping runs over one
+    latitude, instead of over all of them before discarding the rest. Both halves are
+    checked: that the rewrite *happens* (so this can't pass trivially), and that the
+    result still equals eager.
     """
     chain = dated_ds.plan.groupby("time.month").mean().isel(lat=0)
 
@@ -1350,8 +1353,8 @@ def test_select_across_a_fused_reduce_matches_eager(dated_ds, chain):
 
     Notes
     -----
-    Whether the select moved or not, the answer must not change -- which is the only thing
-    that makes "hop when disjoint, leave otherwise" worth anything.
+    Moved or not, the answer must not change. That's what makes "move when the dims
+    don't overlap, leave it otherwise" safe.
     """
     assert_equal(chain(dated_ds.plan).collect(), chain(dated_ds))
 
@@ -1397,9 +1400,10 @@ def test_projection_past_a_windowed_reduce_is_left_when_the_dim_would_go(dated_d
 
     Notes
     -----
-    Pinned end to end because the failure would be loud rather than wrong: projecting first
-    drops the ``time`` coord (no surviving variable uses it) and ``rolling`` raises
-    ``Window dimensions ('time',) not found``. The rule must not create that.
+    Tested end to end because the failure would be an error, not a wrong value.
+    Projecting first drops the ``time`` coord (no kept variable uses it), and
+    ``rolling`` then raises ``Window dimensions ('time',) not found``. The rule must not
+    cause that.
     """
     ds = dated_ds.assign(elevation=(("lat", "lon"), np.zeros((3, 4))))
     chain = ds.plan.rolling(time=3).mean()[["elevation"]]
@@ -1413,41 +1417,42 @@ def test_projection_past_a_windowed_reduce_is_left_when_the_dim_would_go(dated_d
 
 
 def test_projection_pushdown_skips_an_error_from_a_discarded_variable(dated_ds):
-    """Pushing a projection down skips work the plan discards — errors included.
+    """Pushing a projection down skips work the plan discards, including errors.
 
-    ``station`` is a *string* variable, so a Dataset ``std("time")`` raises while reducing
-    it. Eager therefore fails computing a standard deviation the chain explicitly throws
-    away; the rewrite never computes it. The optimised answer is the better one — see
-    ``planning/roadmap/07-small-wins.md`` §8, which settles this as a deliberate property
-    rather than a divergence to be repaired.
+    ``station`` is a *string* variable, so a Dataset ``std("time")`` raises while
+    reducing it. Eagerly, the chain fails computing a standard deviation it then throws
+    away. The rewrite never computes it. The optimised answer is the better one; see
+    ``planning/roadmap/07-small-wins.md`` §8, which makes this an intended property
+    rather than a difference to fix.
 
-    Safe because the values cannot move: the rule fires only once the projected variables
-    are known to carry the dims the crossed op names, so they reduce identically either
-    way, and the sole difference is a discarded variable's error.
+    It's safe because values can't change: the rule only fires once the kept variables
+    are known to have the dims the crossed op names, so they reduce the same way either
+    way. The only difference is a discarded variable's error.
     """
     # ------------------------------------------------------------------------------
     # WHY A *STRING* VARIABLE, AND NOT THE OBVIOUS FLOAT ONE. Read before "simplifying".
     #
-    # What this test asserts is a fact about *xrexpr*: ``pushdown_projections`` skips work
-    # on a discarded variable, errors included. To assert it we need eager to fail, and any
-    # failure will do -- the failure is a *prop*, not the subject.
+    # This test is about *xrexpr*: ``pushdown_projections`` skips work on a discarded
+    # variable, errors included. To test that we need eager to fail, and any failure
+    # will do. The failure is a prop, not the subject.
     #
-    # The tempting alternative sources that failure from a float variable lacking ``time``:
-    # a Dataset reduce hands such a variable an empty axis set, and ``std``/``var`` blow up
-    # on it. That looks like the natural choice and it is a trap, because **the blow-up is a
-    # numbagg bug, not xarray behaviour** -- numbagg reads ``axis=()`` as ``axis=None`` and
-    # returns a scalar (07-small-wins.md §8 has the full account). Pinning it would make
-    # this test assert that a third-party bug is *present*: it would fail under
-    # ``use_numbagg=False``, and again the day numbagg fixed it -- in both
-    # cases reporting DID NOT RAISE, as though xrexpr had regressed.
+    # The tempting alternative gets the failure from a float variable without ``time``:
+    # a Dataset reduce gives that variable an empty axis set, and ``std``/``var`` blow
+    # up on it. That's a trap, because **the blow-up is a numbagg bug, not xarray
+    # behaviour**. numbagg reads ``axis=()`` as ``axis=None`` and returns a scalar
+    # (07-small-wins.md §8 has the details). Relying on it would make this test assert
+    # that a third-party bug *exists*. It would fail under ``use_numbagg=False``, and
+    # again whenever numbagg fixes it, both times reporting DID NOT RAISE as though
+    # xrexpr had broken.
     #
-    # numpy refusing to ``std`` a ``<U4`` array is xarray/numpy's own semantics and reaches
-    # numbagg not at all -- its dispatch gate requires ``dtype.kind in "uif"``. So the prop
-    # holds still with numbagg present, absent, or fixed. Swapping back to a float variable
-    # re-couples this test to numbagg's release schedule.
+    # numpy refusing to ``std`` a ``<U4`` array is xarray/numpy's own behaviour and
+    # never reaches numbagg (numbagg only handles ``dtype.kind in "uif"``). So the prop
+    # works with numbagg present, absent, or fixed. Switching back to a float variable
+    # would tie this test to numbagg's releases.
     #
-    # NOTE this changes nothing about the numbagg bug itself, which is not ours to fix and
-    # is still live in this environment -- see EMPTY_AXIS_UNSAFE_REDUCES in test_properties.
+    # NOTE: this doesn't change the numbagg bug itself, which isn't ours to fix and is
+    # still
+    # present in this environment. See EMPTY_AXIS_UNSAFE_REDUCES in test_properties.
     # ------------------------------------------------------------------------------
     ds = dated_ds.assign(station=(("lat", "lon"), np.full((3, 4), "buoy")))
 
@@ -1460,13 +1465,13 @@ def test_projection_pushdown_skips_an_error_from_a_discarded_variable(dated_ds):
 
 
 def test_projection_pushdown_introduces_no_error_of_its_own(dated_ds):
-    """Projection pushdown introduces no error of its own when both orders succeed; they must agree exactly.
+    """Projection pushdown adds no error of its own: when both orders succeed, they must agree exactly.
 
     Notes
     -----
-    The other half of §8's contract: skipping a discarded variable's failure is allowed,
-    inventing one is not. ``mean`` skips a variable lacking the dim rather than refusing, so
-    both orders succeed and must agree exactly.
+    The other half of §8: skipping a discarded variable's error is allowed, adding one
+    isn't. ``mean`` skips a variable that lacks the dim rather than raising, so both
+    orders succeed and must give the same result.
     """
     ds = dated_ds.assign(elevation=(("lat", "lon"), np.zeros((3, 4))))
     assert_equal(
@@ -1476,15 +1481,15 @@ def test_projection_pushdown_introduces_no_error_of_its_own(dated_ds):
 
 
 def test_a_projection_hops_past_a_weighted_reduce_and_disarms_it(dated_ds):
-    """A projection hops past a ``WeightedReduce`` and disarms an error that eager would raise, end to end.
+    """A projection hops past a ``WeightedReduce`` and avoids an error eager would raise, end to end.
 
     Notes
     -----
-    §8's contract at its sharpest, end to end. Eagerly this chain *raises*: a weighted reduce
-    maps per variable and ``elevation`` has no ``time``, where a plain ``.mean("time")``
-    would merely waste effort on it. The projection hops in front, so ``elevation`` is gone
-    before the reduce runs and the plan delivers the value it was asked for. Not a masked
-    error -- an error that only ever came from discarded work.
+    The clearest case of §8, end to end. Eagerly this chain *raises*: a weighted reduce
+    runs per variable, and ``elevation`` has no ``time`` (a plain ``.mean("time")``
+    would just do some wasted work on it). The projection moves in front, so
+    ``elevation`` is gone before the reduce runs and the plan returns the value it was
+    asked for. No error is hidden: it only ever came from discarded work.
     """
     ds = dated_ds.assign(elevation=(("lat", "lon"), np.zeros((3, 4))))
     weights = ds["area"]
@@ -1500,14 +1505,14 @@ def test_a_projection_hops_past_a_weighted_reduce_and_disarms_it(dated_ds):
 
 
 def test_a_projection_orphaning_a_weight_dim_is_left(dated_ds):
-    """A projection that would orphan a coord the weights align against is left alone, end to end.
+    """A projection that would drop a coord the weights align against is left alone, end to end.
 
     Notes
     -----
     The guard, end to end. ``elevation`` has no ``time``, so projecting to it drops the
-    ``time`` *coordinate* -- and these weights carry ``time``, so after the hop they would
-    broadcast a fresh ``time`` instead of inner-joining against the dataset's. That changes
-    values, not just errors, which is why ``requires`` adds ``weight_dims``.
+    ``time`` *coordinate*. These weights have ``time``, so after the hop they'd
+    broadcast a new ``time`` instead of inner-joining against the dataset's. That
+    changes values, not just errors, which is why ``requires`` includes ``weight_dims``.
     """
     ds = dated_ds.assign(elevation=(("lat", "lon"), np.zeros((3, 4))))
     weights = xr.DataArray(
@@ -1522,14 +1527,15 @@ def test_a_projection_orphaning_a_weight_dim_is_left(dated_ds):
 
 
 def test_select_on_a_consumed_group_dim_still_raises_from_xarray(dated_ds):
-    """A select on a grouped reduce's consumed dim is left, and raises from xarray at replay, not from the optimiser.
+    """A select on a grouped reduce's consumed dim is left alone, and xarray raises at replay (not the optimiser).
 
     Notes
     -----
-    Left rather than raised, so the error comes from xarray at replay in its own words -- not
-    an ``InvalidExpressionError`` the optimiser guessed at. ``pushdown_selects`` raises for a
-    plain reduce because a reduce always removes what it names; a grouped one mints as well,
-    so the same inference would reject valid chains.
+    Left rather than rejected, so the error comes from xarray at replay, in its own
+    words, not an ``InvalidExpressionError`` the optimiser guessed at.
+    ``pushdown_selects`` raises for a plain reduce because a reduce always removes what
+    it names. A grouped reduce also creates a dim, so the same reasoning would reject
+    valid chains.
     """
     chain = dated_ds.plan.groupby("time.month").mean().isel(time=0)
     with pytest.raises(ValueError, match="Dimensions"):
@@ -1537,13 +1543,14 @@ def test_select_on_a_consumed_group_dim_still_raises_from_xarray(dated_ds):
 
 
 def test_builder_only_method_records_and_replays(ds):
-    """A method that exists only on the builder (``first``) records inside a context and replays to the eager result.
+    """A method that only exists on the builder (``first``) is recorded inside a context and replays to eager.
 
     Notes
     -----
-    ``first`` is a ``DatasetGroupBy`` method that does not exist on Dataset, so before the
-    barrier it fell to the property branch and collected eagerly -- onto a ``DatasetGroupBy``
-    with no ``.compute()``. In context the callable check is skipped and it records.
+    ``first`` is a ``DatasetGroupBy`` method that doesn't exist on Dataset. If the
+    accessor asked the base object whether it's callable, it would take the property
+    branch and compute eagerly, on a ``DatasetGroupBy`` that has no ``.compute()``.
+    Inside a context that check is skipped, so it's recorded.
     """
     chain = ds.plan.groupby("lat").first()
     assert isinstance(chain, LazyProxy)
@@ -1555,8 +1562,8 @@ def test_getitem_in_context_selects_a_group_not_a_variable(ds):
 
     Notes
     -----
-    ``DatasetGroupBy.__getitem__`` selects a *group*; classifying it as a ``Project`` would
-    let projection pushdown treat the key as a variable name.
+    ``DatasetGroupBy.__getitem__`` selects a *group*; classifying it as a ``Project``
+    would let projection pushdown treat the key as a variable name.
     """
     chain = ds.plan.groupby("lat")[0]
     assert isinstance(chain._ops[-1], Opaque)
@@ -1574,8 +1581,8 @@ def test_rolling_then_select_matches_eager(ds):
 
     Notes
     -----
-    ``lat`` is disjoint from the window, so the rolling mean runs over one latitude instead
-    of three.
+    ``lat`` is disjoint from the window, so the rolling mean runs over one latitude
+    instead of three.
     """
     chain = ds.plan.rolling(time=2).mean().isel(lat=0)
     assert [type(n) for n in chain._optimized()] == [Select, WindowedReduce]
@@ -1592,14 +1599,15 @@ def test_coarsen_matches_eager(ds, boundary):
 
 
 def test_rolling_closer_that_looks_like_a_dim_spec_fuses_and_matches_eager(ds):
-    """A rolling closer whose positional arg looks like a dim name fuses, and still matches eager.
+    """A rolling closer whose positional arg looks like a dim name still fuses, and matches eager.
 
     Notes
     -----
-    ``DatasetRolling.mean`` takes no dim argument, so this passes ``"lat"`` as *keep_attrs*
-    and reduces nothing. The parsed dim is inert, so lowering fuses the pair into a single
-    ``WindowedReduce`` (dropping the ``to_opnode`` misparse) rather than leaving an ``Opaque``
-    barrier, and the verbatim replay still matches xarray exactly.
+    ``DatasetRolling.mean`` takes no dim argument, so this passes ``"lat"`` as
+    *keep_attrs* and reduces nothing. The parsed dim has no effect, so lowering fuses
+    the pair into one ``WindowedReduce`` (dropping ``to_opnode``'s wrong ``consumes``)
+    rather than leaving an ``Opaque`` barrier, and the verbatim replay still matches
+    xarray exactly.
     """
     chain = ds.plan.rolling(time=2).mean("lat")
     assert [type(n) for n in chain._optimized()] == [WindowedReduce]
@@ -1619,12 +1627,12 @@ def test_rolling_closer_that_looks_like_a_dim_spec_fuses_and_matches_eager(ds):
     ],
 )
 def test_deliberately_unfused_openers_still_match_eager(ds, chain):
-    """An opener deliberately left unfused (``rolling_exp``, ``cumulative``) still replays verbatim to match eager.
+    """An opener deliberately not fused (``rolling_exp``, ``cumulative``) still replays verbatim and matches eager.
 
     Notes
     -----
-    The other half of a refusal to fuse: it has to *work*. These replay verbatim, so the pair
-    stays opaque and the ops around it are unaffected.
+    The other half of refusing to fuse: it has to *work*. These replay verbatim, so the
+    pair stays opaque and the ops around it are unaffected.
     """
     plan = chain(ds.plan)
     assert [type(n) for n in plan._optimized()[:2]] == [Opaque, Opaque]
@@ -1651,9 +1659,9 @@ def test_weighted_bare_closer_matches_eager(ds):
 
     Notes
     -----
-    A bare closer really does reduce every dim here (unlike a *grouped* bare closer, which
-    reduces only along the group dim) -- ``DatasetWeighted.mean`` takes ``dim`` and
-    ``dim=None`` means all of them, so the recorded ``ALL_DIMS`` carries over untouched.
+    A bare closer really does reduce every dim here (unlike a *grouped* bare closer,
+    which only reduces along the group dim). ``DatasetWeighted.mean`` takes ``dim``, and
+    ``dim=None`` means all of them, so the recorded ``ALL_DIMS`` carries over as is.
     """
     chain = ds.plan.weighted(ds["area"]).mean()
     assert [type(n) for n in chain._optimized()] == [WeightedReduce]
@@ -1661,11 +1669,11 @@ def test_weighted_bare_closer_matches_eager(ds):
 
 
 def test_select_after_a_weighted_reduce_does_not_move(ds):
-    """A select after a ``WeightedReduce`` does not move, and the plan replays in the order written.
+    """A select after a ``WeightedReduce`` doesn't move, and the plan replays in the order written.
 
     Notes
     -----
-    The rewrite the variant exists to block, checked end to end: pushing the ``isel`` left
+    The rewrite the node exists to block, checked end to end: moving the ``isel`` left
     would leave the weights un-subset.
     """
     weights = ds["area"]
@@ -1679,8 +1687,8 @@ def test_ops_after_a_weighted_reduce_are_modelled(ds):
 
     Notes
     -----
-    Lowering opaques only the *pair*, so the trailing reduce is a real ``Reduce`` again --
-    the half of the barrier's retirement that ``weighted`` had been waiting for.
+    Only the builder *pair* is affected by lowering, so the reduce after it is a normal
+    ``Reduce``.
     """
     weights = ds["area"]
     chain = ds.plan.weighted(weights).mean("lat").mean("time")
@@ -1694,7 +1702,7 @@ def test_weighted_only_closers_still_match_eager(ds, closer):
 
     Notes
     -----
-    The other half of a refusal to fuse: the verbatim replay has to *work*. These are not
+    The other half of refusing to fuse: the verbatim replay has to *work*. These aren't
     tabulated reductions, so they record ``Opaque`` and the pair stays opaque.
     """
     weights = ds["area"]
@@ -1704,13 +1712,13 @@ def test_weighted_only_closers_still_match_eager(ds, closer):
 
 
 def test_weights_carrying_a_dim_the_dataset_lacks_match_eager(ds):
-    """Weights carrying a dim the dataset lacks broadcast that dim onto every variable, and the plan still matches eager.
+    """Weights with a dim the dataset lacks broadcast it onto every variable, and the plan still matches eager.
 
     Notes
     -----
-    ``dot`` broadcasts, so this *adds* ``member`` to every variable -- the fact
-    ``weight_dims`` exists for. Nothing moves across the node, so replay is verbatim; what is
-    being checked is that the modelled schema did not mislead a later rule.
+    ``dot`` broadcasts, so this *adds* ``member`` to every variable, which is what
+    ``weight_dims`` is for. Nothing moves across the node, so replay is verbatim. What's
+    being checked is that the modelled schema didn't mislead a later rule.
     """
     weights = xr.DataArray([1.0, 2.0], dims="member", coords={"member": [0, 1]})
     chain = ds.plan.weighted(weights).mean("lat").mean("member")
@@ -1723,8 +1731,8 @@ def test_terminal_after_context_matches_eager(ds):
 
     Notes
     -----
-    ``_EAGER_ATTRS`` is checked before the context branch, so terminals still collect rather
-    than being recorded and never run.
+    ``_EAGER_ATTRS`` is checked before the context branch, so terminals still collect
+    rather than being recorded and never run.
     """
     result = ds.plan.groupby("time").mean().to_dataframe()
 
@@ -1739,12 +1747,12 @@ def test_plans_without_a_context_still_optimise(ds):
 
 
 def test_terminal_to_dataframe_triggers_collect_and_delegates(ds):
-    """``.to_dataframe()`` triggers collect and delegates, rather than returning a recorded-but-never-run proxy.
+    """``.to_dataframe()`` runs collect and delegates, rather than returning a proxy that never runs.
 
     Notes
     -----
-    A terminal like ``.to_dataframe()`` must materialise rather than return a proxy
-    (recorded, never run) -- proving the rewrite ran and delegation reached xarray.
+    A terminal like ``.to_dataframe()`` must compute rather than return a proxy
+    (recorded, never run). This checks the rewrite ran and the call reached xarray.
     """
     chain = ds.plan["temperature"].isel(time=0)
     result = chain.to_dataframe()
@@ -1762,14 +1770,14 @@ def test_terminal_to_dict_matches_eager(ds):
 
 @requires_matplotlib
 def test_plot_triggers_collect_and_delegates(ds):
-    """``.plot`` delegates to the materialised DataArray's plot accessor, not a recording wrapper.
+    """``.plot`` delegates to the computed DataArray's plot accessor, not a recording wrapper.
 
     Notes
     -----
-    ``.plot`` is xarray's plot accessor off the *materialised* DataArray, not a recording
-    wrapper -- so calling it draws instead of returning a proxy. Delegating the whole
-    ``plot`` attribute (not just calling it) also reaches the accessor's own methods, e.g.
-    ``plot.line`` on a 1-D selection.
+    ``.plot`` is xarray's plot accessor on the *computed* DataArray, so calling it draws
+    rather than returning a proxy. Delegating the whole ``plot`` attribute (not just the
+    call) also reaches the accessor's own methods, e.g. ``plot.line`` on a 1-D
+    selection.
     """
     import matplotlib
 
@@ -1788,10 +1796,10 @@ def test_plot_triggers_collect_and_delegates(ds):
 
 # --- the DataArray accessor ----------------------------------------------------
 #
-# ``.plan`` is registered on both types and one class serves both, so what follows is
-# not a second suite: it pins the two places a ``DataArray`` differs (``__getitem__``
-# means indexing, and there are no ``data_vars`` to project) and checks that everything
-# else -- recording, lowering, the rewrite rules, replay -- carries over unchanged.
+# ``.plan`` is registered on both types and one class handles both, so this isn't a
+# second suite. It tests the two ways a ``DataArray`` differs (``__getitem__`` means
+# indexing, and there are no ``data_vars`` to project) and checks that everything else
+# (recording, lowering, the rules, replay) works the same.
 
 
 @pytest.fixture
@@ -1801,7 +1809,8 @@ def da(ds) -> xr.DataArray:
     Returns
     -------
     xarray.DataArray
-        ``temperature(time, lat, lon)`` with its coords, the ``area`` aux coord included.
+        ``temperature(time, lat, lon)`` with its coords, the ``area`` aux coord
+        included.
     """
     return ds["temperature"]
 
@@ -1843,13 +1852,13 @@ def test_dataarray_chains_match_eager(da, chain):
 
 
 def test_dataarray_rewrites_still_fire(da):
-    """The optimiser rewrites a ``DataArray`` plan; it is not a verbatim passthrough.
+    """The optimiser rewrites a ``DataArray`` plan; it doesn't just pass it through.
 
     Notes
     -----
-    The narrowing a ``DataArray`` brings is confined to the *projection* rules (there are
-    no ``data_vars`` for them to reason about). Select pushdown reasons about dims, which
-    a ``DataArray`` has, so it fires exactly as it does on a ``Dataset``.
+    A ``DataArray`` only affects the *projection* rules (it has no ``data_vars``).
+    Select pushdown reasons about dims, which a ``DataArray`` has, so it fires just as
+    it does on a ``Dataset``.
     """
     chain = da.plan.mean("lat").isel(time=0)
     assert [n.name for n in chain._optimized()] == ["isel", "mean"]
@@ -1860,8 +1869,8 @@ def test_dataarray_getitem_records_opaque_not_a_projection(da):
 
     Notes
     -----
-    The key *looks* like a projection to :func:`~xrexpr.schema.to_opnode`, which sees only
-    the call -- the receiver is what settles it, exactly as it does for a builder's
+    The key *looks* like a projection to :func:`~xrexpr.schema.to_opnode`, which only
+    sees the call. What decides it is the object being indexed, as for a builder's
     ``__getitem__``.
     """
     node = da.plan["lat"]._ops[0]
@@ -1870,17 +1879,16 @@ def test_dataarray_getitem_records_opaque_not_a_projection(da):
 
 
 def test_positional_getitem_pairs_on_a_dataarray_are_not_merged(da):
-    """Two positional ``__getitem__``s stay two ops, so the rows selected are the eager ones.
+    """Two positional ``__getitem__`` calls stay two ops, so the selected rows are the eager ones.
 
     Notes
     -----
-    The bug the ``Opaque`` classification exists to prevent, and the keys are the ones that
-    trigger it rather than an arbitrary pair. ``da[[1, 2]]`` selects *positions along the
-    first dim*, so as a pair of ``Project`` nodes ``da[[1, 2]][[1]]`` satisfies
-    ``merge_adjacent_projects``' subset test -- the rule is deliberately schema-free,
-    deciding on the two key sets alone -- and collapses to ``da[[1]]``: row 1, where the
-    eager chain indexes *within* the selected pair and gives row 2. Verified by classifying
-    the pair as projections on purpose: the merged plan returns the wrong row.
+    The bug recording these as ``Opaque`` prevents, using the keys that would trigger
+    it. ``da[[1, 2]]`` selects *positions along the first dim*. As two ``Project``
+    nodes, ``da[[1, 2]][[1]]`` would pass ``merge_adjacent_projects``' subset test (the
+    rule only looks at the two keys) and collapse to ``da[[1]]``: row 1, where the eager
+    chain indexes *within* the selected pair and gives row 2. Checked by deliberately
+    classifying the pair as projections: the merged plan returns the wrong row.
     """
     chain = da.plan[[1, 2]][[1]]
 
@@ -1889,15 +1897,15 @@ def test_positional_getitem_pairs_on_a_dataarray_are_not_merged(da):
 
 
 def test_a_coordless_dataarray_still_replays_equal_to_eager(da):
-    """A ``DataArray`` with no coords models no dims at all, and every chain still matches eager.
+    """A ``DataArray`` with no coords gives a schema with no dims, and every chain still matches eager.
 
     Notes
     -----
-    ``SchemaState.from_dataset`` reads a ``DataArray``'s *coords*, so an array without them
-    yields an empty schema -- the model knows of no dims. That narrows in the safe
-    direction: a rule that needs a fact it hasn't got refuses. ``groupby("time")`` here
-    fails ``lower._grouper_dims``' dim check and lands on the opaque fallback rather than
-    being fused, which costs a rewrite and no correctness.
+    ``SchemaState.from_dataset`` reads a ``DataArray``'s *coords*, so one without coords
+    gives an empty schema: the model knows of no dims. That only removes facts, so any
+    rule that needs one declines. Here ``groupby("time")`` fails
+    ``lower._grouper_dims``' dim check and falls back to the opaque pair instead of
+    fusing, which costs a rewrite but not correctness.
     """
     bare = xr.DataArray(da.values, dims=da.dims)
     assert not SchemaState.from_dataset(bare).dim_names
@@ -1925,16 +1933,15 @@ def test_dataarray_explain_reads_the_plan(da):
 
 
 def test_getitem_after_a_bare_name_projection_is_indexing_too(ds):
-    """A chain that *becomes* a DataArray records its later ``__getitem__``s as indexing, not projection.
+    """A chain that *becomes* a DataArray records its later ``__getitem__`` calls as indexing, not projection.
 
     Notes
     -----
-    The base is a ``Dataset`` here, so the classification cannot be read off the base
-    alone: after a bare-name projection the live object is a ``DataArray``, and
-    ``ds["temperature"][[1, 2]][[1]]`` is the same wrong-row collapse as on a
-    ``DataArray`` base, one op later.
-    ``merge_adjacent_projects``' barrier on a single ``p1`` stops the *first* pair, not
-    this one.
+    The base is a ``Dataset`` here, so the base alone can't decide it. After a bare-name
+    projection the object is a ``DataArray``, and ``ds["temperature"][[1, 2]][[1]]`` is
+    the same wrong-row collapse as on a ``DataArray`` base, one op later.
+    ``merge_adjacent_projects``' guard against a ``single`` first projection stops the
+    *first* pair, not this one.
     """
     chain = ds.plan["temperature"][[1, 2]][[1]]
 
@@ -1952,16 +1959,16 @@ def test_getitem_after_a_bare_name_projection_is_indexing_too(ds):
     ids=["pipe", "get"],
 )
 def test_getitem_after_an_opaque_is_not_a_projection(ds, escape):
-    """An ``Opaque`` may return a ``DataArray``, so the ``__getitem__``s after it index too.
+    """An ``Opaque`` may return a ``DataArray``, so ``__getitem__`` after it is indexing too.
 
     Notes
     -----
-    ``Opaque`` is the node the IR does not model, and that covers its *result type*: both
-    ``pipe`` and ``get`` take a ``Dataset`` to a ``DataArray`` without a modelled node in
-    sight. Classified on the key alone the pair would be two ``Project``s, and
-    ``merge_adjacent_projects`` -- which would fire past an ``Opaque`` -- would
-    collapse ``[[1, 2]][[1]]`` to ``[[1]]``. That returns a valid array of the *wrong rows*
-    rather than raising, so the equality assertion is the one that matters here.
+    ``Opaque`` means unmodelled, and that includes its *result type*. Both ``pipe`` and
+    ``get`` turn a ``Dataset`` into a ``DataArray`` with no modelled node involved.
+    Classified by key alone, the pair would be two ``Project`` nodes, and
+    ``merge_adjacent_projects`` (which would fire past an ``Opaque``) would collapse
+    ``[[1, 2]][[1]]`` to ``[[1]]``. That returns valid data from the *wrong rows* rather
+    than raising, so the equality assertion is the one that matters.
     """
     chain = escape(ds.plan)[[1, 2]][[1]]
 
@@ -1970,18 +1977,18 @@ def test_getitem_after_an_opaque_is_not_a_projection(ds, escape):
 
 
 def test_getitem_after_a_dataset_valued_opaque_is_demoted_too(ds):
-    """An opaque that *does* return a Dataset demotes what follows it anyway, losing one merge.
+    """An opaque that *does* return a Dataset still makes what follows opaque, losing one merge.
 
     Notes
     -----
-    The acknowledged cost of reading ``Opaque`` as receiver-unknown, pinned as intended
-    rather than left to surprise. ``transpose`` returns a ``Dataset``, so these two list-form
-    projections would merge safely -- but that is only knowable from the opaque's *name*,
-    and a table of Dataset-preserving names would rot as xarray grows. Projection pushdown
-    loses nothing, since :func:`~xrexpr.optimize._trusted_prefix` already stops it at the
-    first ``Opaque``; ``merge_adjacent_projects`` is the whole of what is forfeited.
-    (``rename`` would not do here: it is a modelled :class:`~xrexpr.ir.Rename`, so the
-    merge across it fires.)
+    The accepted cost of treating an ``Opaque``'s result type as unknown, tested so it's
+    intended rather than a surprise. ``transpose`` returns a ``Dataset``, so these two
+    list projections could merge safely, but only the opaque's *name* tells you that,
+    and a table of names that return Datasets would go stale as xarray grows. Projection
+    pushdown loses nothing, because :func:`~xrexpr.optimize._trusted_prefix` already
+    stops it at the first ``Opaque``. ``merge_adjacent_projects`` is the only thing
+    lost. (``rename`` wouldn't work as the example: it's a modelled
+    :class:`~xrexpr.ir.Rename`, so the merge across it fires.)
     """
     chain = ds.plan.transpose()[["temperature", "elevation"]][["temperature"]]
 
@@ -1993,14 +2000,14 @@ def test_getitem_after_a_dataset_valued_opaque_is_demoted_too(ds):
 
 
 def test_projections_merge_across_a_modelled_rename(ds):
-    """Two list-form projections merge across a modelled ``Rename``, the merge a rename-as-``Opaque`` forfeited.
+    """Two list projections merge across a modelled ``Rename``.
 
     Notes
     -----
-    The flip side of ``test_getitem_after_a_dataset_valued_opaque_is_demoted_too``: because
-    ``rename`` is a modelled :class:`~xrexpr.ir.Rename` (not an ``Opaque`` receiver-unknown
-    barrier), the ``__getitem__``s after it stay :class:`~xrexpr.ir.Project`, so
-    ``merge_adjacent_projects`` collapses the redundant pair.
+    The counterpart of ``test_getitem_after_a_dataset_valued_opaque_is_demoted_too``.
+    ``rename`` is a modelled :class:`~xrexpr.ir.Rename`, not an ``Opaque`` with unknown
+    result type, so the ``__getitem__`` calls after it stay :class:`~xrexpr.ir.Project`
+    and ``merge_adjacent_projects`` collapses the redundant pair.
     """
     chain = ds.plan.rename({"temperature": "t2m"})[["t2m", "elevation"]][["t2m"]]
     assert [type(n) for n in chain._ops] == [Rename, Project, Project]
@@ -2015,14 +2022,13 @@ def test_projections_merge_across_a_modelled_rename(ds):
 
 
 def test_a_list_form_projection_keeps_the_chain_in_dataset_land(ds):
-    """A list-form projection yields a Dataset, so later ``__getitem__``s still record projections.
+    """A list projection gives a Dataset, so later ``__getitem__`` calls are still recorded as projections.
 
     Notes
     -----
-    The two spellings are told apart by the *key*, not by the node's ``variables``, which
-    reads ``("temperature",)`` for both -- so this is the case that would be lost by
-    demoting on the node alone, and the projection rules would stop firing on ordinary
-    ``ds[[...]][[...]]`` chains.
+    The two forms are told apart by the *key*, not the node's ``variables``, which is
+    ``("temperature",)`` for both. Deciding from the node alone would lose this case,
+    and the projection rules would stop firing on ordinary ``ds[[...]][[...]]`` chains.
     """
     chain = ds.plan[["temperature", "elevation"]][["temperature"]]
 

@@ -1,22 +1,27 @@
-"""Tests for the indexer *value* sum type (:mod:`xrexpr.indexers`).
+"""Tests for the indexer value type (:mod:`xrexpr.indexers`).
 
-:func:`classify` is the sole constructor from raw ``isel``/``sel`` values, so the taxonomy is
-pinned here, split deliberately between two styles.
+:func:`classify` is the only way to build an indexer from a raw ``isel``/``sel`` value,
+so the classification is tested here, in two deliberate styles.
 
-**Examples, at the top.** The taxonomy itself — which raw shape becomes which variant — is a
-decision, not a derivable fact, so it is written out. Generating it would mean reimplementing
-``classify`` in the strategy in order to know the expected answer, which asserts nothing. The
-examples that remain beyond the taxonomy table are the ones the properties structurally cannot
-reach: the ``sel`` label path, the scalar-has-no-size contract, and the ``ForwardSlice``
-constructor invariant.
+**Examples, at the top.** Which raw shape becomes which variant is a decision, not
+something you can derive, so it's written out. Generating it would mean reimplementing
+``classify`` in the strategy to know the expected answer, which tests nothing. The other
+examples are the cases the properties can't reach: the ``sel`` label path, the rule that
+a scalar has no size, and the ``ForwardSlice`` constructor check.
 
-**Properties, at the bottom.** The claims that *are* derivable are checked against xarray
-itself rather than a hand-computed answer: ``size`` predicts the real post-``isel`` length,
-``drops_dim`` predicts whether the dim survives, ``to_raw`` replays like the value it came
-from, a ``ForwardSlice`` selects a length-independent prefix, and composing two indexers
-replays identically to applying them in sequence (the same-dim case the optimiser property
-suite in ``test_properties.py`` deliberately excludes). Between them these cover every
-positional size and round-trip branch, so those examples are not duplicated above.
+**Properties, at the bottom.** The claims that *can* be derived are checked against
+xarray itself, not hand-computed answers:
+
+- ``size`` predicts the real length after ``isel``;
+- ``drops_dim`` predicts whether the dim survives;
+- ``to_raw`` replays like the value it came from;
+- a ``ForwardSlice`` selects a prefix that doesn't depend on the dim's length;
+- composing two indexers replays the same as applying them one after the other (the
+  same-dim case the optimiser properties in ``test_properties.py`` deliberately leave
+  out).
+
+Together these cover every positional size and round-trip branch, so those aren't
+repeated as examples.
 """
 
 from typing import get_args
@@ -107,44 +112,44 @@ def test_label_list_classifies_as_label():
     assert classify(["2020", "2021"]) == Label(["2020", "2021"])
 
 
-# Numpy-typed positions are not an exotic case: ``argmin``, ``np.where`` and ``arr.values[i]``
-# all hand back ``np.int64``, so an ``isinstance(x, int)`` test would misfile them as labels --
-# mis-sizing the dim *and* silently making the indexer uncomposable.
+# numpy positions aren't unusual: ``argmin``, ``np.where`` and ``arr.values[i]`` all
+# return ``np.int64``. An ``isinstance(x, int)`` test would treat them as labels, which
+# gets the dim's size wrong *and* quietly makes the indexer uncomposable.
 
 
 def test_zero_dim_integer_array_classifies_as_scalar():
-    """A 0-d integer array is a ``Scalar``, not a one-element enumeration.
+    """A 0-d integer array is a ``Scalar``, not a one-element list.
 
     Notes
     -----
-    It indexes exactly like the bare int — xarray drops the dim — so the rank check has to
-    run before the dtype dispatch.
+    It indexes exactly like the bare int (xarray drops the dim), so the rank check has
+    to run before the dtype checks.
     """
     assert classify(np.array(0)) == Scalar(0)
 
 
 @pytest.mark.parametrize("raw", [np.int64(0), np.int32(0), np.array(0)])
 def test_integer_scalars_normalise_to_plain_int(raw):
-    """Every integer spelling narrows to a plain ``int`` inside the ``Scalar``.
+    """Every integer spelling becomes a plain ``int`` inside the ``Scalar``.
 
     Notes
     -----
-    The same normalisation ``Positions`` and ``ForwardSlice`` apply. Two things depend on
-    it: an ``np.int64`` selection must compare equal to the ``int`` spelling (plan
-    equality, golden assertions), and a ``Scalar`` holding an *array* is unhashable — see
-    the test below.
+    The same conversion ``Positions`` and ``ForwardSlice`` do. Two things depend on it:
+    an ``np.int64`` selection must compare equal to the ``int`` spelling (plan equality,
+    expected plans in tests), and a ``Scalar`` holding an *array* is unhashable (see the
+    next test).
     """
     assert classify(raw) == Scalar(0)
     assert type(classify(raw).value) is int
 
 
 def test_classified_scalars_are_hashable():
-    """All three integer spellings hash to one value, so the enclosing node stays hashable.
+    """All three integer spellings hash the same, so the enclosing node stays hashable.
 
     Notes
     -----
-    ``Select`` stores indexers in a frozendict, so an unhashable value silently makes the
-    whole node unhashable. A 0-d array would do exactly that if it were stored verbatim.
+    ``Select`` stores indexers in a frozendict, so an unhashable value quietly makes the
+    whole node unhashable. A 0-d array stored as is would do exactly that.
     """
     assert {classify(np.array(0)), classify(np.int64(0)), classify(0)} == {Scalar(0)}
 
@@ -160,11 +165,11 @@ def test_numpy_int_list_classifies_as_positions():
 
 
 def test_numpy_bool_list_still_classifies_as_mask():
-    """Widening integer-ness to numpy types does not swallow boolean masks.
+    """Accepting numpy integer types doesn't turn boolean masks into positions.
 
     Notes
     -----
-    The counterweight to the three above: ``np.bool_`` is *not* ``numbers.Integral``, and
+    The flip side of the tests above: ``np.bool_`` is *not* ``numbers.Integral``, and
     Python ``bool`` is explicitly excluded.
     """
     assert isinstance(classify([np.True_, np.False_]), Mask)
@@ -174,12 +179,12 @@ def test_numpy_bool_list_still_classifies_as_mask():
 
 
 def test_mask_normalises_every_spelling_to_one_value():
-    """Array, list and numpy-bool list spellings of one mask produce the same value.
+    """Array, list and numpy-bool-list spellings of one mask give the same value.
 
     Notes
     -----
-    They are the same selection, so they must be the same value — otherwise a plan's
-    identity depends on how the user happened to write the mask.
+    They're the same selection, so they must be the same value. Otherwise whether two
+    plans are equal would depend on how the user wrote the mask.
     """
     expected = Mask((True, False, True))
     assert classify(np.array([True, False, True])) == expected
@@ -192,9 +197,10 @@ def test_mask_bearing_node_compares_and_hashes():
 
     Notes
     -----
-    The reason this variant is normalised at all. Held verbatim, ``Mask(arr) ==
-    Mask(arr)`` returns an *array*, so the enclosing ``Select`` raised ``ValueError: truth
-    value ... ambiguous`` rather than answering — and plan equality is real:
+    This is why masks are converted at all. Stored as an array, ``Mask(arr) ==
+    Mask(arr)`` returns an *array*, so comparing the ``Select`` nodes would raise
+    ``ValueError: truth value
+    ... ambiguous`` instead of answering. And plans really are compared:
     ``test_properties.py``'s idempotence property asserts ``optimize(once) == once``.
     """
     mask = np.array([True, False, True])
@@ -206,26 +212,26 @@ def test_mask_bearing_node_compares_and_hashes():
 
 
 def test_multidimensional_bool_array_is_not_a_mask():
-    """A higher-rank boolean array falls to ``Label``, not to a flattened ``Mask``.
+    """A higher-rank boolean array becomes a ``Label``, not a flattened ``Mask``.
 
     Notes
     -----
-    xarray rejects it as a single-dim indexer outright, so no valid plan contains one —
-    ``Label`` is the can't-reason-about-it variant, and the error still surfaces from
-    xarray at replay in its own words.
+    xarray rejects it as a single-dim indexer, so no valid plan contains one. ``Label``
+    is the variant for values we can't reason about, and xarray still raises its own
+    error at replay.
     """
     assert isinstance(classify(np.array([[True, False], [True, False]])), Label)
 
 
 def test_dataarray_indexer_classifies_as_advanced():
-    """Any ``DataArray`` indexer is ``Advanced`` — ``classify`` is dim-blind.
+    """Any ``DataArray`` indexer is ``Advanced``: ``classify`` doesn't know the dim.
 
     Notes
     -----
-    ``classify`` sees only the value, not the dim it indexes, so it cannot tell an
-    orthogonal indexer (which the schema layer normalises to plain values) from a vectorized
-    one; both land here. The orthogonal/vectorized split is ``schema``'s, made where the dim
-    key is known.
+    ``classify`` only sees the value, not the dim it indexes, so it can't tell an
+    orthogonal indexer (which the schema layer converts to plain values) from a
+    vectorized one. Both end up here. The schema layer makes the orthogonal/vectorized
+    split, where the dim is known.
     """
     idx = classify(xr.DataArray([0, 1], dims="time"))
     assert isinstance(idx, Advanced)
@@ -245,12 +251,12 @@ def test_variable_indexer_classifies_as_advanced():
 
 
 def test_advanced_indexer_is_hashable():
-    """``Advanced`` is hashable where the raw ``DataArray`` is not, so ``Select`` stays hashable.
+    """``Advanced`` is hashable where the raw ``DataArray`` isn't, so ``Select`` stays hashable.
 
     Notes
     -----
-    The array itself is not stored — only its dims — which is what a ``Scalar`` wrapping the
-    raw ``DataArray`` could not offer.
+    Only the array's dims are stored, not the array, which a ``Scalar`` holding the raw
+    ``DataArray`` couldn't offer.
     """
     idx = classify(xr.DataArray([0, 1], dims="time"))
     assert hash(idx) == hash(Advanced(dims=("time",)))
@@ -266,14 +272,14 @@ def test_advanced_indexer_is_uncomposable():
 
 
 def test_exactly_one_variant_drops_its_dim():
-    """``Scalar`` is the only variant that drops its dim, and every variant declares one.
+    """``Scalar`` is the only variant that drops its dim, and every variant declares ``drops_dim``.
 
     Notes
     -----
-    Asserted by reflection over the union rather than variant by variant: enumerating the
-    variants by hand only ever checks the ones that already exist, so a *new* variant
-    added without a ``drops_dim`` would slip through. Walking ``Indexer`` makes the union
-    itself the checklist.
+    Checked by walking the ``Indexer`` union rather than variant by variant. Listing
+    variants by hand only checks the ones that already exist, so a *new* variant without
+    ``drops_dim`` would slip through. Walking the union makes the union itself the
+    checklist.
     """
     dropping = [v for v in get_args(Indexer) if getattr(v, "drops_dim", None) is True]
     keeping = [v for v in get_args(Indexer) if getattr(v, "drops_dim", None) is False]
@@ -284,20 +290,20 @@ def test_exactly_one_variant_drops_its_dim():
 
 # --- size: the cases the properties below cannot reach ------------------------------------
 #
-# Every *positional* size branch (forward and general slices, positions, boolean masks) is
-# checked against xarray itself by ``test_size_predicts_the_real_isel_length``, over far more
-# inputs than could be written out here — so those examples are not repeated. What is left is
-# what the properties structurally cannot generate: the ``sel`` label path (they draw ``isel``
-# values only) and the scalar contract (a scalar has no size to compare against).
+# Every *positional* size branch (forward and general slices, positions, boolean masks)
+# is checked against xarray by ``test_size_predicts_the_real_isel_length``, over far
+# more inputs than could be written out here, so those examples aren't repeated. What's
+# left is what the properties can't generate: the ``sel`` label path (they only draw
+# ``isel`` values) and the scalar rule (a scalar has no size to compare).
 
 
 def test_label_slice_keeps_current_size():
-    """A label slice cannot be sized here, so ``size`` leaves the dim's length unchanged.
+    """A label slice can't be sized here, so ``size`` leaves the dim's length unchanged.
 
     Notes
     -----
-    Its extent is a fact about coordinate values. ``schema._selected_size`` answers
-    ``None`` rather than taking this fallback — see that function.
+    Its length depends on coordinate values. ``schema._selected_size`` returns ``None``
+    rather than using this fallback (see that function).
     """
     assert classify(slice("a", "z")).size(4) == 4
 
@@ -315,8 +321,9 @@ def test_scalar_size_is_undefined():
 
 # --- to_raw: round-trips to a replayable value --------------------------------------------
 #
-# Positional values are covered against xarray by ``test_to_raw_replays_like_the_value_it_came
-# _from``. Only the label shapes are pinned by hand, since the properties draw ``isel`` values.
+# Positional values are covered against xarray by
+# ``test_to_raw_replays_like_the_value_it_came _from``. Only the label shapes are pinned
+# by hand, since the properties draw ``isel`` values.
 
 
 @pytest.mark.parametrize("raw", ["2020", slice("a", "z"), ["2020", "2021"]])
@@ -342,9 +349,9 @@ def test_forward_slice_rejects_reversed_step():
 
 # --- property-based: the model must agree with xarray -------------------------------------
 #
-# Small arrays and eager application make a per-example deadline flaky, and the fixtures are
-# generated rather than function-scoped, so both are turned off the way test_properties.py
-# does.
+# Small arrays applied eagerly make a per-example deadline flaky, and the data is
+# generated rather than coming from function-scoped fixtures, so both checks are turned
+# off, as in test_properties.py.
 _SETTINGS = settings(deadline=None, suppress_health_check=[HealthCheck.too_slow])
 
 
@@ -356,11 +363,11 @@ def _da(n: int) -> xr.DataArray:
 def _positions(lo, hi):
     """Integers in ``[lo, hi]``, sometimes numpy-typed rather than plain ``int``.
 
-    Widening past plain ``int`` is not incidental coverage. ``argmin``, ``np.where`` and
-    ``arr.values[i]`` all hand back ``np.int64``, and an ``isinstance(x, int)`` classifier
-    misfiles those as labels — mis-sizing the dim and quietly making the indexer
-    uncomposable. Drawing both spellings is what puts that class of bug in reach of every
-    property below rather than only of the hand-written examples above.
+    Including numpy types matters. ``argmin``, ``np.where`` and ``arr.values[i]`` all
+    return ``np.int64``, and a classifier using ``isinstance(x, int)`` would treat those
+    as labels, getting the dim's size wrong and quietly making the indexer uncomposable.
+    Drawing both spellings puts that kind of bug in reach of every property below, not
+    just the hand-written examples.
     """
     return st.integers(lo, hi).flatmap(
         lambda i: st.sampled_from([i, np.int64(i), np.int32(i)])
@@ -412,9 +419,9 @@ def _isel_value(draw, n):
 def _concrete_outer(draw, n):
     """An ``isel`` value whose selected positions are knowable without the dim length.
 
-    ``Positions`` and ``Mask`` both enumerate their selection outright — one as indices, the
-    other as flags — so neither needs to know how long the dim is. That is the exact property
-    the composer requires, which is why these two must *always* compose.
+    ``Positions`` and ``Mask`` both enumerate their selection outright — one as indices,
+    the other as flags — so neither needs to know how long the dim is. That is the exact
+    property the composer requires, which is why these two must *always* compose.
     """
     if draw(st.booleans()):
         return draw(st.lists(_positions(0, n - 1), min_size=1, max_size=n))
@@ -496,12 +503,13 @@ def test_classify_to_raw_round_trips_to_the_same_variant(case):
 @_SETTINGS
 @given(_sized_value())
 def test_to_raw_replays_like_the_value_it_came_from(case):
-    """``to_raw()`` selects the same data as the raw value ``classify`` was handed.
+    """``to_raw()`` selects the same data as the raw value ``classify`` was given.
 
-    The round trip above is about the *variant* surviving; this is about the data. It is the
-    claim ``optimize.py`` leans on whenever a rewrite rebuilds a node's ``args`` from its
-    ``indexer`` — if ``to_raw`` drifted from its input, every optimised plan would replay
-    something subtly different from what the user wrote, and nothing else would notice.
+    The round trip above checks that the *variant* survives; this checks the data. It's
+    what ``optimize.py`` relies on whenever a rewrite rebuilds a node's call from its
+    ``indexer``. If ``to_raw`` drifted from its input, every optimised plan would replay
+    something slightly different from what the user wrote, and nothing else would
+    notice.
     """
     n, value = case
     da = _da(n)
@@ -511,13 +519,13 @@ def test_to_raw_replays_like_the_value_it_came_from(case):
 @_SETTINGS
 @given(st.integers(1, 8), st.data())
 def test_forward_slice_selects_a_prefix_independent_of_length(n, data):
-    """A ``ForwardSlice`` resolved at length ``n`` is a prefix of itself resolved longer.
+    """A ``ForwardSlice`` resolved at length ``n`` is a prefix of the same slice resolved at a longer length.
 
-    This is *why* the variant exists: the composer reasons about a ForwardSlice arithmetically
-    without carrying the dim length, which is only sound if growing the dim can never change
-    the positions already chosen. A negative bound breaks it (it counts from the end, so every
-    position moves), which is exactly what ``_is_forward`` exists to exclude — so this is the
-    property that fails if that predicate is ever loosened too far.
+    This is *why* the variant exists. The composer does arithmetic on a ForwardSlice
+    without knowing the dim's length, which is only safe if making the dim longer can
+    never change the positions already selected. A negative bound breaks that (it counts
+    from the end, so every position moves), and ``_is_forward`` exists to exclude it. So
+    this property fails if that check is ever loosened too far.
     """
     indexer = classify(_forward_slice(data.draw, n))
     assume(isinstance(indexer, ForwardSlice))
@@ -546,12 +554,12 @@ def _respell(raw, wrap):
 def test_composition_does_not_depend_on_integer_spelling(case):
     """Whether two indexers compose must not depend on how their integers were spelled.
 
-    The replay property below can only see compositions that *happen*: it ``assume``s away a
-    ``None``, so an indexer that should have composed but silently didn't is filtered out
-    rather than failed. A ``np.int64`` scalar that refused to compose (say, because the
-    composer tested ``isinstance(i, int)`` directly instead of asking the value) would hide
-    there. Comparing the two spellings needs no oracle for *when* composition ought to
-    succeed, and still catches that class of bug.
+    The replay property below only sees compositions that *happen*: it uses ``assume``
+    to discard a ``None``, so an indexer that should have composed but didn't is
+    skipped, not failed. A ``np.int64`` scalar that refused to compose (say, because the
+    composer checked ``isinstance(i, int)`` instead of asking the value) would go
+    unnoticed there. Comparing the two spellings needs no way to know *when* composition
+    should succeed, and still catches that kind of bug.
     """
     _, outer, inner = case
     as_int = _compose_indexer(
@@ -568,9 +576,9 @@ def test_composition_does_not_depend_on_integer_spelling(case):
 def test_composed_indexer_replays_like_sequential_isel(case):
     """When two indexers compose, the single result replays identically to applying both.
 
-    This is the arithmetic the optimiser's merge rule relies on, over the same-dim case the
-    ``test_properties.py`` suite excludes by construction — so it is the property that
-    actually guards :func:`_compose_indexer` end to end.
+    This is the arithmetic the optimiser's merge rule relies on, over the same-dim case
+    the ``test_properties.py`` suite excludes by construction — so it is the property
+    that actually guards :func:`_compose_indexer` end to end.
     """
     n, outer, inner = case
     composed = _compose_indexer(classify(outer), classify(inner))
@@ -582,19 +590,18 @@ def test_composed_indexer_replays_like_sequential_isel(case):
 @_SETTINGS
 @given(_concrete_pair())
 def test_a_concrete_outer_always_composes(case):
-    """A refusal is a *failure* here, not something to ``assume`` away.
+    """Here a refusal to compose is a *failure*, not something to ``assume`` away.
 
-    The property above can only check compositions that happen: its ``assume`` discards
-    every refusal, so an indexer the optimiser *could* merge but doesn't is invisible to it —
-    the plan stays correct, just larger, and nothing says so. That blind spot has now cost
-    twice: it hid a numpy-scalar bug, and it hid the three missed compositions this commit
-    adds.
+    The property above only checks compositions that happen: its ``assume`` discards
+    every refusal. So an indexer the optimiser *could* merge but doesn't is invisible to
+    it. The plan is still correct, just bigger, and nothing reports it. That gap has
+    hidden real bugs before (a numpy-scalar bug, and several missed compositions).
 
-    This closes it for the case where refusal is never justified. ``Positions`` and ``Mask``
-    both enumerate their selection outright, so ``outer``'s positions are known without the
-    dim length — the one thing the composer lacks. Given a chain that replays at all, there
-    is therefore nothing left to prove and no honest reason to decline, whatever ``inner``
-    turns out to be.
+    This closes it where refusing is never justified. ``Positions`` and ``Mask`` both
+    list their selection explicitly, so ``outer``'s positions are known without the
+    dim's length, which is the one thing the composer doesn't have. If the chain replays
+    at all, there's nothing left to prove and no good reason to decline, whatever
+    ``inner`` is.
     """
     n, outer, inner = case
     composed = _compose_indexer(classify(outer), classify(inner))

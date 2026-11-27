@@ -1,12 +1,12 @@
 """Tests for the op metadata table.
 
-The headline behaviour is the reduce/scan split — reductions destroy their dim,
-scans keep it. Each row is a *variant* rather than a record with a ``kind`` string, so
-that split is a type distinction and ``to_opnode``'s dispatch is exhaustive under mypy.
+The main behaviour is the reduce/scan split: reductions remove their dim, scans keep it.
+Each row is its own *type* rather than a record with a ``kind`` string, so the split is
+a type distinction and mypy checks that ``to_opnode``'s dispatch is exhaustive.
 
-``CONTEXT_METHODS`` lives here too, and is pinned against the one thing it must agree with
-that no derivation can settle: xarray itself. Agreement with the ``Literal`` that types
-the same names is not tested, because the rows are built from that ``Literal``.
+``CONTEXT_METHODS`` is tested here too, against the one thing no derivation can
+guarantee: xarray itself. Agreement with the ``Literal`` that types the same names isn't
+tested, because the rows are built from that ``Literal``.
 """
 
 from typing import get_args
@@ -58,12 +58,12 @@ def test_scans_are_scan_specs(name):
 
 @pytest.mark.parametrize("name", ["sel", "isel"])
 def test_selects(name):
-    """``sel``/``isel`` are ``SelectSpec``s, which claim no dim effect of their own.
+    """``sel``/``isel`` are ``SelectSpec`` rows, which claim no dim effect of their own.
 
     Notes
     -----
-    There is no ``consumes_dim`` to claim it with, because a select's dim removal depends
-    on the *indexer*, not the method — ``to_opnode`` resolves it per call.
+    Whether a select removes a dim depends on the *indexer*, not the method, so the spec
+    has nothing to say about it. ``to_opnode`` works it out per call.
     """
     assert isinstance(spec(name), SelectSpec)
 
@@ -74,8 +74,8 @@ def test_reduce_and_scan_are_distinguished():
     Notes
     -----
     Lumping ``cumsum`` in with ``mean`` would let a rule reorder across an
-    order-significant op. Written as a type distinction, so the two cannot be confused by
-    a mistyped string.
+    order-significant op. Written as a type distinction, so the two cannot be confused
+    by a mistyped string.
     """
     assert type(spec("cumsum")) is not type(spec("mean"))
     assert isinstance(spec("mean"), ReduceSpec)
@@ -83,13 +83,13 @@ def test_reduce_and_scan_are_distinguished():
 
 
 def test_reduce_takes_its_dim_spec_second():
-    """``Dataset.reduce`` is the one reduction whose dim spec is not its first positional.
+    """``Dataset.reduce`` is the one reduction whose dim isn't its first positional argument.
 
     Notes
     -----
-    ``reduce(func, dim, ...)`` puts a *function* first. The offset rides on the row
-    that has the odd signature rather than in a second table keyed by name, so a second
-    such method is one more field, not one more lookup.
+    ``reduce(func, dim, ...)`` puts a *function* first. The position is stored on the
+    row that has the odd signature, not in a second name-keyed table, so another such
+    method would be one more field, not one more lookup.
     """
     assert spec("reduce").dim_arg == 1
     assert spec("mean").dim_arg == 0
@@ -101,17 +101,17 @@ def test_spec_unknown_returns_none():
 
 
 def test_leading_positional_methods_stay_out_of_the_op_table():
-    """``quantile``/``sum_of_squares``/``sum_of_weights`` are untabulated → ``Opaque``.
+    """``quantile``/``sum_of_squares``/``sum_of_weights`` aren't tabulated, so they're ``Opaque``.
 
     Notes
     -----
-    ``lower._dim_call`` assumes a reduction's dim sits at ``_dim_arg(name)`` — 0, or 1 for
-    ``reduce`` — and strips that positional out to re-derive the dim from the semantic field.
-    A method whose first positional is something else (``quantile(q, dim=...)``) would have
-    its ``q`` stripped as if it were the dim. Such a method must not enter ``OP_TABLE`` as a
-    plain :class:`~xrexpr.operations.ReduceSpec` (or must carry the right ``dim_arg``); this
-    pins that the known offenders haven't, so they replay verbatim and never reach
-    ``_dim_call``. See ``lower._weighted_reduce``.
+    ``lower._dim_call`` assumes a reduction's dim is at position ``_dim_arg(name)`` (0,
+    or 1 for ``reduce``) and removes that positional to rebuild the dim from the node's
+    field. A method whose first positional is something else (``quantile(q, dim=...)``)
+    would have its ``q`` removed as if it were the dim. Such a method must not be added
+    to ``OP_TABLE`` as a plain :class:`~xrexpr.operations.ReduceSpec` (or must have the
+    right ``dim_arg``). This checks the known cases haven't been, so they replay
+    verbatim and never reach ``_dim_call``.
     """
     assert spec("quantile") is None
     assert spec("sum_of_squares") is None
@@ -123,23 +123,24 @@ def test_getitem_is_tabulated_even_though_the_key_decides():
 
     Notes
     -----
-    Every other row names the variant its call is; this one names the variant its call
-    may be, because ``ds["tas"]`` is a ``Project`` and ``ds[mask]`` is an ``Opaque``.
-    Tabulating it anyway is what keeps ``to_opnode``'s dispatch to a single ``match`` —
-    the shape-of-the-key test is a *guard* on the arm rather than a special case bolted
-    on after the dispatch, where a new variant could slip past it.
+    Every other row names the kind its call is; this one names the kind its call may be,
+    because ``ds["tas"]`` is a ``Project`` and ``ds[mask]`` is an ``Opaque``. Having a
+    row anyway keeps ``to_opnode``'s dispatch to one ``match``: the key-shape test is a
+    *guard* on that arm, rather than a special case added after the dispatch, where a
+    new kind could slip past it.
     """
     assert isinstance(spec("__getitem__"), ProjectSpec)
 
 
 def test_every_spec_variant_is_tabulated():
-    """The table uses exactly the variants ``to_opnode`` dispatches on — no more, no less.
+    """The table uses exactly the spec types ``to_opnode`` dispatches on, no more and no less.
 
     Notes
     -----
-    mypy already rejects a *new* variant with no arm in ``to_opnode`` (the ``match`` is
-    closed with ``assert_never``). This pins the other direction, which types cannot: a variant that exists but is never
-    tabulated is an arm no call can reach, so it would go quietly dead.
+    mypy already rejects a *new* spec type with no arm in ``to_opnode`` (the ``match``
+    ends in ``assert_never``). This checks the other direction, which types can't: a
+    spec type that exists but has no row would be an arm no call can reach, so it would
+    quietly go dead.
     """
     assert {type(op) for op in OP_TABLE.values()} == set(get_args(OpSpec))
 
@@ -149,9 +150,9 @@ def test_the_table_is_keyed_by_the_name_each_row_carries():
 
     Notes
     -----
-    True by construction — the table is derived from the specs — and asserted because
-    that construction is the reason ``to_opnode`` needs no ``cast``: it trusts a looked-up
-    spec's ``name`` to be the name it looked up.
+    True by construction (the table is built from the specs), and checked because that's
+    why ``to_opnode`` needs no ``cast``: it trusts a looked-up spec's ``name`` to be the
+    name it looked up.
     """
     assert all(name == op.name for name, op in OP_TABLE.items())
 
@@ -174,8 +175,8 @@ def test_context_methods_are_context_specs(name):
 
     Notes
     -----
-    ``CONTEXT_METHODS`` is derived from these rows rather than kept as a separate set, so
-    a name cannot sit in two tables with one of its specs silently ignored.
+    ``CONTEXT_METHODS`` is derived from these rows rather than kept as a separate set,
+    so a name cannot sit in two tables with one of its specs silently ignored.
     """
     assert isinstance(spec(name), ContextSpec)
 

@@ -1,36 +1,35 @@
-"""What ``SchemaState.sizes`` means, and what it is for.
+"""What ``SchemaState.sizes`` means, and what it's for.
 
-``sizes`` is the one stored field that no rewrite may read. Every rule in ``optimize``
-reasons about dim *names*, and ``test_rewrites_survive_unknown_dim_sizes`` pins that by
-blanking every extent to ``None`` and demanding byte-identical output. So a wrong size
-cannot produce a wrong answer — there is no code path from an extent to a rewrite.
+``sizes`` is the one stored field no rewrite may read. Every rule in ``optimize``
+reasons about dim *names*, and ``test_rewrites_survive_unknown_dim_sizes`` checks that
+by setting every size to ``None`` and requiring identical output. So a wrong size can't
+cause a wrong answer: no code path goes from a size to a rewrite.
 
-Which raises the obvious question this module exists to answer: **why store extents at
-all?** Because an extent is a *checksum on the arm that produced it*. An arm's real job is
-to state what an op does, and "what shape comes out" is the only part of that statement
-which can be checked against reality cheaply and exactly. A schema that tracked names alone
-would be unfalsifiable for the whole class of ops that keep every dim and change an extent —
-exactly the class ``test_diff_shrinks_its_dim`` (below) pins.
+So why store sizes at all? **Because a size is a check on the arm that produced it.** An
+arm's job is to describe what an op does, and "what shape comes out" is the one part of
+that you can check against reality cheaply and exactly. A schema that only tracked names
+couldn't be checked at all for ops that keep every dim but change a length, which is the
+case ``test_diff_shrinks_its_dim`` (below) covers.
 
-So sizes buy early detection, not correctness. The two guards are separate and catch
-different things:
+So sizes catch modelling mistakes early; they don't make rewrites correct. There are two
+separate checks, catching different things:
 
 ===========================  ====================================  ====================
-guard                        catches                               how
+check                        catches                               how
 ===========================  ====================================  ====================
-this module + size property  the schema **mismodelling a shape**   tracked == real sizes
-``optimised == eager``       a rule **mis-deciding an order**      run both, compare
+this module + size property  the schema **getting a shape wrong**  tracked == real sizes
+``optimised == eager``       a rule **reordering wrongly**         run both, compare
 ===========================  ====================================  ====================
 
-Sizes say nothing about commutativity. ``diff("time")`` does not commute with a prefix
-slice while ``cumsum("time")`` does, and no assertion here would notice; that is the
+Sizes say nothing about whether ops commute. ``diff("time")`` doesn't commute with a
+prefix slice while ``cumsum("time")`` does, and nothing here would notice. That's the
 equality property's job.
 
-**Structure.** The per-indexer size arithmetic (how a boolean mask, a list, a slice each
-size) lives in ``test_schema.py`` alongside the other ``apply_schema`` arms. This module is
-about the *model*: which ops are sized exactly, which decline to answer and why, how the
-field is canonicalised, and what it catches. Every case carries the xarray code it stands
-for, because "the schema says ``time`` is 2" is only checkable against a real dataset.
+**Structure.** The per-indexer size arithmetic (how a mask, a list or a slice is sized)
+is in ``test_schema.py`` with the other ``apply_schema`` arms. This module is about the
+*model*: which ops are sized exactly, which decline to answer and why, how the field is
+normalised, and what it catches. Every case shows the xarray code it stands for, because
+"the schema says ``time`` is 2" can only be checked against a real dataset.
 """
 
 import numpy as np
@@ -71,9 +70,9 @@ def ds() -> xr.Dataset:
 def _fold(ds, calls):
     """Fold the schema over ``calls`` the way the pipeline does, and replay them eagerly.
 
-    Returns ``(tracked_sizes, real_sizes)``. Goes through ``to_opnode`` and ``to_lower_ir``
-    rather than hand-building nodes so that a builder *pair* is one case like any other,
-    and so the cases below exercise the same path ``collect()`` takes.
+    Returns ``(tracked_sizes, real_sizes)``. Goes through ``to_opnode`` and
+    ``to_lower_ir`` rather than hand-building nodes so that a builder *pair* is one case
+    like any other, and so the cases below exercise the same path ``collect()`` takes.
     """
     plan = [to_opnode(name, args, kwargs) for name, args, kwargs in calls]
     schema = SchemaState.from_dataset(ds)
@@ -87,9 +86,9 @@ def _fold(ds, calls):
 
 
 # --- sized exactly -------------------------------------------------------------------
-# The extent is a function of the *call* alone, so the schema can compute it without
-# reading a single value. Anything in this table that regressed would be a real
-# mismodelling of what the op does to shape.
+# The size depends only on the *call*, so the schema can compute it without reading any
+# values. A failure in this table would mean the schema has an op's effect on shape
+# wrong.
 
 EXACT = [
     # (label -- the xarray code this stands for, calls)
@@ -111,7 +110,8 @@ EXACT = [
         [("coarsen", (), {"time": 2, "boundary": "trim"}), ("mean", (), {})],
     ),
     (
-        # boundary='pad' ceils: lat 3 → 2, where 'trim' would floor to 1 — the ceil branch.
+        # boundary='pad' ceils: lat 3 → 2, where 'trim' would floor to 1 — the ceil
+        # branch.
         "ds.coarsen(lat=2, boundary='pad').mean()",
         [("coarsen", (), {"lat": 2, "boundary": "pad"}), ("mean", (), {})],
     ),
@@ -131,17 +131,17 @@ EXACT = [
 def test_sizes_are_exact_when_the_call_determines_them(ds, label, calls):
     """Tracked extents equal a real evaluation's, for every op whose shape the call fixes.
 
-    The ``label`` *is* the xarray expression, so a failure names the code that broke rather
-    than a node repr. Read the parametrisation table as the specification: those are the ops
-    whose output shape this layer claims to know exactly.
+    The ``label`` *is* the xarray expression, so a failure names the code that broke
+    rather than a node repr. Read the parametrisation table as the specification: those
+    are the ops whose output shape this layer claims to know exactly.
     """
     tracked, real = _fold(ds, calls)
     assert tracked == real
 
 
 # --- declines to answer --------------------------------------------------------------
-# The extent depends on coordinate *values*, which this layer never reads. ``None`` is the
-# honest answer and the whole reason sizes are ``int | None``.
+# The size depends on coordinate *values*, which this layer never reads. ``None`` is the
+# correct answer, and the reason sizes are ``int | None``.
 
 UNKNOWN = [
     (
@@ -180,8 +180,8 @@ def test_sizes_decline_to_guess_when_the_extent_needs_values(
     """``None`` where the extent is a fact about data, and the dim *name* still exact.
 
     Each case has a real, knowable answer — the reason it is ``None`` is that finding it
-    would mean reading coordinate values, which this layer is defined not to do. What must
-    still hold is the part the rewrites actually use: the surviving dim names.
+    would mean reading coordinate values, which this layer is defined not to do. What
+    must still hold is the part the rewrites actually use: the surviving dim names.
     """
     tracked, real = _fold(ds, calls)
     assert tracked[dim] is None, why
@@ -190,18 +190,18 @@ def test_sizes_decline_to_guess_when_the_extent_needs_values(
 
 
 def test_unknown_is_never_reported_as_zero(ds):
-    """The under-report that ``None`` exists to prevent.
+    """The under-report ``None`` exists to prevent.
 
     .. code-block:: python
 
         ds.sel(lat=slice(20, 30))   # lat is [0, 1, 2] -- selects nothing, legally
 
-    On ``lat``, whose coordinate is integers, the bounds are indistinguishable from
-    positional ones, so sizing this by arithmetic once produced **0** against a length-3
-    dim. Zero is the one wrong answer a size-driven rule could act on — drop the whole
-    computation as provably empty — which is why the contract is "unknown", never "empty".
-    (``time`` cannot show this: pandas rejects integer bounds on a ``DatetimeIndex``
-    outright, so the ambiguity only exists where the labels really are numbers.)
+    ``lat``'s coordinate is integers, so the bounds look the same as positions, and
+    sizing by arithmetic would give **0** against a length-3 dim. Zero is the one wrong
+    answer a size-based rule could act on (dropping the whole computation as provably
+    empty), which is why the contract is "unknown", never "empty". (``time`` can't show
+    this: pandas rejects integer bounds on a ``DatetimeIndex``, so the ambiguity only
+    exists where the labels really are numbers.)
     """
     tracked, _ = _fold(ds, [("sel", (), {"lat": slice(20, 30)})])
     assert tracked["lat"] is None
@@ -213,20 +213,20 @@ def test_unknown_is_never_reported_as_zero(ds):
 
 
 def test_diff_shrinks_its_dim(ds):
-    """``ds.diff('time')`` drops one element along ``time``, and the schema now says so.
+    """``ds.diff('time')`` drops one element along ``time``, and the schema says so.
 
     .. code-block:: python
 
         ds.diff("time").sizes    # {'time': 3, 'lat': 3}   -- one shorter, tracked right
 
-    **This is the class of bug extents exist to catch.** ``diff`` and ``cumsum`` are the
-    same node type (``Scan``), and a names-only schema cannot tell them apart: neither
-    removes a dim, so ``set(tracked) == set(real)`` passes for both no matter how wrong the
-    arm is. Only comparing extents distinguishes them.
+    **This is the kind of bug sizes exist to catch.** ``diff`` and ``cumsum`` are the
+    same node type (``Scan``), and a names-only schema can't tell them apart: neither
+    removes a dim, so ``set(tracked) == set(real)`` passes for both however wrong the
+    arm is. Only comparing sizes tells them apart.
 
-    Note what this does *not* catch, since the two are easy to conflate: ``diff`` also fails
-    to commute with a prefix slice where ``cumsum`` commutes fine. That is a fact about
-    *order*, caught by ``optimised == eager``, not by anything here.
+    What this does *not* catch, since the two are easy to mix up: ``diff`` also doesn't
+    commute with a prefix slice, where ``cumsum`` does. That's about *order*, and is
+    caught by ``optimised == eager``, not by anything here.
     """
     tracked, real = _fold(ds, [("diff", ("time",), {})])
     assert tracked == real
@@ -244,13 +244,15 @@ def test_diff_shrinks_its_dim_by_n(ds):
 
 
 def test_cumsum_really_is_shape_transparent(ds):
-    """The other half of the pair, so the xfail above reads as specific rather than vague.
+    """The other half of the pair: ``cumsum`` really doesn't change any size.
 
     .. code-block:: python
 
-        ds.cumsum("time").sizes   # {'time': 4, 'lat': 3}  -- unchanged, and tracked right
+        ds.cumsum("time").sizes   # {'time': 4, 'lat': 3}  -- unchanged, and tracked
+        right
 
-    The ``Scan`` arm's blanket ``pass`` is *correct* here. The gap is `diff`, not scans.
+    The ``Scan`` arm's size-preserving ``pass`` is *correct* for ``cumsum``. Only
+    ``diff`` changes a length.
     """
     tracked, real = _fold(ds, [("cumsum", ("time",), {})])
     assert tracked == real
@@ -263,8 +265,8 @@ def test_sizes_are_pruned_to_the_dims_that_exist():
     """An extent for a dim no variable spans is dropped on construction.
 
     ``dim_names`` derives from ``variables``, so a stray extent is already unreachable
-    through it. Pruning matters for a different reason: ``SchemaState`` is a *value*, and a
-    stale key would make two semantically identical snapshots compare unequal.
+    through it. Pruning matters for a different reason: ``SchemaState`` is a *value*,
+    and a stale key would make two semantically identical snapshots compare unequal.
     """
     schema = SchemaState(
         variables={"tas": ("time",), "time": ("time",)},
@@ -278,9 +280,9 @@ def test_sizes_are_pruned_to_the_dims_that_exist():
 def test_equal_schemas_compare_equal_despite_stale_extents():
     """Why the pruning is not merely tidiness.
 
-    ``test_rewrites_survive_unknown_dim_sizes`` compares two *folded* schemas for equality,
-    so any path that left a stale extent behind would break an assertion about rewrites
-    while having nothing to do with rewrites.
+    ``test_rewrites_survive_unknown_dim_sizes`` compares two *folded* schemas for
+    equality, so any path that left a stale extent behind would break an assertion about
+    rewrites while having nothing to do with rewrites.
     """
     without = SchemaState(
         variables={"time": ("time",)},
@@ -296,12 +298,12 @@ def test_equal_schemas_compare_equal_despite_stale_extents():
 
 
 def test_blanking_every_extent_changes_no_dim_name(ds):
-    """The invariant that makes extents unreadable by rewrites, stated at example scale.
+    """The rule that rewrites can't read sizes, shown on a small example.
 
-    The generated version (``test_rewrites_survive_unknown_dim_sizes``) asserts the strong
-    form — ``optimize`` gives byte-identical output against blanked extents. This is the
-    same claim one step earlier: blanking cannot even perturb the *fold*, because no arm
-    branches on an extent's value.
+    The generated version (``test_rewrites_survive_unknown_dim_sizes``) checks the
+    strong form: ``optimize`` gives identical output with every size blanked. This
+    checks the same thing one step earlier: blanking sizes can't even change the *fold*,
+    because no arm branches on a size's value.
     """
     base = SchemaState.from_dataset(ds)
     blanked = SchemaState(

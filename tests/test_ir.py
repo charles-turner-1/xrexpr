@@ -1,15 +1,15 @@
-"""Tests for the expression IR: the ``Op`` sum type (``Reduce``/``Select``/``Scan``/``Project``/``Opaque``).
+"""Tests for the expression IR: the ``Op`` node types.
 
-``kwargs``/``indexer`` are backed by the third-party ``frozendict``, so we don't
-re-test that library's internals — only that each variant coerces to it, stays
-frozen/hashable, and that the derived properties really are derived: ``Select.consumes``
-from ``indexer``, and ``Project.single`` from the verbatim key (never stored fields that
-could drift from what replay does).
+``kwargs`` and ``indexer`` use the third-party ``frozendict``, so that library isn't
+re-tested here. These check that each node converts to it, stays frozen and hashable,
+and that the derived properties really are derived: ``Select.consumes`` from
+``indexer``, and ``Project.single`` from the verbatim key. Neither is a stored field
+that could drift from what replay does.
 
-Hashability is the one claim that is *conditional*, so it is pinned in both directions: a
-node whose payload holds a ``DataArray`` is unhashable and uncomparable, while nodes
-sharing that payload object still compare equal. See ``ir.py``'s module docstring for why
-the weaker claim is the one wanted.
+Hashability is the one *conditional* claim, so it's tested both ways: a node holding a
+``DataArray`` is unhashable and can't be compared, but nodes sharing the same array
+object still compare equal. See ``ir.py``'s module docstring for why that weaker claim
+is the one we want.
 """
 
 import dataclasses
@@ -59,8 +59,8 @@ def test_all_dims_instances_are_interchangeable():
 
     Notes
     -----
-    Fieldless and frozen, so the sentinel is a value rather than an identity: a node built
-    with a fresh ``AllDims()`` equals and hashes like one built with ``ALL_DIMS``.
+    It has no fields and is frozen, so the sentinel is a value, not an identity: a node
+    built with a fresh ``AllDims()`` equals and hashes like one built with ``ALL_DIMS``.
     """
     assert AllDims() == ALL_DIMS
     assert hash(AllDims()) == hash(ALL_DIMS)
@@ -75,8 +75,9 @@ def test_all_dims_is_not_coerced_and_stays_hashable():
 
     Notes
     -----
-    ``__post_init__`` coerces a dim *set* to frozenset; the sentinel must pass through
-    untouched, and the node must stay shareable between plans like every other.
+    ``__post_init__`` converts a dim *set* to a frozenset. The sentinel must pass
+    through unchanged, and the node must still be shareable between plans like any
+    other.
     """
     node = Reduce(name="mean", consumes=ALL_DIMS)
     assert node.consumes is ALL_DIMS
@@ -84,12 +85,12 @@ def test_all_dims_is_not_coerced_and_stays_hashable():
 
 
 def test_all_dims_is_distinct_from_the_empty_dim_set():
-    """``ALL_DIMS`` is not ``frozenset()``, and the two make unequal nodes.
+    """``ALL_DIMS`` isn't ``frozenset()``, and the two make unequal nodes.
 
     Notes
     -----
-    The distinction the whole change rests on: "every dim, whatever they are" is not "no
-    dims". Conflating them is what let a select hop in front of a bare reduce.
+    "Every dim, whatever they are" isn't "no dims". Mixing them up would let a select
+    move in front of a bare reduce.
     """
     assert ALL_DIMS != frozenset()
     assert Reduce(name="mean", consumes=ALL_DIMS) != Reduce(name="mean")
@@ -150,30 +151,30 @@ def test_rechunk_coerces_containers():
     ],
 )
 def test_rechunk_classifies_its_uniform_spec(args, expected):
-    """The uniform form is classified through the same taxonomy as the mapping form.
+    """The uniform form goes through the same classification as the per-dim form.
 
     Notes
     -----
-    A ``chunk`` call writes its spec in one of two places and ``Rechunk`` holds one field
-    per place, so a rule that reasons about ``chunk({"time": "auto"})`` reasons about
-    ``chunk("auto")`` without a second code path. The last case is the discriminant: a
-    leading *mapping* is the mapping form, already extracted into ``chunks``, so it leaves
-    ``uniform`` empty — the split xarray's own ``Dataset.chunk`` makes with
-    ``isinstance(chunks, Mapping)``.
+    A ``chunk`` call gives its spec in one of two places, and ``Rechunk`` has one field
+    for each. So a rule that handles ``chunk({"time": "auto"})`` handles
+    ``chunk("auto")`` without a second code path. The last case checks the split: a
+    leading *mapping* is the per-dim form, already extracted into ``chunks``, so
+    ``uniform`` stays empty. That's the same ``isinstance(chunks, Mapping)`` split
+    xarray's ``Dataset.chunk`` makes.
     """
     assert Rechunk(name="chunk", args=args).uniform == expected
 
 
 def test_rechunk_uniform_is_derived_from_args_not_passed():
-    """``uniform`` cannot be set independently of ``args``, so the two can never disagree.
+    """``uniform`` can't be set separately from ``args``, so the two can never disagree.
 
     Notes
     -----
-    Unlike ``chunks``, which needs :func:`~xrexpr.schema._chunk_spec` to know which kwargs
-    are dims rather than options, ``uniform`` is a plain *reading* of ``args[0]``. One that
-    disagreed with ``args`` would make the node replay as something other than what it
-    claims, so it is ``init=False`` and a hand-built node is normalised exactly as a
-    recorded one is.
+    Unlike ``chunks``, which needs :func:`~xrexpr.schema._chunk_spec` to know which
+    kwargs are dims and which are options, ``uniform`` is just a reading of ``args[0]``.
+    One that disagreed with ``args`` would make the node replay as something other than
+    what it says, so it's ``init=False``, and a hand-built node is normalised just like
+    a recorded one.
     """
     with pytest.raises(TypeError):
         Rechunk(name="chunk", args=("auto",), uniform=NoChange())  # type: ignore[call-arg]
@@ -201,27 +202,27 @@ def test_rechunk_uniform_is_derived_from_args_not_passed():
     ],
 )
 def test_windowed_reduce_classifies_its_rounding(name, kwargs, expected):
-    """``rounds_up`` reads ``coarsen``'s ``boundary`` into the size layer's rounding rule.
+    """``rounds_up`` turns ``coarsen``'s ``boundary`` into the rounding rule sizes use.
 
     Notes
     -----
-    ``pad`` ceils, ``trim``/``exact`` (and the default) floor, and a boundary the node does
-    not model answers ``None`` — precision, not correctness, is what an unrecognised spelling
-    costs (:func:`~xrexpr.schema._windowed_size`). ``rolling`` keeps every dim's length, so it
-    never consults this and reads ``None`` whatever the header carries.
+    ``pad`` rounds up, and ``trim``/``exact`` (and the default) round down. A boundary
+    the node doesn't model gives ``None``, so an unrecognised spelling costs precision,
+    not correctness (:func:`~xrexpr.schema._windowed_size`). ``rolling`` keeps every
+    dim's length, so it never uses this, and is ``None`` whatever its call says.
     """
     assert WindowedReduce(name=name, reduce="mean", kwargs=kwargs).rounds_up == expected
 
 
 def test_windowed_reduce_rounds_up_is_derived_from_kwargs_not_passed():
-    """``rounds_up`` cannot be set independently of ``kwargs``, so the two can never disagree.
+    """``rounds_up`` can't be set separately from ``kwargs``, so the two can never disagree.
 
     Notes
     -----
-    The ``Rechunk.uniform`` precedent for a fused node: ``boundary`` is replayed verbatim from
-    ``kwargs``, and its size-relevant reading is ``init=False`` so a hand-built node is
-    normalised exactly as a fused one is, rather than able to claim a rounding its call does
-    not perform.
+    Same approach as ``Rechunk.uniform``, for a fused node. ``boundary`` is replayed
+    verbatim from ``kwargs``, and the part that affects sizes is ``init=False``, so a
+    hand-built node is normalised just like a fused one and can't claim a rounding its
+    call doesn't do.
     """
     with pytest.raises(TypeError):
         WindowedReduce(  # type: ignore[call-arg]
@@ -257,25 +258,25 @@ def test_select_consumes_is_derived_from_indexer():
 
 
 def test_select_consumes_cannot_drift_from_indexer():
-    """A select re-indexing a dim with a slice reports it as kept, not dropped.
+    """A select indexing a dim with a slice reports it as kept, not dropped.
 
     Notes
     -----
-    The desync the flat record risked: a merged select whose indexer re-indexes a dim with
-    a slice reads ``consumes=∅`` off that indexer — it cannot claim the dim was dropped,
-    because ``consumes`` has no independent storage.
+    ``consumes`` isn't stored separately, so it can't disagree with the indexer. A
+    merged select whose indexer has a slice on a dim reads ``consumes=∅`` from that
+    indexer; it can't claim the dim was dropped.
     """
     node = Select(name="isel", indexer={"time": slice(0, 5)})
     assert node.consumes == frozenset()
 
 
 def test_select_name_is_literal_typed():
-    """Both valid select names construct; the invalid ones are a type error, not a raise.
+    """Both valid select names work; an invalid one is a type error, not a runtime error.
 
     Notes
     -----
-    ``Select(name="mean")`` is a *type* error (name↔kind unrepresentable) — enforced by
-    mypy, not at runtime, so there is nothing to assert here beyond the valid names.
+    ``Select(name="mean")`` is a *type* error, enforced by mypy, not at runtime. So
+    there's nothing to check here beyond the valid names.
     """
     assert Select(name="isel").name == "isel"
     assert Select(name="sel").name == "sel"
@@ -311,11 +312,10 @@ def test_a_node_carrying_an_array_is_not_hashable():
 
     Notes
     -----
-    ``ir.py``'s hashability promise is deliberately *conditional* — hashable when the
-    payload is. ``xr.DataArray.__hash__`` is ``None``, so any node whose payload holds one
-    raises, and this pins that condition. Making the promise unconditional would mean
-    hashing the array's *values* — computing a dask array at plan time, which is the one
-    thing the package promises never to do.
+    ``ir.py`` only promises a node is hashable *when its contents are*.
+    ``xr.DataArray.__hash__`` is ``None``, so a node holding one raises, and this checks
+    that. Promising more would mean hashing the array's *values*, i.e. computing a dask
+    array while planning, which the package promises never to do.
     """
     weights = xr.DataArray([1.0, 2.0, 3.0], dims="lat")
     with pytest.raises(TypeError, match="unhashable type"):
@@ -323,13 +323,12 @@ def test_a_node_carrying_an_array_is_not_hashable():
 
 
 def test_two_nodes_holding_distinct_but_equal_arrays_cannot_be_compared():
-    """Comparing two nodes holding *distinct but equal* arrays raises rather than answering.
+    """Comparing two nodes holding *different but equal* arrays raises rather than answering.
 
     Notes
     -----
-    Sharper than the hashability gap and easy to miss: ``==`` does not merely return
-    ``False``, it *raises* — comparing the payloads elementwise yields an array, which has
-    no truth value.
+    Easy to miss: ``==`` doesn't just return ``False``, it *raises*, because comparing
+    the arrays elementwise gives an array, which has no single truth value.
     """
     weights = xr.DataArray([1.0, 2.0, 3.0], dims="lat")
     a = Opaque(name="weighted", args=(weights,))
@@ -339,12 +338,12 @@ def test_two_nodes_holding_distinct_but_equal_arrays_cannot_be_compared():
 
 
 def test_nodes_sharing_an_array_payload_still_compare_equal():
-    """Two nodes sharing the same array *object* compare equal, so plan equality holds.
+    """Two nodes sharing the same array *object* compare equal, so plan equality works.
 
     Notes
     -----
-    Why the gap above is latent rather than live: a plan holds one payload *object*, and
-    tuple comparison short-circuits on identity, so every plan-equality assertion in the
+    Why the problem above doesn't bite in practice: a plan holds one array *object*, and
+    tuple comparison checks identity first. So every plan-equality assertion in the
     suite (lowering idempotence, the optimiser fixpoint) is sound as written.
     """
     weights = xr.DataArray([1.0, 2.0, 3.0], dims="lat")

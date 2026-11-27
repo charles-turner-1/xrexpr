@@ -1,20 +1,22 @@
 """Tests for the plan optimiser: the fixpoint loop and its rules.
 
-Golden op-list assertions on :func:`~xrexpr.optimize.optimize`. Nodes are built with
-``to_opnode`` — the same normalised metadata the real recorder produces, and a pure
-function of the call — so these pin the optimiser without going through the accessor.
-The ``schema`` fixture is passed to :func:`~xrexpr.optimize.optimize`, not to node
-construction: it is the *base* the optimiser folds forward.
-Covers merge-adjacent-selects and select-pushdown past reductions: a
-select hops left past any reduce with disjoint dims, and the two rules compose via the
-fixpoint (bubble-then-merge), with the non-disjoint conflict classified by the validity
-trichotomy (swap / leave / raise).
+These assert the exact node list :func:`~xrexpr.optimize.optimize` returns. Nodes are
+built with ``to_opnode``, which gives the same metadata the real recorder produces and
+is a pure function of the call, so these test the optimiser without going through the
+accessor. The ``schema`` fixture is passed to :func:`~xrexpr.optimize.optimize`, not
+used to build nodes: it's the *base* schema the optimiser folds forward.
 
-Projection pushdown is the variable-level rule, and the one that needs the
-``schema`` argument for more than decoration: whether ``[["temperature"]]`` may cross an
-op depends on the dims that variable carries at that point, so the fixture dataset holds
-a second variable (``elevation``) that is *missing* ``time`` — the case that must not be
-reordered, and must not raise either.
+What's covered:
+
+- merging adjacent selects, and moving selects left past reductions. A select moves past
+  any reduce on other dims, and the two rules combine through the fixpoint loop (move,
+  then merge). When the dims overlap, the result is one of three outcomes: swap, leave,
+  or raise.
+- projection pushdown, the variable-level rule, which really uses the ``schema``
+  argument. Whether ``[["temperature"]]`` may cross an op depends on the dims that
+  variable has at that point, so the fixture has a second variable (``elevation``)
+  *without* ``time``. That's the case that must not be reordered, and must not raise
+  either.
 """
 
 import pytest
@@ -163,10 +165,10 @@ def test_keepdims_reduce_leaves_a_select_on_a_kept_dim(schema):
 
     Notes
     -----
-    The contrast with :func:`test_select_on_reduced_dim_raises` is the whole point of
-    ``keepdims``: a plain ``mean("lat")`` removes ``lat`` so the select is invalid, but
-    ``mean("lat", keepdims=True)`` keeps it, so the chain replays -- the ``immovable``
-    dim effect leaves the order untouched rather than rejecting it.
+    Compare :func:`test_select_on_reduced_dim_raises`. A plain ``mean("lat")`` removes
+    ``lat``, so a select on it is invalid. ``mean("lat", keepdims=True)`` keeps it, so
+    the chain replays, and the ``immovable`` dim effect leaves the order alone rather
+    than rejecting it.
     """
     plan = [_node("mean", "lat", keepdims=True), _node("isel", lat=0)]
     out = optimize(plan, schema)
@@ -178,8 +180,9 @@ def test_keepdims_dim_effect_blocks_its_dims_immovably(schema):
 
     Notes
     -----
-    Mirrors ``WindowedReduce``: the dims survive (resized to 1), so a select on one must
-    not reorder but the chain is valid. Contrast a plain reduce, whose arm is ``invalid``.
+    Same as ``WindowedReduce``: the dims survive (resized to 1), so a select on one must
+    not be reordered, but the chain is valid. A plain reduce's arm is ``invalid``
+    instead.
     """
     kept = dim_effect(_node("mean", "lat", keepdims=True))
     assert kept.blocks == frozenset({"lat"})
@@ -193,7 +196,8 @@ def test_bare_mean_then_select_raises_empty_dim_bug(schema):
 
     Notes
     -----
-    This is the empty-dim reorder bug: it must be caught, not silently swapped to the front.
+    This is the empty-dim reorder bug: it must be caught, not silently swapped to the
+    front.
     """
     plan = [_node("mean"), _node("isel", time=0)]
     with pytest.raises(InvalidExpressionError):
@@ -205,9 +209,9 @@ def test_an_orthogonal_dataarray_select_hops_past_a_disjoint_reduce(schema):
 
     Notes
     -----
-    ``isel(time=<DataArray dims=(time,)>)`` normalises to ``Positions``, so the select hops
-    past a disjoint ``mean("lat")`` exactly as a plain-list select would — the payoff of
-    modelling it rather than barriering it.
+    ``isel(time=<DataArray dims=(time,)>)`` becomes ``Positions``, so the select moves
+    past ``mean("lat")`` (a different dim) exactly as a plain-list select would. That's
+    the benefit of modelling it rather than treating it as a barrier.
     """
     da = xr.DataArray([0, 2], dims="time")
     plan = [_node("mean", "lat"), _node("isel", time=da)]
@@ -216,13 +220,13 @@ def test_an_orthogonal_dataarray_select_hops_past_a_disjoint_reduce(schema):
 
 
 def test_a_vectorized_dataarray_select_does_not_cross_a_following_select(schema):
-    """A vectorized ``DataArray`` select is ``Opaque``, so a following select cannot hop it.
+    """A vectorized ``DataArray`` select is ``Opaque``, so a following select can't move past it.
 
     Notes
     -----
-    A plain ``reduce("lat")`` in the first position would let ``isel(lon=0)`` hop to the
-    front (disjoint dims); the vectorized-indexer ``Opaque`` blocks it instead, the
-    conservative barrier that keeps the unmodelled dim-mint from being trusted across it.
+    If the first node were a plain ``reduce("lat")``, ``isel(lon=0)`` would move to the
+    front (different dims). The vectorized select is ``Opaque`` and blocks it instead,
+    so the dims it creates (which aren't modelled) are never relied on.
     """
     da = xr.DataArray([0, 1], dims="points")
     plan = [_node("isel", time=da), _node("isel", lon=0)]
@@ -235,10 +239,11 @@ def test_dataarray_select_then_bare_mean_then_select_raises(schema):
 
     Notes
     -----
-    Misfiled as a dim-dropping ``Scalar``, ``isel(time=da)`` would drop ``time`` from the
-    schema; the bare ``mean()`` would then understate ``consumes`` and the trailing
-    ``isel(time=0)`` would be silently swapped in front. ``time`` survives the select (the
-    orthogonal indexer resizes it), and ``ALL_DIMS`` rejects the trailing select outright.
+    Misfiled as a dim-dropping ``Scalar``, ``isel(time=da)`` would drop ``time`` from
+    the schema; the bare ``mean()`` would then understate ``consumes`` and the trailing
+    ``isel(time=0)`` would be silently swapped in front. ``time`` survives the select
+    (the orthogonal indexer resizes it), and ``ALL_DIMS`` rejects the trailing select
+    outright.
     """
     da = xr.DataArray([0, 2], dims="time")
     plan = [_node("isel", time=da), _node("mean"), _node("isel", time=0)]
@@ -251,10 +256,10 @@ def test_bare_mean_needs_no_schema_to_reject_a_following_select():
 
     Notes
     -----
-    ``ALL_DIMS`` makes the rejection independent of any dim names: whatever dims exist when
-    the reduce runs, it removes all of them, so *every* select dim intersects. Expanded
-    eagerly against this empty schema, ``consumes`` would be ``frozenset()`` and the select
-    would be swapped in front.
+    ``ALL_DIMS`` makes the rejection independent of any dim names: whatever dims exist
+    when the reduce runs, it removes all of them, so *every* select dim intersects.
+    Expanded eagerly against this empty schema, ``consumes`` would be ``frozenset()``
+    and the select would be swapped in front.
     """
     plan = [_node("mean"), _node("isel", whatever=0)]
     with pytest.raises(InvalidExpressionError):
@@ -266,12 +271,13 @@ def test_bare_mean_after_a_rename_rejects_a_select_on_the_new_name(schema):
 
     Notes
     -----
-    The stale-name divergence. ``rename`` is Opaque and ``apply_schema`` models it as
-    dim-preserving, so the fold past it still says ``{time, lat, lon}``. Expanding the bare
-    ``mean()`` against those recorded *stale* names, ``t2`` would test disjoint from them and
-    the select would be swapped to the front, so the plan would silently return data where
-    the eager chain raises (``mean()`` leaves no ``t2`` to index). Symbolically there are no
-    names to be stale about.
+    Shows why a bare reduce records ``ALL_DIMS`` instead of a list of names. The dims
+    before the rename are ``{time, lat, lon}``, which doesn't include ``t2``. A bare
+    ``mean()`` expanded against those names would look disjoint from ``isel(t2=0)``, the
+    select would be moved to the front, and the plan would return data where the eager
+    chain raises (``mean()`` leaves no ``t2`` to index). ``ALL_DIMS`` has no names to go
+    stale. (``rename`` is modelled now, so the fold would get ``t2`` right anyway, but
+    the rejection doesn't depend on that.)
     """
     plan = [_node("rename", time="t2"), _node("mean"), _node("isel", t2=0)]
     with pytest.raises(InvalidExpressionError):
@@ -319,12 +325,13 @@ def test_projection_hops_past_a_scan(schema):
 
 
 def test_projection_not_pushed_past_a_scan_on_missing_dim(schema):
-    """A projection to a variable missing the scanned dim is left behind the scan, not hopped.
+    """A projection to a variable without the scanned dim is left behind the scan, not moved.
 
     Notes
     -----
-    ``elevation`` has no ``time``, so leading with it would leave ``cumsum("time")`` scanning
-    a dim the variable lacks. Immovable, and left as written rather than raised.
+    ``elevation`` has no ``time``, so putting it first would leave ``cumsum("time")``
+    scanning a dim the variable doesn't have. It can't move, so it's left as written
+    (not raised).
     """
     plan = [_node("cumsum", "time"), _node("__getitem__", ["elevation"])]
     out = optimize(plan, schema)
@@ -339,13 +346,13 @@ def test_select_hops_past_an_elementwise(schema):
 
 
 def test_select_composes_past_an_elementwise_and_a_reduce(schema):
-    """The fixpoint hops a select past a ``fillna`` *and* a disjoint ``mean``, composing the two rules.
+    """The fixpoint moves a select past a ``fillna`` *and* a ``mean`` on another dim, combining two rules.
 
     Notes
     -----
-    ``mean("lat") -> fillna(0) -> isel(time=0)`` optimises to the select in front: it
-    crosses ``fillna`` (the elementwise rule) and then ``mean`` (the existing reduce rule).
-    The ``fillna`` node itself never moves — only the select passes it.
+    ``mean("lat") -> fillna(0) -> isel(time=0)`` ends with the select first: it crosses
+    ``fillna`` (the elementwise arm) and then ``mean`` (the reduce arm). The ``fillna``
+    node itself never moves; only the select passes it.
     """
     plan = [_node("mean", "lat"), _node("fillna", 0), _node("isel", time=0)]
     out = optimize(plan, schema)
@@ -379,16 +386,16 @@ def test_select_hops_past_a_drop(schema):
 
 
 def test_generic_pushdown_does_not_cross_a_drop():
-    """``Drop`` answers ``requires=None``, so the generic projection pushdown never hops it.
+    """``Drop`` answers ``requires=None``, so the generic projection pushdown never crosses it.
 
     Notes
     -----
-    A projection moved before a drop could strip the very name ``drop_vars`` targets, turning
-    a valid chain into a ``KeyError`` -- unsafe as a blind swap, so the *generic* rule refuses.
-    The profitable rewrites next to it (a projection excluding the dropped data vars makes the
-    drop redundant; a projection retaining a dropped coord may hop it) turn on the folded
-    schema, so they live in the dedicated :func:`~xrexpr.optimize.push_projection_past_drop`
-    rule, not in ``dim_effect``.
+    A projection moved in front of a drop could remove the very name ``drop_vars``
+    targets, turning a valid chain into a ``KeyError``. So a blind swap is unsafe, and
+    the generic rule refuses. The useful rewrites here (a projection that excludes the
+    dropped data vars makes the drop redundant; one that keeps a dropped coord may move
+    in front) depend on the folded schema, so they're in the dedicated
+    :func:`~xrexpr.optimize.push_projection_past_drop` rule, not in ``dim_effect``.
     """
     assert dim_effect(_node("drop_vars", ["elevation"])).requires is None
 
@@ -401,13 +408,13 @@ def test_select_on_an_untouched_dim_hops_a_rename(schema):
 
 
 def test_select_on_a_renamed_dim_is_left_behind_a_rename(schema):
-    """A select on the *renamed* dim does not hop the rename -- above it the dim has its old name.
+    """A select on the *renamed* dim doesn't move past the rename: before it, the dim has its old name.
 
     Notes
     -----
-    ``rename({"time": "t"}).isel(t=0)`` names ``t``, which does not exist before the rename,
-    so the select is left where it is. The dim survives (merely relabelled), so this is
-    ``immovable`` -- left, never raised.
+    ``rename({"time": "t"}).isel(t=0)`` names ``t``, which doesn't exist before the
+    rename, so the select stays where it is. The dim survives (just relabelled), so this
+    is ``immovable``: left, never raised.
     """
     plan = [_node("rename", {"time": "t"}), _node("isel", t=0)]
     out = optimize(plan, schema)
@@ -415,26 +422,27 @@ def test_select_on_a_renamed_dim_is_left_behind_a_rename(schema):
 
 
 def test_generic_pushdown_does_not_cross_a_rename():
-    """``Rename`` answers ``requires=None``: the generic projection pushdown never hops it.
+    """``Rename`` answers ``requires=None``: the generic projection pushdown never crosses it.
 
     Notes
     -----
-    The hazard is a *variable*-key rename -- a projection naming a renamed variable cannot
-    precede the rename that mints its new name -- which the dim-keyed pushdown cannot see, so
-    no projection crosses via the generic rule. A schema-aware rename/projection rule and the
-    name-translating select cross (``11-relabel-rename-drop.md`` §4) are not written.
+    The danger is renaming a *variable*: a projection naming the new name can't go
+    before the rename that creates it, and the dim-based pushdown can't see that. So no
+    projection crosses via the generic rule. A schema-aware rename/projection rule, and
+    translating a select's dim names across a rename (``11-relabel-rename-drop.md`` §4),
+    aren't written.
     """
     assert dim_effect(_node("rename", {"tas": "temp"})).requires is None
 
 
 def test_projection_hops_a_reduce_behind_a_rename(schema):
-    """Modelling ``rename`` re-opens the trusted prefix, so a projection still hops a reduce behind it.
+    """Because ``rename`` is modelled, the trusted prefix continues past it and a projection still crosses a reduce.
 
     Notes
     -----
-    An ``Opaque`` is a trust boundary that blacks out the projection rules for the rest of
-    the plan; a modelled ``Rename`` is inside the prefix, so the projection reaches the
-    front past the ``mean``.
+    An ``Opaque`` would be a trust boundary that switches off the projection rules for
+    the rest of the plan. A modelled ``Rename`` is inside the prefix, so the projection
+    reaches the front past the ``mean``.
     """
     plan = [
         _node("rename", {"time": "t"}),
@@ -447,17 +455,18 @@ def test_projection_hops_a_reduce_behind_a_rename(schema):
 
 
 def test_projection_hops_a_reduce_behind_a_drop(schema):
-    """Modelling ``drop_vars`` re-opens the trusted prefix, so a projection still hops a reduce behind it.
+    """Because ``drop_vars`` is modelled, the trusted prefix continues past it and a projection still crosses a reduce.
 
     Notes
     -----
-    Recorded as ``Opaque``, ``drop_vars`` would be a trust boundary: ``_trusted_prefix``
-    would return its index and the schema-reading projection rules would go dark on
-    everything after it. A modelled ``Drop`` is inside the prefix, so the projection reaches
-    the front past the ``mean`` -- and once it sits ahead of the drop,
-    :func:`~xrexpr.optimize.push_projection_past_drop` removes the drop of ``elevation``,
-    which the projection excludes anyway. So the whole ``drop_vars("elevation").mean("time")
-    [["temperature"]]`` collapses to ``[["temperature"]].mean("time")``.
+    As an ``Opaque``, ``drop_vars`` would be a trust boundary: ``_trusted_prefix`` would
+    stop there and the schema-reading projection rules would do nothing after it. A
+    modelled ``Drop`` is inside the prefix, so the projection reaches the front past the
+    ``mean``. Once it's in front of the drop,
+    :func:`~xrexpr.optimize.push_projection_past_drop` removes the drop of
+    ``elevation``, which the projection excludes anyway. So the whole
+    ``drop_vars("elevation").mean("time")[["temperature"]]`` becomes
+    ``[["temperature"]].mean("time")``.
     """
     plan = [
         _node("drop_vars", ["elevation"]),
@@ -496,8 +505,9 @@ def test_a_drop_of_a_surviving_coord_hops_the_projection():
 
     Notes
     -----
-    ``area`` is a coordinate ``temperature`` still spans, so it survives ``[["temperature"]]``
-    -- the projection may go first and the ``drop_vars("area")`` follow it, same values.
+    ``area`` is a coordinate ``temperature`` still spans, so it survives
+    ``[["temperature"]]`` -- the projection may go first and the ``drop_vars("area")``
+    follow it, same values.
     """
     plan = [_node("drop_vars", ["area"]), _node("__getitem__", ["temperature"])]
     out = optimize(plan, _AUX_SCHEMA)
@@ -512,8 +522,8 @@ def test_a_mixed_drop_is_trimmed_to_its_surviving_coords():
     Notes
     -----
     ``elevation`` (a data variable the projection excludes) is redundant and drops out;
-    ``area`` (a retained coordinate) survives, so the hopped plan keeps ``drop_vars("area")``
-    -- and ``elevation`` is never computed.
+    ``area`` (a retained coordinate) survives, so the hopped plan keeps
+    ``drop_vars("area")`` -- and ``elevation`` is never computed.
     """
     plan = [
         _node("drop_vars", ["elevation", "area"]),
@@ -529,8 +539,8 @@ def test_a_drop_then_projecting_the_dropped_name_is_left_alone(schema):
 
     Notes
     -----
-    ``drop_vars("temperature")[["temperature"]]`` raises eagerly; rewriting it to run the
-    projection first would launder that error into a value, which the rule must never do.
+    ``drop_vars("temperature")[["temperature"]]`` raises eagerly. Running the projection
+    first would turn that error into a value, which the rule must never do.
     """
     plan = [_node("drop_vars", ["temperature"]), _node("__getitem__", ["temperature"])]
     out = optimize(plan, schema)
@@ -563,13 +573,13 @@ def test_a_single_name_projection_does_not_absorb_a_drop(schema):
 
 
 def test_nothing_reorders_around_an_unsafe_elementwise(schema):
-    """A ``fillna`` with a per-variable ``dict`` records ``Opaque``, so the select stays put behind it.
+    """A ``fillna`` with a per-variable ``dict`` records ``Opaque``, so the select stays behind it.
 
     Notes
     -----
-    The guard demotes the data-shaped argument to :class:`~xrexpr.ir.Opaque` at record
-    time, and an ``Opaque`` is a full barrier — so this pins that the transparent effect is
-    confined to the *safe* form, and an unsafe one blocks reordering exactly as before.
+    The guard records the dict-argument call as :class:`~xrexpr.ir.Opaque`, and an
+    ``Opaque`` blocks everything. So only the *safe* form lets selects through; an
+    unsafe one blocks them.
     """
     plan = [_node("fillna", {"temperature": 0}), _node("isel", time=0)]
     out = optimize(plan, schema)
@@ -577,16 +587,16 @@ def test_nothing_reorders_around_an_unsafe_elementwise(schema):
 
 
 def test_a_reduce_and_an_elementwise_keep_their_order(schema):
-    """A reduce and an elementwise never reorder against each other, in either arrangement.
+    """A reduce and an elementwise op never swap, in either order.
 
     Notes
     -----
-    A ``mean`` does *not* commute with a ``fillna`` -- filling then averaging differs from
-    averaging then filling -- and the optimiser must never swap them. It cannot: **no rule
-    moves a** :class:`~xrexpr.ir.Reduce` (a reduce is only ever the *crossed* node in
-    ``dim_effect``, never the moving one), and nothing moves an
-    :class:`~xrexpr.ir.Elementwise` either. The transparent effect lets *selects and
-    projections* cross the node; it does not license reordering the node against a reduce.
+    A ``mean`` doesn't commute with a ``fillna`` (filling then averaging differs from
+    averaging then filling), so the optimiser must never swap them. It can't: **no rule
+    moves a** :class:`~xrexpr.ir.Reduce` (a reduce is only ever the node being *crossed*
+    in ``dim_effect``, never the one moving), and nothing moves an
+    :class:`~xrexpr.ir.Elementwise` either. Elementwise ops let *selects and
+    projections* cross them; that doesn't allow reordering them against a reduce.
     """
     assert [
         n.name for n in optimize([_node("fillna", 0), _node("mean", "lat")], schema)
@@ -644,13 +654,13 @@ def test_pushdown_projection_past_reduce(schema):
 
 
 def test_pushdown_projection_past_bare_reduce(schema):
-    """A projection may lead a bare ``mean()`` when the variable spans every dim the reduce would resolve.
+    """A projection may go before a bare ``mean()`` when the variable spans every dim the reduce would resolve to.
 
     Notes
     -----
-    ``ALL_DIMS`` resolves against the schema *entering* the reduce: ``{time, lat, lon}``,
-    which ``temperature`` spans -- so the projection may lead and the replayed bare
-    ``mean()`` still reduces the same dims.
+    ``ALL_DIMS`` resolves against the schema going *into* the reduce, ``{time, lat,
+    lon}``, which ``temperature`` spans. So the projection may go first, and the
+    replayed bare ``mean()`` still reduces the same dims.
     """
     plan = [_node("mean"), _node("__getitem__", ["temperature"])]
     out = optimize(plan, schema)
@@ -662,9 +672,9 @@ def test_projection_not_pushed_past_bare_reduce_on_missing_dim(schema):
 
     Notes
     -----
-    ``elevation`` lacks ``time``, so leading with it would leave the bare ``mean()`` reducing
-    a smaller dim set than it does in the plan as written. The chain is valid, merely
-    immovable.
+    ``elevation`` has no ``time``, so putting it first would make the bare ``mean()``
+    reduce fewer dims than it does in the plan as written. The chain is valid, it just
+    can't move.
     """
     plan = [_node("mean"), _node("__getitem__", ["elevation"])]
     assert optimize(plan, schema) == plan
@@ -693,9 +703,9 @@ def test_projection_not_pushed_past_reduce_on_missing_dim(schema):
 
     Notes
     -----
-    ``elevation`` has no ``time``, so ``ds[["elevation"]].mean("time")`` would raise if the
-    hop went ahead. Unlike a select on a reduced dim, this case doesn't raise -- it's merely
-    immovable.
+    ``elevation`` has no ``time``, so ``ds[["elevation"]].mean("time")`` would raise if
+    the projection moved. Unlike a select on a reduced dim, this doesn't raise; it just
+    can't move.
     """
     plan = [_node("mean", "time"), _node("__getitem__", ["elevation"])]
     out = optimize(plan, schema)
@@ -721,8 +731,8 @@ def test_projection_behind_an_opaque_left_alone(schema):
 
     Notes
     -----
-    Past an unmodelled op, the schema's ``data_vars`` is only a guess, so the rewrite stays
-    out.
+    Past an unmodelled op, the schema's ``data_vars`` is only a guess, so the rewrite
+    stays out.
     """
     plan = [
         _node("rename", {"temperature": "t2m"}),
@@ -788,13 +798,13 @@ def test_merge_adjacent_projects_keeps_the_single_form(schema):
 
 
 def test_a_single_projection_is_a_merge_barrier(schema):
-    """A *leading* bare-name projection blocks the merge: what follows it indexes a ``DataArray``.
+    """A *first* projection by bare name blocks the merge: what follows it indexes a ``DataArray``.
 
     Notes
     -----
-    ``ds["temperature"]["temperature"]`` raises ``KeyError`` -- ``DataArray.__getitem__``
-    is positional indexing, not projection -- so collapsing the pair would turn an error
-    into a value. Verified against xarray 2026.7.0.
+    ``ds["temperature"]["temperature"]`` raises ``KeyError`` (``DataArray.__getitem__``
+    is positional indexing, not projection), so collapsing the pair would turn an error
+    into a value. Checked against xarray 2026.7.0.
     """
     plan = [
         _node("__getitem__", "temperature"),
@@ -808,10 +818,10 @@ def test_projections_that_are_not_a_subset_are_left_alone(schema):
 
     Notes
     -----
-    ``ds[["temperature"]][["elevation"]]`` is not a subset (merge declines) and ``elevation``
-    is a data variable, not a coordinate (``eliminate_projection_before_coord`` declines).
-    The optimiser leaves the pair -- it has no standing to reject a chain, even though this
-    one raises eagerly.
+    ``ds[["temperature"]][["elevation"]]`` isn't a subset (so the merge declines), and
+    ``elevation`` is a data variable, not a coordinate (so
+    ``eliminate_projection_before_coord`` declines). The optimiser leaves the pair
+    alone: it doesn't reject chains, even though this one raises eagerly.
     """
     plan = [
         _node("__getitem__", ["temperature"]),
@@ -826,7 +836,7 @@ def test_projection_feeding_a_surviving_coord_is_dropped(schema):
     Notes
     -----
     ``ds[["temperature"]]["lat"]``: ``temperature`` spans ``lat``, so the coordinate
-    survives ``p1`` and reads identically from the base -- ``p1`` is pure waste.
+    survives ``p1`` and reads the same from the base. ``p1`` is pure waste.
     """
     plan = [
         _node("__getitem__", ["temperature"]),
@@ -838,13 +848,13 @@ def test_projection_feeding_a_surviving_coord_is_dropped(schema):
 
 
 def test_projection_feeding_a_dropped_coord_is_left(schema):
-    """A projection is left when its consumer names a coordinate the survivor does not span.
+    """A projection is kept when the next one names a coordinate the kept variables don't span.
 
     Notes
     -----
-    ``ds[["elevation"]]["time"]``: ``elevation`` spans ``lat``/``lon`` only, so ``p1``
-    drops ``time`` and the eager chain raises. The rule declines rather than turn that
-    error into a value.
+    ``ds[["elevation"]]["time"]``: ``elevation`` only spans ``lat``/``lon``, so ``p1``
+    drops ``time`` and the eager chain raises. The rule declines rather than turning
+    that error into a value.
     """
     plan = [
         _node("__getitem__", ["elevation"]),
@@ -854,12 +864,12 @@ def test_projection_feeding_a_dropped_coord_is_left(schema):
 
 
 def test_projection_feeding_a_coord_past_opaque_is_left(schema):
-    """Past an ``Opaque`` the schema is a guess, so the coord-elimination rule declines.
+    """Past an ``Opaque`` the schema is a guess, so the coordinate-elimination rule declines.
 
     Notes
     -----
-    The rule reads the folded schema to prove the coordinate survives, so it confines
-    itself to the trusted prefix exactly as ``pushdown_projections`` does.
+    The rule reads the folded schema to prove the coordinate survives, so it stays
+    inside the trusted prefix, like ``pushdown_projections``.
     """
     plan = [
         _node("pipe", lambda d: d),
@@ -870,12 +880,12 @@ def test_projection_feeding_a_coord_past_opaque_is_left(schema):
 
 
 def test_projection_feeding_a_coord_after_bare_name_is_left(schema):
-    """A bare-name first projection indexes its result, so the pair is left un-dropped.
+    """A first projection by bare name gives a DataArray, so the pair is left alone.
 
     Notes
     -----
-    After ``ds["temperature"]`` the object is a ``DataArray``, on which ``["lat"]`` is
-    indexing rather than projection -- the same ``single`` barrier the merge rule carries.
+    After ``ds["temperature"]`` the object is a ``DataArray``, where ``["lat"]`` is
+    indexing, not projection. Same ``single`` guard as the merge rule.
     """
     plan = [
         _node("__getitem__", "temperature"),
@@ -936,8 +946,8 @@ def test_scalar_isel_past_rechunk_drops_the_spent_rechunk(schema):
 
     Notes
     -----
-    ``chunk({time: 100}).isel(time=0)`` becomes ``isel(time=0)``: the rechunk's only named
-    dim is gone, and ``chunk({})`` would buy nothing but a single-chunk array.
+    ``chunk({time: 100}).isel(time=0)`` becomes ``isel(time=0)``: the rechunk's only
+    named dim is gone, and ``chunk({})`` would buy nothing but a single-chunk array.
     """
     plan = [_node("chunk", {"time": 100}), _node("isel", time=0)]
     out = optimize(plan, schema)
@@ -950,7 +960,8 @@ def test_scalar_isel_past_rechunk_strips_only_the_dropped_dim(schema):
 
     Notes
     -----
-    ``lat`` survives the select, so the rechunk stays -- minus the dim that no longer exists.
+    ``lat`` survives the select, so the rechunk stays -- minus the dim that no longer
+    exists.
     """
     plan = [
         _node("chunk", {"time": 100, "lat": 50}),
@@ -968,8 +979,8 @@ def test_slice_isel_pushes_with_the_spec_intact(schema):
 
     Notes
     -----
-    Pushing means the rechunk sees less data *and* lands on regular blocks instead of ragged
-    ones.
+    Pushing means the rechunk sees less data *and* lands on regular blocks instead of
+    ragged ones.
     """
     plan = [
         _node("chunk", {"time": 100}),
@@ -997,15 +1008,14 @@ def test_rechunk_kwarg_form_pushes(schema):
 
 
 def test_uniform_rechunk_forms_push_and_are_kept(schema):
-    """An extent-independent uniform rechunk (``chunk()``, ``chunk(100)``, ``chunk(-1)``) pushes and is kept, never spent.
+    """A size-independent uniform rechunk (``chunk()``, ``chunk(100)``, ``chunk(-1)``) lets selects through and is kept.
 
     Notes
     -----
-    These forms name no dim, so there is nothing to strip and nothing spent — and xarray
+    These forms name no dim, so there's nothing to strip and nothing to use up. xarray
     reads a uniform spec as ``dict.fromkeys(self.dims, spec)``, so it already means
-    "whatever dims there are". The extent-*dependent* uniform forms are the other side of
-    the same taxonomy: see
-    :func:`test_extent_dependent_uniform_rechunk_forms_are_barriers`.
+    "whatever dims there are". The size-*dependent* uniform forms are the other half:
+    see :func:`test_extent_dependent_uniform_rechunk_forms_are_barriers`.
     """
     for args in ((), (100,), (-1,)):
         plan = [_node("chunk", *args), _node("isel", time=0)]
@@ -1015,16 +1025,16 @@ def test_uniform_rechunk_forms_push_and_are_kept(schema):
 
 
 def test_extent_dependent_uniform_rechunk_forms_are_barriers(schema):
-    """``chunk("auto")``, ``chunk("10MB")`` and ``chunk((100, 400, 500))`` barrier, through the taxonomy.
+    """``chunk("auto")``, ``chunk("10MB")`` and ``chunk((100, 400, 500))`` are barriers.
 
     Notes
     -----
-    A uniform spec is classified into ``Rechunk.uniform`` by the same
-    :func:`~xrexpr.chunks.classify_chunk` the mapping form goes through, so these reach
-    :func:`~xrexpr.optimize._pushable_rechunk`'s ``match`` as :class:`~xrexpr.chunks.Auto`,
-    :class:`~xrexpr.chunks.ByteSize` and :class:`~xrexpr.chunks.BlockSeq` — the same arms
-    their ``chunk({"time": ...})`` spellings take. One taxonomy answers for both spellings,
-    rather than a pair of ``isinstance`` checks on ``args`` restating the answer.
+    A uniform spec goes into ``Rechunk.uniform`` through the same
+    :func:`~xrexpr.chunks.classify_chunk` as the per-dim form. So these reach
+    :func:`~xrexpr.optimize._pushable_rechunk`'s ``match`` as
+    :class:`~xrexpr.chunks.Auto`, :class:`~xrexpr.chunks.ByteSize` and
+    :class:`~xrexpr.chunks.BlockSeq`, the same arms as their ``chunk({"time": ...})``
+    forms. One set of variants covers both spellings.
     """
     for arg in ("auto", "10MB", (100, 400, 500)):
         plan = [_node("chunk", arg), _node("isel", time=0)]
@@ -1034,9 +1044,9 @@ def test_extent_dependent_uniform_rechunk_forms_are_barriers(schema):
 def test_an_emptying_select_can_cross_an_auto_rechunk_after_xarray_fix(schema):
     """The 2026.09.0 gate permits only a select that provably empties an auto rechunk.
 
-    ``[]`` is an exact empty positional indexer without consulting the source shape. Other
-    extent-dependent specs and non-emptying selects remain barriers; the accessor suite
-    verifies both the eager replay and the uniform ``chunk("auto")`` spelling.
+    ``[]`` is an exact empty positional indexer without consulting the source shape.
+    Other extent-dependent specs and non-emptying selects remain barriers; the accessor
+    suite verifies both the eager replay and the uniform ``chunk("auto")`` spelling.
     """
     plan = [_node("chunk", {"time": "auto"}), _node("isel", lat=[])]
     expected = ["isel", "chunk"] if AUTOCHUNK_EMPTY_DIMS_SAFE else ["chunk", "isel"]
@@ -1044,14 +1054,14 @@ def test_an_emptying_select_can_cross_an_auto_rechunk_after_xarray_fix(schema):
 
 
 def test_a_uniform_float_size_is_an_opaque_barrier(schema):
-    """``chunk(100.0)`` is unmodelled and so barriers, as ``chunk({"time": 100.0})`` does.
+    """``chunk(100.0)`` isn't modelled, so it's a barrier, as ``chunk({"time": 100.0})`` is.
 
     Notes
     -----
-    Dask accepts a whole float; xarray's API documents an int. Declining to model a
-    spelling xarray does not offer costs one optimisation and never correctness — the
-    conservative choice :class:`~xrexpr.chunks.OpaqueChunk` exists to make, now reaching the
-    uniform spelling too.
+    Dask accepts a whole float, but xarray's API documents an int. Not modelling a
+    spelling xarray doesn't offer costs one optimisation and never correctness, which is
+    what :class:`~xrexpr.chunks.OpaqueChunk` is for. This checks it applies to the
+    uniform form too.
     """
     plan = [_node("chunk", 100.0), _node("isel", time=0)]
     assert [n.name for n in optimize(plan, schema)] == ["chunk", "isel"]
@@ -1062,8 +1072,8 @@ def test_explicit_block_tuple_is_a_barrier(schema):
 
     Notes
     -----
-    Blocks must sum to the dim length, so a select must never cross -- not even a scalar one,
-    though that case would merely strip the key.
+    The blocks must add up to the dim's length, so a select must never cross, not even a
+    scalar one (for which the key would just be removed).
     """
     for indexer in ({"time": 0}, {"time": slice(0, 2)}):
         plan = [
@@ -1136,13 +1146,14 @@ def test_adjacent_rechunks_on_one_dim_are_later_wins(schema):
 
 
 def test_a_later_no_change_does_not_override_an_earlier_spec(schema):
-    """A later ``chunk({dim: None})`` leaves an earlier concrete spec on that dim in place.
+    """A later ``chunk({dim: None})`` leaves an earlier spec on that dim in place.
 
     Notes
     -----
     ``None`` asks nothing of the dim ("leave it as it is"), so ``chunk({"time": 100})``
-    followed by ``chunk({"time": None})`` keeps ``time`` at 100 -- a plain ``{**r1, **r2}``
-    union would wrongly drop it to :class:`~xrexpr.chunks.NoChange` (verified against dask).
+    followed by ``chunk({"time": None})`` keeps ``time`` at 100. A plain ``{**r1,
+    **r2}`` would wrongly replace it with :class:`~xrexpr.chunks.NoChange` (checked
+    against dask).
     """
     plan = [
         _node("chunk", {"time": 100}),
@@ -1165,13 +1176,13 @@ def test_a_leading_no_change_survives_when_the_dim_is_unspecified_earlier(schema
 
 
 def test_a_uniform_rechunk_in_either_position_blocks_the_merge(schema):
-    """A uniform positional ``chunk(100)`` next to a mapping-form ``chunk`` leaves the pair alone.
+    """A uniform ``chunk(100)`` next to a per-dim ``chunk`` leaves the pair alone.
 
     Notes
     -----
-    A uniform spec rechunks *every* dim and does not compose by dict union, so neither
-    ordering may fuse -- the same taxonomy line
-    :func:`test_uniform_rechunk_forms_push_and_are_kept` draws for pushdown.
+    A uniform spec rechunks *every* dim and can't be combined by dict union, so neither
+    order may merge. Same line :func:`test_uniform_rechunk_forms_push_and_are_kept`
+    draws for pushdown.
     """
     for plan in (
         [_node("chunk", 100), _node("chunk", {"time": 50})],
@@ -1251,12 +1262,12 @@ def test_optimize_is_idempotent_with_a_projection(schema):
 
 # --- same-dim composition -------------------------------------------------------
 #
-# What these guard: merging a run of selects by ``dict.update`` would let a
-# second indexer on an already-indexed dim *replace* the first instead of composing
-# with it. The later indexer addresses positions within the earlier one's result, so
-# ``isel(time=slice(100, 1000)).isel(time=slice(10, 20))`` is ``slice(110, 120)``, not
-# ``slice(10, 20)``. Cases with no provable composition must end the run (two nodes)
-# rather than fold to a wrong one.
+# What these check: merging a run of selects with ``dict.update`` would let a second
+# indexer on the same dim *replace* the first instead of composing with it. The second
+# indexes positions within the first one's result, so ``isel(time=slice(100,
+# 1000)).isel(time=slice(10, 20))`` is ``slice(110, 120)``, not ``slice(10, 20)``. Cases
+# where composition can't be proven must end the run (two nodes) rather than merge into
+# a wrong one.
 
 
 @pytest.mark.parametrize(
@@ -1277,15 +1288,13 @@ def test_optimize_is_idempotent_with_a_projection(schema):
     ],
 )
 def test_same_dim_selects_compose(schema, outer, inner, expected):
-    """Two ``isel`` calls on the same dim compose into one indexer when the composition is provable.
+    """Two ``isel`` calls on the same dim compose into one indexer when the composition can be proven.
 
     Notes
     -----
-    Merging a run of selects by ``dict.update`` would let a second indexer on an
-    already-indexed dim *replace* the first instead of composing with it. The later indexer
-    addresses positions within the earlier one's result, so
-    ``isel(time=slice(100, 1000)).isel(time=slice(10, 20))`` is ``slice(110, 120)``, not
-    ``slice(10, 20)``.
+    A ``dict.update`` merge would let the second indexer *replace* the first. The second
+    one indexes positions within the first one's result, so ``isel(time=slice(100,
+    1000)).isel(time=slice(10, 20))`` is ``slice(110, 120)``, not ``slice(10, 20)``.
     """
     plan = [_node("isel", time=outer), _node("isel", time=inner)]
     out = optimize(plan, schema)
@@ -1322,12 +1331,12 @@ def test_same_dim_sel_is_never_composed(schema):
 
 
 def test_uncomposable_dim_abandons_the_whole_merge(schema):
-    """One uncomposable dim abandons the merge for every dim in the pair, not just that one.
+    """One dim that can't be composed abandons the merge for every dim in the pair.
 
     Notes
     -----
-    ``lat`` *could* merge here, but ``time`` can't, so neither does -- otherwise the plan
-    would represent neither select faithfully.
+    ``lat`` *could* merge here, but ``time`` can't, so neither does. Otherwise the plan
+    would represent neither select correctly.
     """
     plan = [
         _node("isel", time=0, lat=slice(0, 3)),
@@ -1395,26 +1404,26 @@ def test_no_select_or_rechunk_crosses_a_weighted_reduce(schema, trailing):
 
     Notes
     -----
-    ``WeightedReduce.consumes`` is exactly a plain reduce's, so lowered to a ``Reduce`` it
-    would be indistinguishable from one and ``pushdown_selects`` would match it. It is a
-    separate variant precisely so no select can: subsetting the weights alongside is a
-    data-touching rewrite with its own workstream (§8.1). A *projection* does cross it -- see
-    :func:`test_a_projection_hops_past_a_weighted_reduce` -- because it discards variables
-    instead of subsetting them, so the weights need no rewriting.
+    ``WeightedReduce.consumes`` is exactly a plain reduce's, so as a ``Reduce`` it would
+    look the same and ``pushdown_selects`` would match it. It's a separate kind so that
+    no select can. Subsetting the weights too would be a rewrite that changes array
+    data, which needs its own design (§8.1). A *projection* does cross it (see
+    :func:`test_a_projection_hops_past_a_weighted_reduce`), because it removes variables
+    rather than subsetting them, so the weights don't need rewriting.
     """
     plan = [_weighted(), trailing()]
     assert optimize(plan, schema) == plan
 
 
 def test_a_select_on_a_weighted_reduces_own_dim_is_left_not_raised(schema):
-    """A select intersecting a ``WeightedReduce``'s own dim is left in place, not raised.
+    """A select on a ``WeightedReduce``'s own dim is left in place, not raised.
 
     Notes
     -----
-    ``pushdown_selects`` raises on an intersecting ``(Reduce, Select)`` because the plan can
-    never replay. That leg is deliberately out of reach here: the rule matches ``Reduce``
-    only, so xarray reports the invalid selection at replay in its own words rather than the
-    optimiser guessing on a node it models less exactly.
+    ``pushdown_selects`` raises on an overlapping ``(Reduce, Select)`` because that plan
+    can never run. That's deliberately not reachable here: the ``invalid`` answer is
+    only given for ``Reduce``, so xarray reports the bad selection at replay in its own
+    words, instead of the optimiser guessing about a node it models less exactly.
     """
     plan = [_weighted(consumes=frozenset({"lat"})), _node("isel", lat=0)]
     assert optimize(plan, schema) == plan
@@ -1425,8 +1434,8 @@ def test_a_bare_weighted_closer_is_left_alone_too(schema):
 
     Notes
     -----
-    ``ALL_DIMS`` is the shape that most invites a rule to fire, since it is what
-    ``pushdown_selects``'s no-schema-needed reasoning keys on.
+    ``ALL_DIMS`` is the case most likely to tempt a rule to fire, since it's what
+    ``pushdown_selects``'s schema-free reasoning keys on.
     """
     plan = [
         WeightedReduce(name="weighted", reduce="mean", consumes=ALL_DIMS),
@@ -1436,16 +1445,15 @@ def test_a_bare_weighted_closer_is_left_alone_too(schema):
 
 
 def test_ops_after_a_weighted_reduce_are_still_optimised(schema):
-    """Ops downstream of a ``WeightedReduce`` still rewrite normally, since the fused node is not an opaque barrier.
+    """Ops after a ``WeightedReduce`` still rewrite normally, since the fused node isn't an opaque barrier.
 
     Notes
     -----
-    The payoff for modelling the pair as one node: a fused plan has no ``Opaque`` at the
-    weighted step, so the plan past it is inside the trusted prefix and rewrites normally (a
-    trailing barrier would have left everything from ``weighted`` onward opaque forever). The
-    projection does not stop at the trailing reduce either -- ``temperature`` carries both
-    the consumed and the weight dims, so it reaches the front and the weighted mean itself
-    runs over one variable instead of two.
+    Fusing the pair into one node means there's no ``Opaque`` at the weighted step, so
+    the plan after it is inside the trusted prefix and rewrites normally. The projection
+    doesn't stop at the trailing reduce either: ``temperature`` has both the consumed
+    and the weight dims, so it reaches the front and the weighted mean runs over one
+    variable instead of two.
     """
     plan = [
         _weighted(consumes=frozenset({"lat"})),
@@ -1525,14 +1533,15 @@ def test_select_hops_past_a_fused_reduce_on_disjoint_dims(schema, fused, select)
     ],
 )
 def test_intersecting_select_is_left_alone_never_raised(schema, fused, select, why):
-    """A select intersecting a fused reduce's dims is left alone, never raised, whichever dim it names.
+    """A select overlapping a fused reduce's dims is left alone, never raised, whichever dim it names.
 
     Notes
     -----
-    This follows the scan discipline, not ``pushdown_selects``'. Three of these cases are
-    *valid* eagerly -- selecting the minted dim, or a dim a window kept -- so raising would
-    reject a working chain; the group-dim one is invalid, and leaving it lets xarray report
-    that at replay rather than the optimiser guessing. Either way: leave, never raise.
+    This follows the scan behaviour, not ``pushdown_selects``' reduce behaviour. Three
+    of these cases are *valid* eagerly (selecting the new dim, or a dim a window kept),
+    so raising would reject a working chain. The group-dim case is invalid, and leaving
+    it lets xarray report that at replay rather than the optimiser guessing. Either way:
+    leave, never raise.
     """
     plan = [fused, select()]
     assert optimize(plan, schema) == plan, why
@@ -1546,12 +1555,12 @@ def test_select_reaches_the_front_past_a_fused_reduce_and_a_reduce(schema):
 
 
 def test_a_hopped_select_then_merges_with_the_one_in_front_of_it(schema):
-    """A select that hops past a grouped reduce then merges with the select already in front of it.
+    """A select that moves past a grouped reduce then merges with the select already in front of it.
 
     Notes
     -----
-    This composes with ``merge_adjacent_selects``, which is the whole point of running local
-    rules to a fixpoint.
+    This combines with ``merge_adjacent_selects``, which is the point of running small
+    rules in a fixpoint loop.
     """
     plan = [_node("isel", lat=0), _grouped(), _node("isel", lon=1)]
     out = optimize(plan, schema)
@@ -1560,13 +1569,13 @@ def test_a_hopped_select_then_merges_with_the_one_in_front_of_it(schema):
 
 
 def test_no_select_hops_past_a_weighted_reduce(schema):
-    """No select hops past a ``WeightedReduce``, even one the dim algebra alone would permit.
+    """No select moves past a ``WeightedReduce``, even when the dims alone would allow it.
 
     Notes
     -----
-    The variant exists to block exactly this rule: the dim algebra would permit the hop, but
-    the weights would be left un-subset. ``WeightedReduce`` is absent from the rule's match,
-    so it cannot fire.
+    This is exactly what the node kind exists to block: the dims would allow the move,
+    but the weights would be left un-subset. ``dim_effect`` gives a weighted reduce
+    ``blocks=None``, so the rule can't fire.
     """
     plan = [_weighted(consumes=frozenset({"lat"})), _node("isel", time=0)]
     assert optimize(plan, schema) == plan
@@ -1585,12 +1594,12 @@ def test_no_select_hops_past_a_weighted_reduce(schema):
     ],
 )
 def test_projection_hops_past_a_fused_reduce_when_the_dims_survive(schema, fused):
-    """A projection hops past a fused reduce when the projected variable carries every dim the reduce names.
+    """A projection moves past a fused reduce when the kept variable has every dim the reduce names.
 
     Notes
     -----
-    ``temperature(time, lat, lon)`` carries every dim these name, so projecting first
-    aggregates one variable instead of two and then discarding one.
+    ``temperature(time, lat, lon)`` has every dim these name, so projecting first
+    aggregates one variable instead of aggregating two and throwing one away.
     """
     plan = [fused, _node("__getitem__", ["temperature"])]
     out = optimize(plan, schema)
@@ -1617,24 +1626,24 @@ def test_projection_is_left_when_the_fused_node_would_lose_its_dim(schema, fused
 
     Notes
     -----
-    ``elevation(lat, lon)`` has no ``time``. Projecting first would drop the ``time`` coord
-    entirely -- no surviving variable uses it -- and every fused kind then *raises* rather
-    than quietly doing nothing. Left alone, never raised: the chain is valid eagerly, just
-    not reorderable.
+    ``elevation(lat, lon)`` has no ``time``. Projecting first would drop the ``time``
+    coord entirely (no remaining variable uses it), and every fused kind then *raises*
+    rather than quietly doing nothing. Left alone, not raised: the chain is valid
+    eagerly, just not reorderable.
     """
     plan = [fused, _node("__getitem__", ["elevation"])]
     assert optimize(plan, schema) == plan, why
 
 
 def test_projection_needed_set_excludes_the_minted_dim(schema):
-    """A projection's needed-dims set excludes a grouped reduce's minted dim, unlike a select's blocked set.
+    """A projection's required dims exclude a grouped reduce's new dim, unlike a select's blocked dims.
 
     Notes
     -----
-    A grouped reduce *mints* ``month``, but the projection runs in front of it where no
-    ``month`` exists, so requiring the projected variables to carry it would block every hop.
-    ``DimEffect.blocks`` includes it, because a select comes from the other side;
-    ``DimEffect.requires`` must not.
+    A grouped reduce *creates* ``month``, but the projection would go before it, where
+    ``month`` doesn't exist yet. Requiring the kept variables to have it would block
+    every move. ``DimEffect.blocks`` includes it, because a select comes from the other
+    side; ``DimEffect.requires`` must not.
     """
     plan = [_grouped(new_dim="month"), _node("__getitem__", ["temperature"])]
     out = optimize(plan, schema)
@@ -1642,15 +1651,15 @@ def test_projection_needed_set_excludes_the_minted_dim(schema):
 
 
 def test_a_projection_hops_past_a_weighted_reduce(schema):
-    """A projection hops past a ``WeightedReduce``, turning a plan that would otherwise raise into one that replays.
+    """A projection moves past a ``WeightedReduce``, turning a plan that would raise into one that runs.
 
     Notes
     -----
-    The sharpest instance of §8's contract. As written this chain *raises*: a weighted reduce
-    maps per variable and ``elevation`` has no ``time``, where a plain ``.mean("time")``
-    would merely waste effort on it. Hopping the projection in front discards ``elevation``
-    before the reduce sees it, so the value the plan actually asked for is delivered instead
-    of an error about work it was throwing away.
+    The clearest case of §8. As written this chain *raises*: a weighted reduce runs per
+    variable, and ``elevation`` has no ``time`` (a plain ``.mean("time")`` would just do
+    wasted work on it). Moving the projection first removes ``elevation`` before the
+    reduce sees it, so the plan returns the value it asked for instead of an error about
+    work it was discarding.
     """
     plan = [
         _weighted(consumes=frozenset({"time"}), weight_dims=frozenset({"lat"})),
@@ -1661,17 +1670,17 @@ def test_a_projection_hops_past_a_weighted_reduce(schema):
 
 
 def test_a_projection_is_left_when_it_would_orphan_a_weight_dim(schema):
-    """A projection that would orphan a coord the weights align against is left alone, not hopped.
+    """A projection that would drop a coord the weights align against is left alone.
 
     Notes
     -----
-    The guard that makes the hop in :func:`test_a_projection_hops_past_a_weighted_reduce`
-    sound, and the one case where a weighted reduce's ``needed`` set is strictly larger than
-    a plain reduce's. ``elevation`` has no ``time``, so projecting to it drops the ``time``
-    *coordinate* -- and the weights carry ``time``, so they would switch from inner-joining
-    against that coord to broadcasting a fresh one. Verified against xarray: that changes
-    values, not just errors. Drop the ``weight_dims`` term from ``requires`` and this plan
-    hops, wrongly.
+    The guard that makes :func:`test_a_projection_hops_past_a_weighted_reduce` safe, and
+    the one case where a weighted reduce requires more than a plain reduce.
+    ``elevation`` has no ``time``, so projecting to it drops the ``time`` *coordinate*.
+    The weights have ``time``, so they'd switch from inner-joining against that coord to
+    broadcasting a new one. Checked against xarray: that changes values, not just
+    errors. Remove the ``weight_dims`` term from ``requires`` and this plan wrongly
+    moves.
     """
     plan = [
         _weighted(consumes=frozenset({"lat"}), weight_dims=frozenset({"time"})),
@@ -1686,22 +1695,22 @@ def test_a_projection_is_left_when_it_would_orphan_a_weight_dim(schema):
         # ``temperature`` spans every dim, so the replayed bare closer reduces the same
         # ones and no coord can go missing -- a bare closer clears the weight dims too
         (["temperature"], ["Project", "WeightedReduce"]),
-        # ``elevation`` does not span ``time``, so the bare closer would reduce a different
-        # set of dims after the hop
+        # ``elevation`` does not span ``time``, so the bare closer would reduce a
+        # different set of dims after the hop
         (["elevation"], ["WeightedReduce", "Project"]),
     ],
 )
 def test_a_bare_weighted_closer_admits_a_projection_spanning_every_dim(
     schema, variables, expected
 ):
-    """A bare (``ALL_DIMS``) ``WeightedReduce`` admits a projection spanning every dim, needing no ``weight_dims`` term.
+    """A bare (``ALL_DIMS``) ``WeightedReduce`` lets through a projection spanning every dim, without a ``weight_dims`` term.
 
     Notes
     -----
-    ``ALL_DIMS`` needs no ``weight_dims`` term: a bare closer clears every dim, minted weight
-    dims included, so nothing survives for a coordinate to be missing from. It also could not
-    have one -- a weight dim the dataset lacks can never be a subset of the projected
-    variables' dims, so requiring it would refuse every hop.
+    ``ALL_DIMS`` needs no ``weight_dims`` term: a bare closer removes every dim, new
+    weight dims included, so no coordinate is left to be missing. It couldn't have one
+    anyway: a weight dim the dataset lacks can never be a subset of the kept variables'
+    dims, so requiring it would block every move.
     """
     plan = [
         WeightedReduce(name="weighted", reduce="mean", consumes=ALL_DIMS),
@@ -1728,8 +1737,9 @@ def test_projection_and_select_both_cross_a_fused_reduce(schema):
         (_node("mean"), ALL_DIMS, ALL_DIMS),
         # a select is never crossed by another select, but is by a projection
         (_node("isel", time=0), None, frozenset({"time"})),
-        # the asymmetry the two fields exist for: ``new_dim`` blocks a select coming from
-        # the right, but is *not* required of the input a projection would leave behind
+        # the asymmetry the two fields exist for: ``new_dim`` blocks a select coming
+        # from the right, but is *not* required of the input a projection would leave
+        # behind
         (_grouped(), frozenset({"time", "month"}), frozenset({"time"})),
         (
             _grouped(consumes=frozenset({"lat"})),
@@ -1738,16 +1748,17 @@ def test_projection_and_select_both_cross_a_fused_reduce(schema):
         ),
         # a window resizes what it names and needs the same dims present
         (_windowed(), frozenset({"time"}), frozenset({"time"})),
-        # a scan keeps its dims but is order-significant: a disjoint select hops (blocks),
-        # a projection needing those dims hops too (requires), an intersecting select stays
+        # a scan keeps its dims but is order-significant: a disjoint select hops
+        # (blocks), a projection needing those dims hops too (requires), an intersecting
+        # select stays
         (_node("cumsum", "time"), frozenset({"time"}), frozenset({"time"})),
         # nothing crosses these, in either direction
         (_node("where", "cond"), None, None),
         (_node("chunk", {"time": 2}), None, None),
         (_node("__getitem__", ["temperature"]), None, None),
-        # a select never crosses a weighted reduce (the weights would need subsetting), but
-        # a projection does -- and must supply the weight dims as well as the consumed ones,
-        # or it can orphan the coord the weights align against
+        # A select never crosses a weighted reduce (the weights would need subsetting),
+        # but a projection does, and it must cover the weight dims as well as the
+        # consumed ones, or it could drop the coord the weights align against.
         (_weighted(consumes=frozenset({"time"})), None, frozenset({"time", "lat"})),
         (
             WeightedReduce(name="weighted", reduce="mean", consumes=ALL_DIMS),
@@ -1764,14 +1775,14 @@ def test_dim_effect_table(node, blocks, requires):
 
 
 def test_only_a_plain_reduce_calls_a_conflict_invalid():
-    """Of every lowered node kind, only a plain ``Reduce`` classifies an intersecting select as invalid.
+    """Of every lowered node kind, only a plain ``Reduce`` treats an overlapping select as invalid.
 
     Notes
     -----
-    A reduce *removes* what it names, so a select on one of those dims can never replay and
-    the optimiser is entitled to reject the chain. Every other node either mints or keeps the
-    dims it blocks, so an overlapping select there is merely immovable -- the distinction
-    that lets one rule serve both, and the one a new variant must get right.
+    A reduce *removes* what it names, so a select on one of those dims can never run,
+    and the optimiser may reject the chain. Every other kind either creates or keeps the
+    dims it blocks, so an overlapping select there just can't move. That split is what
+    lets one rule handle both, and a new kind has to get it right.
     """
     invalid = [
         node
@@ -1792,8 +1803,8 @@ def test_dim_effect_covers_every_lowered_variant():
 
     Notes
     -----
-    ``assert_never`` makes an uncovered variant a type error too; this is asserted at runtime
-    as well so the table above cannot silently stop covering the union it claims to.
+    ``assert_never`` already makes a missing kind a type error. This checks it at
+    runtime too, so the table above can't quietly stop covering the whole union.
     """
     from typing import get_args
 

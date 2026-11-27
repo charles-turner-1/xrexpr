@@ -1,28 +1,30 @@
 """Tests for the lowering stage: ``to_lower_ir`` and ``emit``.
 
-Two things are pinned here. The *contract* — lowering is semantics-preserving and
-idempotent, and ``emit`` derives each call header from the node's *semantic fields* (the
-inverse of ``to_opnode``), so a rewritten semantic field flows into the replayed call — and
-the *fusion policy*: which builder pairs fusion claims to understand, and that everything else
-takes the mandatory opaque fallback rather than being modelled on a guess.
+Two things are tested here:
 
-Because the header is *derived*, ``emit`` produces the **canonical** spelling of a call, not
-necessarily the recorded one (``isel(time=0)`` re-emits as ``isel({"time": 0})``). The two
-replay identically; equivalence, not byte-identity, is the contract, and the round-trip is
-pinned by re-parsing an emitted call with ``to_opnode`` — a fixed point — and end-to-end by
-the replay-equality properties in ``test_accessor.py`` and ``test_properties.py``.
+- **The contract.** Lowering preserves semantics and is idempotent. ``emit`` rebuilds
+  each call from the node's *semantic fields* (the reverse of ``to_opnode``), so a
+  rewritten field ends up in the replayed call.
+- **The fusion policy.** Which builder pairs get fused, and that everything else takes
+  the opaque fallback rather than being modelled on a guess.
 
-Refusing to fuse is always safe, so the negative cases matter as much as the positive
-ones: each pins a narrowing of what is claimed, not a bug.
+Because calls are *rebuilt*, ``emit`` produces the **canonical** spelling, which may
+differ from what was recorded (``isel(time=0)`` comes back as ``isel({"time": 0})``).
+They replay the same. The contract is equivalence, not identical calls. The round trip
+is checked by re-parsing an emitted call with ``to_opnode`` (it should reach a fixed
+point), and end to end by the replay-equality tests in ``test_accessor.py`` and
+``test_properties.py``.
 
-``emit`` is a pure function of the plan, so everything here runs without a dataset; the
-end-to-end equality lives in ``test_accessor.py`` and ``test_properties.py``. The weighted
-cases do build a ``DataArray``, but only as a payload whose ``.dims`` fusion reads —
-metadata, materialising nothing.
+Refusing to fuse is always safe, so the refusal tests matter as much as the fusion
+tests: each one pins a deliberate limit on what's fused, not a bug.
 
-``to_lower_ir``'s second argument is the base dataset's dim names, the one thing lowering
-cannot read off the calls. :data:`_DIM_NAMES` stands in for a dataset with those three dims, so a
-grouper naming anything else is a *coordinate* grouper as far as fusion is concerned.
+``emit`` is a pure function of the plan, so nothing here needs a dataset. The weighted
+cases do build a ``DataArray``, but only so fusion can read its ``.dims``, which
+computes nothing.
+
+``to_lower_ir``'s second argument is the base dataset's dim names, the one thing
+lowering can't read off the calls. :data:`_DIM_NAMES` stands in for a dataset with three
+dims, so a grouper naming anything else counts as a *coordinate* grouper.
 """
 
 from dataclasses import replace
@@ -87,8 +89,8 @@ def test_a_plan_with_no_builder_chain_passes_through_unchanged(plan):
 
     Notes
     -----
-    Every multi-call spelling is a ``ContextOpen`` pair, so a plan without one is already
-    what it means and lowering must leave it alone.
+    Every multi-call spelling is a ``ContextOpen`` pair, so a plan without one is
+    already what it means and lowering must leave it alone.
     """
     assert to_lower_ir(plan, _DIM_NAMES) == plan
 
@@ -107,12 +109,12 @@ def test_lowering_does_not_mutate_its_input(plan):
 
 
 def _semantics(node):
-    """The optimiser-facing content of a node — everything but its replay header.
+    """The part of a node the optimiser cares about: everything except its replay call.
 
-    Two nodes with equal semantics mean the same thing however their headers are spelled,
+    Two nodes with equal semantics mean the same thing however their calls are spelled,
     which is the equivalence ``emit`` preserves. :class:`~xrexpr.ir.Elementwise` and
-    :class:`~xrexpr.ir.Opaque` have no semantic field, so their verbatim header *is* their
-    content.
+    :class:`~xrexpr.ir.Opaque` have no semantic fields, so their verbatim call *is*
+    their content.
     """
     match node:
         case Reduce():
@@ -136,12 +138,16 @@ def test_emit_derives_a_reparseable_canonical_header(plan):
 
     Notes
     -----
-    The header ``emit`` writes is *derived* from the node's semantic fields, so it may not be
-    the recorded spelling — but it must (a) preserve the meaning, checked by re-parsing with
-    ``to_opnode`` and comparing semantics, and (b) be a canonical *fixed point*: parsing an
-    emitted call and re-emitting yields the identical call. Together these are the dataset-free
-    proxy for "replays what was written"; the literal replay equality lives in the property
-    suite.
+    ``emit`` rebuilds the call from the node's semantic fields, so it may not be the
+    recorded spelling. But it must:
+
+    - keep the meaning, checked by re-parsing with ``to_opnode`` and comparing
+      semantics;
+    - be a canonical *fixed point*: parsing an emitted call and emitting it again gives
+      the identical call.
+
+    Together these stand in for "replays what was written" without needing a dataset.
+    The actual replay equality is checked in the property suite.
     """
     lowered = to_lower_ir(plan, _DIM_NAMES)
     calls = emit(lowered)
@@ -152,13 +158,13 @@ def test_emit_derives_a_reparseable_canonical_header(plan):
 
 
 def test_emit_canonicalises_a_kwargs_select(plan):
-    """A select recorded as kwargs emits as the canonical positional dict + option kwargs.
+    """A select recorded with kwargs emits as the canonical positional dict plus option kwargs.
 
     Notes
     -----
-    The inverse of ``_select_indexer``: the indexer becomes a single positional ``{dim:
-    index}`` dict and only the *option* kwargs (``drop``) survive as kwargs. ``isel(time=0,
-    drop=True)`` and this form select identically.
+    The reverse of ``_select_indexer``: the indexer becomes one positional ``{dim:
+    index}`` dict, and only the *option* kwargs (``drop``) stay as kwargs.
+    ``isel(time=0, drop=True)`` and this form select the same thing.
     """
     select = emit(to_lower_ir(plan, _DIM_NAMES))[2]
     assert select == Call(
@@ -237,13 +243,14 @@ def test_emit_reduce_keeps_the_function_of_a_reduce_call():
 
 
 def test_emit_follows_the_semantic_field_not_a_stale_header():
-    """A mutated ``indexer`` drives the emitted call even when ``args`` still says otherwise.
+    """A changed ``indexer`` drives the emitted call even when ``args`` still says otherwise.
 
     Notes
     -----
-    An optimiser (a rule, or a Rust backend that never sees ``args``/``kwargs`` at all) rewrites the *semantic field* and leaves the
-    recorded header untouched. ``emit`` must read the field, not the stale header — otherwise
-    a rewritten plan replays its pre-rewrite call.
+    An optimiser (a rule, or a Rust backend that never sees ``args``/``kwargs``) changes
+    the *semantic field* and leaves the recorded call alone. ``emit`` must read the
+    field, not the stale call, or a rewritten plan would replay the call from before the
+    rewrite.
     """
     stale = Select(
         name="isel",
@@ -254,18 +261,21 @@ def test_emit_follows_the_semantic_field_not_a_stale_header():
 
 
 def test_emit_follows_the_reduce_dim_not_a_stale_header():
-    """A reduce whose ``consumes`` an optimiser rewrote emits the *new* dim, not the recorded one.
+    """A reduce whose ``consumes`` was rewritten emits the *new* dim, not the recorded one.
 
     Notes
     -----
-    The ``Select`` case above, for the one *derived* arm that threads the recorded
-    ``args``/``kwargs`` back through :func:`~xrexpr.lower._dim_call`. Start from a reduce as the
-    recorder built it — header and ``consumes`` agreeing — then rewrite *only* the semantic
-    field, the way a rule (or a Rust backend that never sees ``args``/``kwargs``) would, and
-    leave the header stale. ``emit`` must follow ``consumes``: ``_dim_call`` strips the recorded
-    dim out of the header and re-derives it from the field, so the stale spelling never reaches
-    replay. Only the non-dim payload (a function, an option kwarg) rides the header through, and
-    it has no semantic twin to fall out of sync with.
+    The ``Select`` case above, for the reduce arm, which passes the recorded
+    ``args``/``kwargs`` through :func:`~xrexpr.lower._dim_call`. The test:
+
+    1. builds a reduce as the recorder would, with the call and ``consumes`` agreeing;
+    2. rewrites *only* ``consumes``, as a rule or a Rust backend would, leaving the call
+       stale;
+    3. checks ``emit`` follows ``consumes``.
+
+    ``_dim_call`` removes the recorded dim from the call and rebuilds it from the field,
+    so the stale spelling never reaches replay. Only the non-dim parts (a function, an
+    option kwarg) pass through, and they have no semantic field to disagree with.
     """
     recorded = to_opnode("mean", ("time",), {})
     assert emit([recorded]) == [Call("mean", ("time",))]  # header and field agree
@@ -281,7 +291,8 @@ def test_emit_follows_the_reduce_dim_not_a_stale_header():
     )
     assert emit([from_kwarg]) == [Call("mean", ("lat",))]
 
-    # Rewriting to ALL_DIMS drops the stale positional and re-inserts nothing (bare ``mean()``).
+    # Rewriting to ALL_DIMS drops the stale positional and re-inserts nothing (bare
+    # ``mean()``).
     to_all = replace(recorded, consumes=ALL_DIMS)
     assert emit([to_all]) == [Call("mean", ())]
 
@@ -302,12 +313,13 @@ def test_emit_follows_the_reduce_dim_not_a_stale_header():
 
 
 def test_emit_follows_the_scan_dim_not_a_stale_header():
-    """A scan whose ``dims`` an optimiser rewrote emits the *new* dim, not the recorded one.
+    """A scan whose ``dims`` was rewritten emits the *new* dim, not the recorded one.
 
     Notes
     -----
-    The :func:`test_emit_follows_the_reduce_dim_not_a_stale_header` guarantee for a scan, which
-    keeps its dim rather than consuming it but shares the same :func:`_dim_call` strip.
+    The same guarantee as :func:`test_emit_follows_the_reduce_dim_not_a_stale_header`,
+    for a scan. A scan keeps its dim rather than removing it, but goes through the same
+    :func:`_dim_call`.
     """
     recorded = to_opnode("cumsum", ("time",), {})
     assert emit([recorded]) == [Call("cumsum", ("time",))]  # header and field agree
@@ -367,7 +379,8 @@ def test_grouper_dims_are_read_off_the_opener(grouper, group_dim, new_dim):
 
     Notes
     -----
-    Verified against xarray 2026.7.0 — see ``GroupedReduce``'s docstring for the algebra.
+    Verified against xarray 2026.7.0 — see ``GroupedReduce``'s docstring for the
+    algebra.
     """
     (node,) = _lower(grouper, ("mean", (), {}))
     assert isinstance(node, GroupedReduce)
@@ -380,9 +393,9 @@ def test_bare_closer_consumes_nothing_extra():
 
     Notes
     -----
-    The correction that is easy to get backwards: a grouped bare ``mean()`` reduces only
-    along the group dim, so unlike a Dataset-level bare reduce it leaves the other dims
-    alone. ``consumes`` is what it removes *in addition*, which here is nothing.
+    Easy to get backwards: a grouped bare ``mean()`` only reduces along the group dim,
+    so unlike a Dataset-level bare reduce it leaves the other dims alone. ``consumes``
+    is what it removes *in addition*, which here is nothing.
     """
     (node,) = _lower(("groupby", ("time.month",), {}), ("mean", (), {}))
     assert node.consumes == frozenset()
@@ -406,8 +419,8 @@ def test_within_group_map_does_not_fuse():
     Notes
     -----
     ``ds.groupby("time.month").mean("lat")`` is a per-group *map*: it keeps ``time`` and
-    mints no ``month``, so the aggregation node would misdescribe it. Refusing leaves a
-    verbatim pair, which is correct if unoptimised.
+    creates no ``month``, so the aggregation node would describe it wrongly. Refusing
+    leaves a verbatim pair: correct, just not optimised.
     """
     lowered = _lower(("groupby", ("time.month",), {}), ("mean", ("lat",), {}))
     assert [type(n) for n in lowered] == [Opaque, Opaque]
@@ -424,26 +437,26 @@ def test_within_group_map_does_not_fuse():
     ],
 )
 def test_openers_without_a_fusion_rule_demote_the_whole_pair(opener):
-    """``rolling_exp`` and ``cumulative`` pairs demote to two opaque nodes.
+    """``rolling_exp`` and ``cumulative`` pairs become two opaque nodes.
 
     Notes
     -----
-    No fused node describes these, so they behave permanently as the accessor's barrier
-    made them: both halves opaque, and no rule can fire on or across the pair.
+    No fused node describes these, so both halves are opaque and no rule can fire on or
+    across the pair.
     """
     lowered = _lower(opener, ("mean", (), {}))
     assert [type(n) for n in lowered] == [Opaque, Opaque]
 
 
 def test_demoting_the_closer_is_not_optional():
-    """A refused pair leaves no ``Reduce`` behind — the closer is demoted with the opener.
+    """A refused pair leaves no ``Reduce`` behind: the closer is demoted with the opener.
 
     Notes
     -----
-    The failure this guards: leaving the closer as the ``Reduce`` ``to_opnode``
-    provisionally built keeps a *Dataset-level* reading of a call that was never
-    Dataset-level — a bare ``mean()`` after an unfusable opener would carry ``ALL_DIMS``
-    and a following select would be rejected against dims it never removed.
+    If the closer stayed as the ``Reduce`` ``to_opnode`` provisionally built, it would
+    keep a *Dataset-level* reading of a call that was never Dataset-level. A bare
+    ``mean()`` after an unfusable opener would carry ``ALL_DIMS``, and a following
+    select would be rejected against dims it never removed.
     """
     lowered = _lower(("rolling_exp", (), {"time": 3}), ("mean", (), {}))
     assert not any(isinstance(n, Reduce) for n in lowered)
@@ -472,16 +485,17 @@ def test_window_spec_is_read_off_the_opener(opener, window):
 
 
 def test_a_windowed_closer_with_a_parsed_dim_spec_still_fuses():
-    """``rolling(time=3).mean("lat")`` fuses: the parsed dim spec is a provably inert misparse.
+    """``rolling(time=3).mean("lat")`` fuses: the parsed dim is a misparse with no effect.
 
     Notes
     -----
-    ``DatasetRolling.mean`` is ``(keep_attrs=None, **kwargs)`` — it takes no dim argument,
-    so this passes ``"lat"`` as *keep_attrs* and reduces nothing
-    (``rolling(time=3).mean("lat")`` == ``.mean()``). ``to_opnode`` cannot know that and
-    records ``consumes={"lat"}``, but a ``WindowedReduce`` drops that misparse and reads
-    only ``window``, so the pair fuses rather than falling to ``Opaque``. ``reduce_args``
-    rides along verbatim so replay preserves the ``keep_attrs`` truthiness.
+    ``DatasetRolling.mean`` is ``(keep_attrs=None, **kwargs)``. It takes no dim
+    argument, so this passes ``"lat"`` as *keep_attrs* and reduces nothing
+    (``rolling(time=3).mean("lat")`` equals ``.mean()``). ``to_opnode`` can't know that
+    and records ``consumes={"lat"}``, but a ``WindowedReduce`` drops that and only reads
+    ``window``, so the pair fuses rather than falling back to ``Opaque``.
+    ``reduce_args`` is kept verbatim so replay preserves whether ``keep_attrs`` is
+    truthy.
     """
     (node,) = _lower(("rolling", (), {"time": 3}), ("mean", ("lat",), {}))
     assert isinstance(node, WindowedReduce)
@@ -491,12 +505,12 @@ def test_a_windowed_closer_with_a_parsed_dim_spec_still_fuses():
 
 
 def test_windowed_option_kwargs_are_not_windows():
-    """Option kwargs stay out of ``window`` but survive verbatim in ``kwargs``.
+    """Option kwargs stay out of ``window`` but are kept verbatim in ``kwargs``.
 
     Notes
     -----
-    ``center``/``boundary`` are options; only real dim keywords are windows — but they
-    stay in ``kwargs``, because ``boundary`` decides coarsen's output size.
+    ``center``/``boundary`` are options; only real dim keywords are windows. They stay
+    in ``kwargs`` because ``boundary`` decides coarsen's output size.
     """
     (node,) = _lower(
         ("coarsen", (), {"time": 2, "boundary": "pad", "side": "right"}),
@@ -557,15 +571,15 @@ def test_weighted_pair_fuses_with_a_bare_closer():
 
 
 def test_weighted_closer_keeps_the_dims_it_named():
-    """A weighted closer that named dims carries them over, unlike an inert windowed one.
+    """A weighted closer that names dims keeps them, unlike a windowed closer, whose dim has no effect.
 
     Notes
     -----
-    The asymmetry with ``rolling``, and a fact about the two signatures rather than a
-    judgement: ``DatasetWeighted.mean`` is ``(dim=None, *, skipna, keep_attrs)`` — it
-    really does take a dim, so its ``consumes`` is real and is carried into the node — while
-    ``DatasetRolling.mean`` takes none, so ``rolling(time=3).mean("lat")`` fuses too but
-    *drops* the inert dim rather than consuming it.
+    The difference from ``rolling`` comes from the two signatures, not a choice.
+    ``DatasetWeighted.mean`` is ``(dim=None, *, skipna, keep_attrs)``, so it really does
+    take a dim, and its ``consumes`` is carried into the node. ``DatasetRolling.mean``
+    takes none, so ``rolling(time=3).mean("lat")`` fuses too, but *drops* the dim rather
+    than consuming it.
     """
     (node,) = _lower(("weighted", (_weights("lat"),), {}), ("mean", (["lat"],), {}))
     assert node.consumes == frozenset({"lat"})
@@ -585,12 +599,12 @@ def test_weight_dims_are_read_off_the_weights(opener):
 
 
 def test_zero_dimensional_weights_fuse_with_no_weight_dims():
-    """0-d weights fuse and report the empty set, which is the honest answer.
+    """0-d weights fuse and report no weight dims, which is correct.
 
     Notes
     -----
-    Not a special case: a 0-d weights array broadcasts nothing and aligns nothing, so such
-    a node's dim effect really *is* a plain reduce's.
+    Not a special case: 0-d weights broadcast and align nothing, so the node's dim
+    effect really *is* a plain reduce's.
     """
     (node,) = _lower(("weighted", (_weights(),), {}), ("mean", ("lat",), {}))
     assert node.weight_dims == frozenset()
@@ -598,14 +612,14 @@ def test_zero_dimensional_weights_fuse_with_no_weight_dims():
 
 @pytest.mark.parametrize("weights", ["lat", np.ones(3), {"lat": 1}, None])
 def test_weights_with_no_dims_tuple_do_not_fuse(weights):
-    """Weights with no ``.dims`` tuple refuse to fuse, whatever the payload is.
+    """Weights with no ``.dims`` tuple refuse to fuse, whatever they are.
 
     Notes
     -----
-    The weight dims are what make this node more than a relabelled ``Reduce``, so a
-    payload they can't be read from refuses. That costs nothing: xarray itself rejects
-    such weights (``ValueError: `weights` must be a DataArray``), so the pair could not
-    have replayed either way — and refusing lets xarray say so in its own words.
+    The weight dims are what make this node more than a renamed ``Reduce``, so weights
+    they can't be read from refuse. That costs nothing: xarray rejects such weights
+    itself (``ValueError: `weights` must be a DataArray``), so the pair couldn't have
+    replayed anyway, and refusing lets xarray report it in its own words.
     """
     lowered = _lower(("weighted", (weights,), {}), ("mean", (), {}))
     assert [type(n) for n in lowered] == [Opaque, Opaque]
@@ -613,13 +627,13 @@ def test_weights_with_no_dims_tuple_do_not_fuse(weights):
 
 @pytest.mark.parametrize("closer", ["sum_of_weights", "sum_of_squares", "quantile"])
 def test_weighted_only_closers_do_not_fuse(closer):
-    """The weighted-only closers refuse to fuse, because they are not tabulated reduces.
+    """The weighted-only closers refuse to fuse, because they aren't tabulated reductions.
 
     Notes
     -----
-    They aren't in ``OP_TABLE``, so they record ``Opaque`` and refuse for free — which is
-    the right answer for ``quantile`` in particular: it takes ``q`` first positionally,
-    which a reduce's dim-spec parse would read as a dim.
+    They aren't in ``OP_TABLE``, so they record ``Opaque`` and refuse automatically.
+    That's the right answer for ``quantile`` in particular: it takes ``q`` first, which
+    a reduce's dim parsing would read as a dim.
     """
     lowered = _lower(("weighted", (_weights("lat"),), {}), (closer, (), {}))
     assert [type(n) for n in lowered] == [Opaque, Opaque]
@@ -636,13 +650,13 @@ def test_weighted_node_emits_both_calls_verbatim():
 
 
 def test_lowering_stays_idempotent_with_a_weighted_pair():
-    """Idempotence survives an array payload, which also pins that the payload is shared.
+    """Idempotence holds with an array payload, which also checks the payload is shared.
 
     Notes
     -----
-    The weights are the one payload plan equality cannot compare structurally (an
-    elementwise ``==`` has no truth value), so this also pins that the *same* payload
-    object is carried through rather than rebuilt — see ``test_ir.py``.
+    The weights are the one payload plan equality can't compare by value (an elementwise
+    ``==`` has no single truth value). So this also checks that the *same* object is
+    carried through rather than rebuilt; see ``test_ir.py``.
     """
     once = _lower(("weighted", (_weights("lat"),), {}), ("mean", (), {}))
     assert to_lower_ir(once, _DIM_NAMES) == once
@@ -663,13 +677,14 @@ def test_non_string_grouper_does_not_fuse():
     ],
 )
 def test_a_keepdims_closer_refuses_to_fuse(opener):
-    """A ``keepdims=True`` closer never fuses: each builder family demotes to a verbatim opaque pair.
+    """A ``keepdims=True`` closer never fuses: each builder family falls back to a verbatim opaque pair.
 
     Notes
     -----
-    ``keepdims=True`` keeps the reduced dims at size 1, so a fused node (which removes them)
-    would misdescribe it — the same reason a within-group map refuses. The closer is a
-    live ``Reduce``, so it is the ``closer.keepdims`` guard in each ``_fuse_*`` that refuses.
+    ``keepdims=True`` keeps the reduced dims at size 1, so a fused node (which removes
+    them) would describe it wrongly, the same reason a within-group map refuses. The
+    closer is a real ``Reduce``, so it's the ``closer.keepdims`` check in each
+    ``_fuse_*`` that refuses.
     """
     lowered = _lower(opener, ("mean", (), {"keepdims": True}))
     assert [type(n) for n in lowered] == [Opaque, Opaque]
@@ -678,16 +693,16 @@ def test_a_keepdims_closer_refuses_to_fuse(opener):
 @pytest.mark.parametrize(
     "opener",
     [
-        # each of these reads a plausible ``group_dim`` off the call, and each reading is
-        # wrong -- the dim actually consumed is whichever one the *coordinate* is defined
-        # on, which the call does not say. So they refuse.
+        # each of these gives a plausible-looking ``group_dim`` if read off the call,
+        # and each is wrong: the dim actually consumed is the one the *coordinate* is
+        # defined on, which the call doesn't say. So they refuse.
         ("groupby", ("region",), {}),
         ("groupby", ("region.foo",), {}),
         ("groupby_bins", ("region", 2), {}),
         ("resample", (), {"region": "2D"}),
-        # dotted bins: the head is a dim, so a head-only guard would admit it, but the
-        # minted name is ``month_bins`` rather than ``time.month_bins`` (verified against
-        # xarray 2026.7.0). Refused rather than modelled.
+        # dotted bins: the part before the dot is a dim, so checking only that would
+        # accept it, but the new dim is ``month_bins``, not ``time.month_bins`` (checked
+        # against xarray 2026.7.0). Refused rather than modelled.
         ("groupby_bins", ("time.month", 2), {}),
     ],
 )
@@ -696,9 +711,9 @@ def test_a_grouper_whose_head_is_not_a_dim_does_not_fuse(opener):
 
     Notes
     -----
-    Each of these reads a plausible ``group_dim`` off the call, and each reading is
-    wrong — the dim actually consumed is whichever one the *coordinate* is
-    defined on, which the call does not say.
+    Each of these gives a plausible ``group_dim`` if read off the call, and each is
+    wrong: the dim actually consumed is the one the *coordinate* is defined on, which
+    the call doesn't say.
     """
     lowered = _lower(opener, ("mean", (), {}))
     assert [type(n) for n in lowered] == [Opaque, Opaque]
@@ -710,8 +725,8 @@ def test_a_coordinate_grouper_fuses_once_its_name_is_a_dim():
 
     Notes
     -----
-    The guard tests membership, not spelling. Pins that the refusals above are the dim
-    check firing rather than some new syntactic narrowing.
+    The check is on membership, not spelling. This shows the refusals above come from
+    the dim check, not from some other rule about how the grouper is written.
     """
     (node,) = _lower(
         ("groupby", ("region",), {}),
@@ -735,12 +750,12 @@ def test_unclosed_context_demotes_to_a_single_opaque():
 
 
 def test_no_context_open_ever_survives_lowering():
-    """No ``ContextOpen`` survives lowering, across fused, refused and unclosed shapes.
+    """No ``ContextOpen`` survives lowering, whether the pair fused, refused, or was never closed.
 
     Notes
     -----
-    The invariant the ``LoweredOp`` alias enforces at type-check time, asserted at runtime
-    too.
+    The ``LoweredOp`` type already enforces this at type-check time; this checks it at
+    runtime too.
     """
     plans = [
         _lower(("groupby", ("time.month",), {}), ("mean", (), {})),
@@ -753,12 +768,12 @@ def test_no_context_open_ever_survives_lowering():
 
 
 def test_ops_after_a_context_are_modelled_again():
-    """A reduce following a refused pair is modelled normally, not swept into the barrier.
+    """A reduce after a refused pair is modelled normally, not swallowed by the fallback.
 
     Notes
     -----
-    What retires the trailing barrier: only the pair goes opaque, so the ``mean`` that
-    follows an unfusable ``first`` is a real ``Reduce`` again.
+    Only the pair becomes opaque, so the ``mean`` after an unfusable ``first`` is a
+    normal ``Reduce``.
     """
     lowered = _lower(
         ("groupby", ("lat",), {}), ("first", (), {}), ("mean", ("time",), {})
@@ -777,12 +792,12 @@ def test_fused_node_emits_both_calls_verbatim():
 
 
 def test_lowering_stays_idempotent_with_fusion():
-    """Idempotence holds for a plan that actually fused, not only for one that passed through.
+    """Idempotence holds for a plan that actually fused, not only one that passed through.
 
     Notes
     -----
-    Not incidental: the output contains no ``ContextOpen`` at all, so a second pass has
-    nothing left to match.
+    It follows from the output containing no ``ContextOpen``: a second pass has nothing
+    to match.
     """
     once = _lower(
         ("groupby", ("time.month",), {}), ("mean", (), {}), ("cumsum", ("lat",), {})
