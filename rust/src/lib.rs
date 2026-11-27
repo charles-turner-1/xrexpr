@@ -13,6 +13,9 @@ mod _xrexprs {
     #[pymodule_export]
     use crate::ir::ir;
 
+    #[pymodule_export]
+    use crate::interned_ir::{view_fluent_plan, view_lowered_plan};
+
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
         let py = m.py();

@@ -40,7 +40,7 @@ impl AllDims {
     }
 }
 
-static ALL_DIMS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+pub(crate) static ALL_DIMS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 /// A dimension in a dataset, represented as a string. For example, "time", "lat", "lon", etc.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
