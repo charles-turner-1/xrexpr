@@ -8,47 +8,23 @@ trait GenericIndex {
     fn size(&self, current: i64) -> Option<i64>;
 }
 
-/// Stolen from cpython/Objects/sliceobject.c#L256-296
-fn adjust_indices(mut start: i64, mut stop: i64, step: NonZeroI64, length: i64) -> i64 {
-    // step != 0 is guaranteed by NonZeroI64. step >= -i64::MAX is *not* (NonZeroI64 admits
-    // i64::MIN): callers clamp it first, as PySlice_Unpack does, via `unpack_step`.
+/// `len(range(length)[start:stop:step])`, as CPython computes it in `PySlice_Unpack` and
+/// `PySlice_AdjustIndices` (Objects/sliceobject.c). CPython encodes a missing bound as a
+/// sentinel and clamps it back into range; here `None` resolves straight to its end.
+/// Equivalence is checked against CPython itself by the proptests below.
+fn slice_len(start: Option<i64>, stop: Option<i64>, step: Option<NonZeroI64>, length: i64) -> i64 {
+    let step = step.map_or(1, NonZeroI64::get);
+    // The range a resolved index can take: `-1` is "before the first element" going backward.
+    let (first, last) = if step < 0 { (-1, length - 1) } else { (0, length) };
+    // Negative indices count from the end; `b + length` can't overflow as `b < 0 <= length`.
+    let resolve = |b: i64| (if b < 0 { b + length } else { b }).clamp(first, last);
 
-    if start < 0 {
-        start += length;
-        if start < 0 {
-            start = if step.get() < 0 { -1 } else {0};
-        }
-    } else if start >= length {
-        start = if step.get() < 0 {length -1} else {length};
-    }
-
-    if stop < 0 {
-        stop += length;
-        if stop < 0 {
-            stop = if step.get() < 0 { -1} else {0};
-        }
-    } else if stop >= length {
-        stop = if step.get() < 0 {length -1} else {length};
-    }
-
-    if step.get() < 0 {
-        if stop < start {
-            return ((start - stop - 1) / -step.get()) + 1
-        }
-    } else {
-        if start < stop {
-            return ((stop - start - 1) / step.get()) + 1
-        }
-    }
-    return 0
-
-}
-
-/// PySlice_Unpack's step handling: a missing step is 1, and one below -i64::MAX is clamped
-/// to it, so `adjust_indices` can negate it without overflowing.
-fn unpack_step(step: Option<NonZeroI64>) -> NonZeroI64 {
-    let step = step.map_or(1, |s| s.get().max(-i64::MAX));
-    NonZeroI64::new(step).unwrap()
+    let start = start.map_or(if step < 0 { last } else { first }, resolve);
+    let stop = stop.map_or(if step < 0 { first } else { last }, resolve);
+    let span = if step < 0 { start - stop } else { stop - start };
+    // `unsigned_abs` takes i64::MIN to 2^63, where negating the step would overflow; the
+    // quotient is at most `span`, so it fits back in an i64.
+    if span <= 0 { 0 } else { (span as u64).div_ceil(step.unsigned_abs()) as i64 }
 }
 
 #[derive(FromPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
@@ -71,11 +47,8 @@ impl GenericIndex for ForwardSlice {
         // A u64 above i64::MAX saturates, as CPython clamps an oversized slice index to
         // PY_SSIZE_T_MAX; an `as` cast would wrap it negative and count from the end.
         let clamp = |b: u64| i64::try_from(b).unwrap_or(i64::MAX);
-        let step = self.step.map_or(1, |s| clamp(s.get()));
-        let start = self.start.map_or(0, clamp);
-        let stop = self.stop.map_or(i64::MAX, clamp);
-
-        Some(adjust_indices(start, stop, NonZeroI64::new(step).unwrap(), current))
+        let step = self.step.map(|s| NonZeroI64::new(clamp(s.get())).unwrap());
+        Some(slice_len(self.start.map(clamp), self.stop.map(clamp), step, current))
     }
 }
 
@@ -99,14 +72,7 @@ pub struct GeneralSlice{
 
 impl GenericIndex for GeneralSlice {
     fn size(&self, current: i64) -> Option<i64> {
-        // PySlice_Unpack: a missing bound is a *sentinel* that adjust_indices clamps to the
-        // right end, not a real index. `-1` would read as "the last element".
-        let step = unpack_step(self.value.step);
-        let reverse = step.get() < 0;
-        let start = self.value.start.unwrap_or(if reverse { i64::MAX } else { 0 });
-        let stop = self.value.stop.unwrap_or(if reverse { i64::MIN } else { i64::MAX });
-
-        Some(adjust_indices(start, stop, step, current))
+        Some(slice_len(self.value.start, self.value.stop, self.value.step, current))
     }
 }
 
@@ -205,11 +171,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn adjust_indices_matches_forward_and_reverse_slices() {
-        assert_eq!(adjust_indices(0, 10, NonZeroI64::new(1).unwrap(), 10), 10);
-        assert_eq!(adjust_indices(1, 9, NonZeroI64::new(2).unwrap(), 10), 4);
-        assert_eq!(adjust_indices(-8, -1, NonZeroI64::new(2).unwrap(), 10), 4);
-        assert_eq!(adjust_indices(9, 0, NonZeroI64::new(-2).unwrap(), 10), 5);
+    fn slice_len_matches_forward_and_reverse_slices() {
+        let step = |s| NonZeroI64::new(s);
+        assert_eq!(slice_len(Some(0), Some(10), step(1), 10), 10);
+        assert_eq!(slice_len(Some(1), Some(9), step(2), 10), 4);
+        assert_eq!(slice_len(Some(-8), Some(-1), step(2), 10), 4);
+        assert_eq!(slice_len(Some(9), Some(0), step(-2), 10), 5);
     }
 
     #[test]
