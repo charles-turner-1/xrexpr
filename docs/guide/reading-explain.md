@@ -64,11 +64,14 @@ plans = {
     "Select": ds.plan.isel(time=0),
     "Project": ds.plan[["temperature"]],
     "Scan": ds.plan.cumsum("time"),
+    "Elementwise": ds.plan.fillna(0),
+    "Drop": ds.plan.drop_vars("elevation"),
+    "Rename": ds.plan.rename({"lon": "longitude"}),
     "GroupedReduce": ds.plan.groupby("time.month").mean(),
     "WindowedReduce": ds.plan.rolling(time=3).mean(),
     "WeightedReduce": ds.plan.weighted(weights).mean("time"),
     "Rechunk": ds.plan.chunk({"time": 4}),
-    "Opaque": ds.plan.fillna(0),
+    "Opaque": ds.plan.transpose(),
 }
 for kind, plan in plans.items():
     print(plan.explain().splitlines()[1])
@@ -80,6 +83,9 @@ for kind, plan in plans.items():
 | `Select` | `isel`/`sel` | moves left; merges with an adjacent `Select` |
 | `Project` | picking variables (`ds[["tas"]]`, `ds["tas"]`) | moves left; merges with an adjacent `Project` |
 | `Scan` | order-sensitive (`cumsum`, `cumprod`, `diff`) | nothing crosses it on the scanned dim |
+| `Elementwise` | per-element, with plain arguments (`fillna(0)`, `astype`, `round`, ...) | selections and projections hop in front of it |
+| `Drop` | `drop_vars(...)` | selections hop in front; a projection may absorb it |
+| `Rename` | `rename(...)` | selections on dims it leaves alone hop in front |
 | `GroupedReduce` | a fused `groupby(...).<reduction>()` | selections and projections hop in front, dims permitting |
 | `WindowedReduce` | a fused `rolling(...).<reduction>()` | same |
 | `WeightedReduce` | a fused `weighted(...).<reduction>()` | projections only, see below |
@@ -136,10 +142,10 @@ metadata. It's deliberately left for later.
 ### `[not modelled -- nothing crosses it]`: an `Opaque` barrier
 
 ```{code-cell} python
-ds.plan.fillna(0).isel(time=0).explain()
+ds.plan.transpose().isel(time=0).explain()
 ```
 
-**This is the line to look for when a rewrite you expected didn't happen.** `fillna` is
+**This is the line to look for when a rewrite you expected didn't happen.** `transpose` is
 not in the table of modelled operations, so `xrexpr` will not reason about what it does
 to dims or variables, and therefore refuses to move anything across it. The `isel` stays
 put. Without the `Opaque` line in the output you would be left guessing why.

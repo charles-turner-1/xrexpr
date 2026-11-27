@@ -1,53 +1,61 @@
 # The operation table
 
-`OP_TABLE` is the single source of truth for what the recorder can classify. Every method
-it can see is one row, and every row is an `OpSpec`.
+`OP_TABLE` is the single list of methods the recorder can classify. Each method is one
+row, and each row is an `OpSpec`.
 
-## A sum type, not a record with a `kind` string
+## Each kind is a type, not a `kind` string
 
-`OpSpec` is a **sum over dispatch kinds**, one variant per `Op` variant `to_opnode` can
-build:
+`OpSpec` is a union with **one variant per kind of node** `to_opnode` can build:
 
 ```python
-OpSpec = ReduceSpec | ScanSpec | SelectSpec | RechunkSpec | ProjectSpec | ContextSpec
+OpSpec = (
+    ReduceSpec | ScanSpec | ElementwiseSpec | SelectSpec | RechunkSpec
+    | ProjectSpec | RenameSpec | DropSpec | ContextSpec
+)
 ```
 
-The spec *is* the kind, rather than carrying a `kind: str` field. That is what makes
-`to_opnode`'s dispatch a single `match` closed by `assert_never`: a variant added here
-without a corresponding arm there is a type error, not a call silently recorded as
-`Opaque`. It is the same move `ir.Op` and `indexers.Indexer` make, and the reasoning is
-written up at length in the design memos: a `kind` string is a sum type whose variants
-live only in the designer's head.
+The spec's type *is* its kind; there's no `kind: str` field. That's what lets
+`to_opnode` dispatch with one `match` closed by `assert_never`. A variant added here
+without an arm there is a type error, rather than a call quietly recorded as `Opaque`.
+`ir.Op` and `indexers.Indexer` work the same way. A `kind` string is really a union whose
+variants only exist in someone's head.
 
-Being a real variant also gives kind-specific metadata somewhere to live.
-`ReduceSpec.dim_arg` is a field on the spec, rather than a second table keyed by method
-name all over again.
+Being a real type also gives kind-specific data somewhere to live. `ReduceSpec.dim_arg`
+(where the dim sits among the positional arguments) is a field on the spec, not a second
+table keyed by method name.
 
-## The distinctions the table exists to make
+## What the table distinguishes
 
-**`ReduceSpec` destroys its dim; `ScanSpec` keeps it.** `mean`/`sum`/`std` collapse the
-dimension they name; `cumsum`/`cumprod`/`diff` return a result with the same dimensions
-they started with, and the value at each position depends on what came before it along
-that axis. Lumping the two together is precisely the `cumsum` reordering bug: a selection
-that may safely hop a reduction may not hop a scan on the scanned dimension.
+**`ReduceSpec` removes its dim; `ScanSpec` keeps it.** `mean`/`sum`/`std` collapse the
+dimension they name. `cumsum`/`cumprod`/`diff` keep the same dimensions, and each value
+depends on what came before it along that axis. Treating them the same would let a select
+on the scanned dimension hop a scan, which changes the answer. A select can safely hop a
+reduction over a *different* dim, but not a scan over the *same* one.
 
-**`RechunkSpec` touches no dim at all**, only chunk topology, which is what lets a
-selection cross it. Which selections may cross which chunk specs is a separate question,
-and a subtler one: see [rechunking](../guide/rechunking.md).
+**`ElementwiseSpec` keeps everything.** `fillna`/`astype`/`round`/`clip`/... work element
+by element, so any select or projection commutes with them. But only when every argument
+is a plain value: `fillna(other_da)` or `fillna({"tas": 0})` becomes `Opaque`.
 
-**`SelectSpec` resolves its dim effect per call**, from the indexer. `isel(time=0)` drops
-`time`; `isel(time=slice(0, 10))` keeps it. The spec cannot say which, because the answer
-is in the argument rather than in the method.
+**`RechunkSpec` changes no dim at all**, only how the data is split into blocks, which is
+why a select can cross it. Which selects may cross which chunk specs is a separate and
+trickier question: see [rechunking](../guide/rechunking.md).
 
-**`ContextSpec` is half an operation**, a builder-returning call whose meaning
-[lowering](lowering.md) settles once it can see the closer.
+**`SelectSpec` works out its dim effect per call**, from the indexer. `isel(time=0)`
+drops `time`; `isel(time=slice(0, 10))` keeps it. The spec can't say which, because the
+answer is in the argument, not the method.
 
-**`ProjectSpec` is the one row the table can only nominate.** Next section.
+**`RenameSpec` and `DropSpec` are modelled** so the schema stays exact past them. A
+rename relabels dims or variables; a `drop_vars` removes variables or coordinates.
+
+**`ContextSpec` is half an operation**: a call that returns a builder, whose meaning
+[lowering](lowering.md) decides once it can see the closer.
+
+**`ProjectSpec` can only nominate.** See the next section.
 
 ## Nominate, then confirm
 
-Every other spec names the `Op` variant its call *is*. `ProjectSpec` names the variant
-its call *may be*:
+Every other spec names the node kind its call *is*. `ProjectSpec` names the kind its call
+*may be*:
 
 ```python
 ds[["temperature"]]   # Project: the key names variables
@@ -55,36 +63,35 @@ ds[mask]              # Opaque:  the key is a boolean array
 ds[{"time": 0}]       # Opaque:  the key is an indexer mapping
 ```
 
-Same method, same row, different kinds. The shape of the *key* decides, at record time,
-in `to_opnode`'s guarded match arm.
+Same method, same row, different kinds. The key's shape decides, at recording time, in a
+guarded arm of `to_opnode`'s `match`. (`ElementwiseSpec` nominates in the same way, based
+on its arguments.)
 
-It is tabulated anyway, rather than special-cased after the dispatch, so that every
-method the recorder can classify is classified in one place. The nomination is then
-visible in the type, and the guard that confirms it sits in the `match` beside the arms
-it is an exception to, where a reader looking at the dispatch will actually find it.
+It's still in the table, rather than special-cased after dispatch, so every method the
+recorder can classify is classified in one place. The guard that confirms it sits in the
+same `match` as the other arms, where someone reading the dispatch will find it.
 
-## Derived, so it cannot drift
+## Built from the specs, so it can't drift
 
-Two things in this module are computed rather than written:
+Two things in this module are computed rather than written out:
 
 ```python
 OP_TABLE = {op.name: op for op in _SPECS}
 CONTEXT_METHODS = frozenset(op.name for op in _SPECS if isinstance(op, ContextSpec))
 ```
 
-`OP_TABLE` is derived from the specs rather than written as a mapping literal, so a row
-cannot be filed under a key that disagrees with the name it carries. Each variant's
-`name` is typed as the `Literal` its `Op` counterpart demands, so a lookup's name arrives
-at the `Op` constructor already correctly typed, with no `cast` in between.
+`OP_TABLE` is built from the specs rather than written as a dict literal, so a row can't
+be filed under a key that disagrees with its own name. Each variant's `name` is typed as
+the `Literal` its node expects, so a looked-up name reaches the node constructor already
+correctly typed, with no `cast`.
 
-The builder-opener names go one step further: they are derived by `get_args` from the
-`ContextOpenName` `Literal` that types them, so the runtime rows and the type cannot
-disagree either. What no derivation can supply is agreement with xarray itself (that
-those method names exist and still return builders), so a test pins them against
-`xr.Dataset`.
+The builder method names go one step further. They're built with `get_args` from the
+`ContextOpenName` `Literal` that types them, so the runtime rows and the type can't
+disagree either. What no derivation can guarantee is that xarray agrees (that the methods
+exist and still return builders), so a test checks them against `xr.Dataset`.
 
 ## What isn't in the table
 
-A method name absent from `OP_TABLE` becomes an `Opaque` node: it replays verbatim, and
-no rewrite crosses it. That is the conservative default the whole design leans on, and
-the reason an unrecognised call costs you the rewrite rather than the correctness.
+A method missing from `OP_TABLE` becomes an `Opaque` node. It replays verbatim, and no
+rewrite crosses it. That's the safe default the whole design relies on: an unrecognised
+call costs you the rewrite, not correctness.
