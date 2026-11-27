@@ -14,11 +14,16 @@ semantic field and the call follows, while a payload just has to be carried thro
 Marking a field ``Payload[T]`` states that contract. It lives in its own module, rather than
 beside the interned records, because the value types in :mod:`xrexpr.indexers` and
 :mod:`xrexpr.chunks` carry payloads too and :mod:`xrexpr.intern.ir` already imports them.
+
+When a plan crosses to Rust, each payload is swapped for a :class:`PayloadRef`, a handle
+into that crossing's table (see :mod:`xrexpr.intern.crossing`). Rust only ever holds the
+handle, so it can carry a payload without being able to look inside it.
 """
 
-from typing import Annotated, TypeVar
+from dataclasses import dataclass
+from typing import Annotated, TypeVar, final
 
-__all__ = ["Payload"]
+__all__ = ["Payload", "PayloadRef"]
 
 T = TypeVar("T")
 
@@ -29,3 +34,30 @@ class _Payload:
 
 #: A field the Rust reasoner carries but never reads or changes. See the module docstring.
 Payload = Annotated[T, _Payload]
+
+
+@final
+@dataclass(frozen=True)
+class PayloadRef:
+    """A handle to a payload in a crossing's :class:`~xrexpr.intern.crossing.PayloadTable`.
+
+    Its own type, like :class:`~xrexpr.intern.interner.InternedVal`, so it can't be confused
+    with a plain ``int`` (a position or a size) on the way back from Rust.
+
+    Attributes
+    ----------
+    index : int
+        The payload's position in the table it came from. Only meaningful with that table.
+    """
+
+    index: int
+
+    def __repr__(self) -> str:
+        """Return ``PayloadRef(3)`` rather than ``PayloadRef(index=3)``.
+
+        Returns
+        -------
+        str
+            The short representation.
+        """
+        return f"PayloadRef({self.index})"

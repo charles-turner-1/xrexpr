@@ -1,6 +1,7 @@
 use crate::interned_ir::InternedVal;
 use std::num::{NonZeroU64, NonZeroI64};
 use pyo3::prelude::*;
+use pyo3::types::PyTuple;
 
 /// A trait for generic indexing operations.
 /// `current` is the current size of the dimension being indexed. 
@@ -27,7 +28,7 @@ fn slice_len(start: Option<i64>, stop: Option<i64>, step: Option<NonZeroI64>, le
     if span <= 0 { 0 } else { (span as u64).div_ceil(step.unsigned_abs()) as i64 }
 }
 
-#[derive(FromPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(FromPyObject, IntoPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 struct Slice {
     start: Option<i64>,
     stop: Option<i64>,
@@ -35,7 +36,7 @@ struct Slice {
 }
 
 
-#[derive(FromPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(FromPyObject, IntoPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct ForwardSlice{
     start: Option<u64>,
     stop: Option<u64>,
@@ -52,10 +53,11 @@ impl GenericIndex for ForwardSlice {
     }
 }
 
-#[derive(FromPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(FromPyObject, IntoPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Scalar{
-    value: i64,
-    drops_dim: bool,
+    /// Read from Python's `Scalar.position` property: the integer position, or `None` for a
+    /// coordinate label (`sel(time="2020")`). The value itself may be any label, so it is
+    /// not extracted -- an `i64` field would reject every label scalar.
     position: Option<i64>
 }
 
@@ -65,7 +67,7 @@ impl GenericIndex for Scalar {
     }
 }
 
-#[derive(FromPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(FromPyObject, IntoPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct GeneralSlice{
     value: Slice
 }
@@ -77,7 +79,7 @@ impl GenericIndex for GeneralSlice {
 }
 
 
-#[derive(FromPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(FromPyObject, IntoPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Positions{
     values: Vec<i64>
 }
@@ -88,7 +90,7 @@ impl GenericIndex for Positions {
     }
 }
 
-#[derive(FromPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(FromPyObject, IntoPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Mask{
     values: Vec<bool>
 }
@@ -99,7 +101,7 @@ impl GenericIndex for Mask {
     }
 }
 
-#[derive(FromPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(FromPyObject, IntoPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Label{
     #[pyo3(attribute("known_size"))]
     size: Option<i64>,
@@ -111,7 +113,7 @@ impl GenericIndex for Label {
     }
 }
 
-#[derive(FromPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(FromPyObject, IntoPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Advanced{
     dims: Vec<InternedVal>
 }
@@ -162,6 +164,28 @@ impl FromPyObject<'_, '_> for Indexer {
             _ => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
                 "Cannot convert object of type {} to Indexer", ty
             ))),
+        }
+    }
+}
+
+/// Rust's *view* of an indexer, as a `(variant, fields)` tuple: `("Positions", {"values":
+/// [1, 3]})`. Not the Python indexer rebuilt -- a `Label` keeps only its `known_size` here,
+/// not the labels. Used by the boundary test (`interned_ir::view_*`).
+impl<'py> IntoPyObject<'py> for Indexer {
+    type Target = PyTuple;
+    type Output = Bound<'py, PyTuple>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Self::Output> {
+        // Each inner struct derives `IntoPyObject`, which turns it into a dict of its fields.
+        match self {
+            Indexer::Scalar(s) => ("Scalar", s).into_pyobject(py),
+            Indexer::ForwardSlice(s) => ("ForwardSlice", s).into_pyobject(py),
+            Indexer::GeneralSlice(s) => ("GeneralSlice", s).into_pyobject(py),
+            Indexer::Positions(s) => ("Positions", s).into_pyobject(py),
+            Indexer::Mask(s) => ("Mask", s).into_pyobject(py),
+            Indexer::Label(s) => ("Label", s).into_pyobject(py),
+            Indexer::Advanced(s) => ("Advanced", s).into_pyobject(py),
         }
     }
 }

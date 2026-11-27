@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+use pyo3::types::PyTuple;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChunkSpec {
@@ -30,3 +31,26 @@ impl FromPyObject<'_, '_> for ChunkSpec {
     }
 }
 
+/// Rust's *view* of a chunk spec, as a `(variant, payload)` tuple: `("SingleSize", 10)`,
+/// `("Auto", None)`. Not a `ChunkSpec` rebuilt -- `OpaqueChunk` keeps no payload here, so
+/// there is nothing to rebuild it from. Used by the boundary test (`interned_ir::view_*`).
+impl<'py> IntoPyObject<'py> for ChunkSpec {
+    type Target = PyTuple;
+    type Output = Bound<'py, PyTuple>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Self::Output> {
+        // Each arm's payload is a different Rust type, so each is converted to a Python
+        // object (`Bound<PyAny>`) first, giving every arm the same tuple type.
+        let (variant, payload) = match self {
+            ChunkSpec::SingleSize(size) => ("SingleSize", size.into_pyobject(py)?.into_any()),
+            ChunkSpec::Auto => ("Auto", py.None().into_bound(py)),
+            ChunkSpec::ByteSize(value) => ("ByteSize", value.into_pyobject(py)?.into_any()),
+            ChunkSpec::FullDim => ("FullDim", py.None().into_bound(py)),
+            ChunkSpec::NoChange => ("NoChange", py.None().into_bound(py)),
+            ChunkSpec::BlockSeq(sizes) => ("BlockSeq", sizes.into_pyobject(py)?.into_any()),
+            ChunkSpec::OpaqueChunk => ("OpaqueChunk", py.None().into_bound(py)),
+        };
+        (variant, payload).into_pyobject(py)
+    }
+}
