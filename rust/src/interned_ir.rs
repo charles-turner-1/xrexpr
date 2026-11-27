@@ -1,6 +1,6 @@
 //! The interned IR as Rust sees it: one struct per `xrexpr.intern.ir.Interned*` record,
-//! holding the record's *reasoning* fields -- every field not marked `PyOnly` on the Python
-//! side. The `PyOnly` replay header (`args`/`kwargs`) is not extracted.
+//! holding the record's *reasoning* fields -- every field not marked `Payload` on the Python
+//! side. The `Payload` replay header (`args`/`kwargs`) is not extracted.
 //!
 //! Each struct derives `FromPyObject` (Python record -> Rust, reading each field by
 //! attribute name) and `IntoPyObject` (Rust -> a Python dict of the same fields). The dict
