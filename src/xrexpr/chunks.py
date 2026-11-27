@@ -107,7 +107,8 @@ class Auto:
 
     Whether it raises therefore depends on the configured ``array.chunk-size`` and on the
     rank — nothing a plan can read — which is why no narrower discriminant exists and the
-    whole variant is a barrier. Issue #121.
+    whole variant is a barrier. The one exception is a select that provably empties the
+    dim, on xarray 2026.09.0 and later (``optimize._empty_autochunk_is_pushable``).
     """
 
     def to_raw(self) -> str:

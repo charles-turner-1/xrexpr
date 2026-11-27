@@ -431,7 +431,7 @@ class Drop:
     named variables and coordinates leave the schema, and any dimension left spanned by
     nothing is pruned by :class:`~xrexpr.schema.SchemaState`. Replay is a verbatim
     ``drop_vars`` — the only thing the modelling buys is that the optimiser can see past
-    it, which is what ``planning/roadmap/11-relabel-rename-drop.md`` (W11) exists for.
+    it (``planning/roadmap/11-relabel-rename-drop.md``).
 
     Dim-transparent: unlike :class:`Rename` it remaps no dim name, so a select commutes
     with it freely. A *projection* may not cross it, though — moving one earlier could
@@ -471,7 +471,7 @@ class Rename:
     relabels a **dim**, a **variable/coordinate**, or -- for a dimension coordinate -- both
     at once, which :func:`~xrexpr.schema._relabelled` applies as a single shape-preserving
     relabel. Replay is a verbatim ``rename``; the modelling is what lets the optimiser see
-    past it (``planning/roadmap/11-relabel-rename-drop.md``, W11).
+    past it (``planning/roadmap/11-relabel-rename-drop.md``).
 
     Unlike :class:`Drop` a rename that touches a dim changes dim *names* mid-plan, and the
     name-keyed pushdowns do not translate keys across it, so it is **not** dim-transparent.
@@ -645,8 +645,8 @@ class WindowedReduce:
       position, ``center``/``min_periods`` affects values but not shape.
     - **coarsen** divides each windowed dim by its window, rounded according to
       ``boundary`` (``"trim"`` down, ``"pad"`` up, ``"exact"`` requiring
-      divisibility). As the size effect depends on an kwarg option, the option's
-      meaning gets stored in :attr:`rounds_up` (derived from :attr:``kwargs``)— like how :class:`Reduce` stores
+      divisibility). As the size effect depends on a kwarg option, the option's
+      meaning gets stored in :attr:`rounds_up` (derived from :attr:`kwargs`) — like how :class:`Reduce` stores
       ``keepdims`` and :class:`Rechunk` stores ``uniform``. Derived in ``__post_init__``,
       so it can't disagree with replay, and keeps ``schema._windowed_size`` reasoning
       over the node rather than digging ``boundary`` back out of the kwargs. ``kwargs``

@@ -105,8 +105,7 @@ class SchemaState(Generic[T]):
     sizes : frozendict
         Extents only, ``{dim: size}``, for the dims :attr:`dim_names` derives. Named for
         what it holds: it answers *how big*, never *which*. There is deliberately no
-        ``dims`` attribute, because that name meant both before the variables store
-        existed and is the ambiguity this class is now free of. A size of ``None`` means
+        ``dims`` attribute, because that name could mean either. A size of ``None`` means
         **don't know** — see the notes.
 
     Notes
@@ -219,10 +218,10 @@ class SchemaState(Generic[T]):
         variable (a coordinate, or something an unmodelled op introduced) — and
         callers must treat it as "no rewrite", never as "no dims".
 
-        Restricted to :attr:`data_vars` deliberately, unchanged by the variables store:
-        the callers are the projection rules, and a projection names data variables. A
-        coordinate answers ``None`` here even though its dims are now known, because
-        naming one in a projection is not something those rules model.
+        Restricted to :attr:`data_vars` deliberately: the callers are the projection
+        rules, and a projection names data variables. A coordinate answers ``None`` here
+        even though its dims are known, because naming one in a projection is not
+        something those rules model.
         """
         dims: set[T] = set()
         data_vars = self.data_vars
@@ -429,8 +428,7 @@ def apply_schema(
     Every arm says what happened to the **variables**; the dims follow, because
     :attr:`SchemaState.dim_names` is derived. That direction is the whole point — nothing
     here removes a dim as a primary action, so no arm can leave the dims and the variables
-    disagreeing, and the reconciliation tails an independently-stored ``dims`` needed are
-    gone with it.
+    disagreeing.
 
     Two variable rules do the work, and which one an op takes is *the* distinction between
     the op families (both verified against xarray 2026.7.0 — see each helper's docstring):
@@ -511,8 +509,8 @@ def apply_schema(
             # *demotes* the coords over its dim to 0-d and keeps them
             # (``isel(lat=0)`` -> ``lat``, ``region`` both present, scalar); with it they go
             # (verified against xarray 2026.7.0). Modelled rather than approximated because
-            # the conservative reading is now the *unsafe* one -- coords are asserted to be
-            # a subset of the result's, so keeping one xarray dropped is an over-report.
+            # keeping a coord xarray dropped is an over-report, and the coords are asserted
+            # to match the evaluated result's.
             if select.kwargs.get("drop", False):
                 variables, coord_names = _aggregated(
                     variables, coord_names, select.consumes
@@ -528,13 +526,8 @@ def apply_schema(
             # Guarded on every projected name being a *tracked* data variable: a name this
             # layer doesn't know (a coord, or something an unmodelled op introduced) would
             # make the surviving dims an under-report, and under-reporting dims is the
-            # unsafe direction. Unknown name -> leave the store alone entirely.
-            #
-            # That "entirely" is the one behavioural difference from the pre-derivation
-            # shape, which restricted ``data_vars`` while leaving ``dims`` untouched -- i.e.
-            # it produced exactly the phantom-dim state deriving exists to forbid. Declining
-            # the whole projection over-reports in the same direction it used to, and stays
-            # constructible.
+            # unsafe direction. Unknown name -> leave the store alone entirely, which
+            # over-reports rather than producing a phantom dim.
             #
             # A projection naming a *coordinate* falls into that "decline" leg even though
             # the coord is known, so the tracked schema over-reports it (claims a data var
@@ -599,12 +592,11 @@ def apply_schema(
                     # for.
                     #
                     # Minted per variable, not per dataset: the broadcast is ``dot``'s, so
-                    # it reaches each variable on its own terms. Skipping the mint when some
-                    # *other* variable already carried the dim under-reported ``elevation``
-                    # after ``weighted(w(time)).mean("lat")`` on a dataset that also held
-                    # ``temperature(time, lat)`` -- issue #125. ``_minted`` is per-variable
-                    # and idempotent, so handing it the whole set is both correct and the
-                    # simpler statement.
+                    # it reaches each variable on its own terms. Skipping the mint because
+                    # some *other* variable already carries the dim would under-report
+                    # ``elevation`` after ``weighted(w(time)).mean("lat")`` on a dataset
+                    # that also holds ``temperature(time, lat)``. ``_minted`` is
+                    # per-variable and idempotent, so it gets the whole set.
                     from_weights = frozenset(weighted.weight_dims) - named
                     variables = _minted(variables, coord_names, from_weights)
                     for dim in from_weights:
@@ -620,9 +612,8 @@ def apply_schema(
             # not the size. ``diff``'s dim is a required positional, so ``dims`` is always
             # this concrete frozenset, never ``ALL_DIMS`` -- an ``ALL_DIMS`` scan (a bare
             # ``cumsum()``) falls through to the size-preserving ``pass`` arm below.
-            # ``cumsum``/``cumprod`` keep every size and go there too. Latent today
-            # (nothing downstream of a scan reads sizes), but the schema should not carry a
-            # known lie once the dims exist to fix it.
+            # ``cumsum``/``cumprod`` keep every size and go there too. No rule reads sizes,
+            # but the schema should not carry a known lie.
             n = scan.kwargs.get("n", scan.args[1] if len(scan.args) > 1 else 1)
             for dim in dims:
                 size = sizes.get(dim)
@@ -848,10 +839,10 @@ def _minted(
 
     Sorted because ``new_dims`` is a set and :class:`SchemaState` is a *value*: an
     iteration-order-dependent dim tuple would make two snapshots folded from identical
-    inputs unequal between processes. ``str`` is the key for the same reason
-    ``pushdown_selects`` uses it — a dim name is only ``Hashable``, so it is the one total
-    order available. Dim order is not otherwise meaningful here (``var_dims`` unions into a
-    set, and ``Dataset.sizes`` promises no order either).
+    inputs unequal between processes. ``str`` is the key because a dim name is only
+    ``Hashable``, so it is the one total order available. Dim order is not otherwise
+    meaningful here (``var_dims`` unions into a set, and ``Dataset.sizes`` promises no
+    order either).
     """
     if not new_dims:
         return variables
@@ -1016,10 +1007,8 @@ def _selected_size(
       slice and mints a ``ForwardSlice``, whose size then reads the bounds as positions —
       with labels ``[10, 20, 30, 40]`` that reports **0** where the answer is 2. Sizing a
       dim *smaller* than it is is the unsafe direction: it is the error a size-driven rule
-      would act on. "Don't know" is the honest answer and is now available, so this stops
-      being an under-report. (Non-integer label slices took ``Label.size``'s
-      keep-the-current-size fallback, an over-report; they answer ``None`` here too, since
-      a guess in the safe direction is still a guess.)
+      would act on, so this answers "don't know". Non-integer label slices answer ``None``
+      too, rather than ``Label.size``'s keep-the-current-size guess.
     """
     if current is None:
         return None
@@ -1050,7 +1039,8 @@ def to_opnode(
         The variant this call is: a :class:`~xrexpr.ir.Reduce`,
         :class:`~xrexpr.ir.Select`, :class:`~xrexpr.ir.Project`,
         :class:`~xrexpr.ir.Rechunk`, :class:`~xrexpr.ir.Scan`,
-        :class:`~xrexpr.ir.Elementwise`, :class:`~xrexpr.ir.ContextOpen`, or
+        :class:`~xrexpr.ir.Elementwise`, :class:`~xrexpr.ir.Rename`,
+        :class:`~xrexpr.ir.Drop`, :class:`~xrexpr.ir.ContextOpen`, or
         :class:`~xrexpr.ir.Opaque` for anything untabulated.
 
     Notes
@@ -1071,12 +1061,11 @@ def to_opnode(
     - **reduce** (``mean``/``sum``/...): the dim spec — positional (``mean("lat")``),
       keyword (``mean(dim="lat")``) or tuple (``mean(("lat", "lon"))``) — collapses to
       one ``consumes`` frozenset; a **no-dim ``mean()`` consumes** :data:`~xrexpr.ir.ALL_DIMS`,
-      which is what fixes the empty-dim reorder bug (``ds.mean().isel(...)``). *Which*
-      positional argument holds the spec is the spec's own
+      so ``ds.mean().isel(...)`` is rejected rather than reordered. *Which* positional
+      argument holds the spec is the spec's own
       :attr:`~xrexpr.operations.ReduceSpec.dim_arg`, because ``.reduce(func, dim)`` puts
-      a **function** first; and ``keepdims=True`` records :class:`~xrexpr.ir.Opaque`,
-      since the "reduced" dims survive at size 1 and no ``consumes`` would be true (see
-      the guard in the code).
+      a **function** first. ``keepdims=True`` is still a ``Reduce``; the derived
+      :attr:`~xrexpr.ir.Reduce.keepdims` says the dims are kept at size 1.
     - **select** (``isel``/``sel``): the indexer (a positional dict and/or kwargs,
       minus option kwargs like ``drop``) becomes ``indexer``; a dim given a *scalar*
       index is dropped and so also lands in ``consumes`` (a slice/list/array keeps it).
@@ -1099,7 +1088,10 @@ def to_opnode(
       data- or per-variable-shaped argument that does not commute with a projection, so
       they fall past the guard to ``Opaque`` — the same shape-of-the-argument nomination
       the ``project`` arm makes.
-    - **scan** / untabulated ops: no dims resolved (name/args/kwargs only).
+    - **scan** (``cumsum``/``cumprod``/``diff``): the dim spec, parsed as a reduce's, becomes
+      ``dims``.
+    - **rename** / **drop_vars**: the ``{old: new}`` mapping / the dropped names.
+    - untabulated ops: :class:`~xrexpr.ir.Opaque`, name/args/kwargs only.
 
     ``args``/``kwargs`` are kept verbatim for faithful replay; ``consumes``/``indexer``
     are the derived metadata the optimiser reasons about.
@@ -1542,7 +1534,7 @@ def _chunk_spec(
     The values stay **raw** here. Sorting them into
     :data:`~xrexpr.chunks.ChunkSpec` variants is ``Rechunk.__post_init__``'s job, so a
     hand-built node is normalised too and not only a recorded one — the same division
-    ``_indexer_spec`` and ``Select.__post_init__`` keep.
+    :func:`_select_indexer` and ``Select.__post_init__`` keep.
     """
     if args and not isinstance(args[0], Mapping):
         return frozendict()

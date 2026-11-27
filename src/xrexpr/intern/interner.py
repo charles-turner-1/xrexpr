@@ -1,7 +1,7 @@
 """The interner module provides a simple interning mechanism for hashable objects.
 
-We use this to intern names, arguments, and keyword arguments in the expression tree
-into ints.
+We use this to intern the dim and variable names in the expression tree into ints;
+values and the verbatim call headers are left alone (see ``xrexpr.intern.converters``).
 
 Doing so means we are passing around ints instead of arbitrary hashable objects,
 which is 1. more efficient and 2. allows us to pass the IR into a Rust backend

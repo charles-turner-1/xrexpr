@@ -250,7 +250,7 @@ def test_advanced_indexer_is_hashable():
     Notes
     -----
     The array itself is not stored — only its dims — which is what a ``Scalar`` wrapping the
-    raw ``DataArray`` (the pre-fix misclassification) could not offer.
+    raw ``DataArray`` could not offer.
     """
     idx = classify(xr.DataArray([0, 1], dims="time"))
     assert hash(idx) == hash(Advanced(dims=("time",)))
@@ -548,10 +548,10 @@ def test_composition_does_not_depend_on_integer_spelling(case):
 
     The replay property below can only see compositions that *happen*: it ``assume``s away a
     ``None``, so an indexer that should have composed but silently didn't is filtered out
-    rather than failed. That blind spot is real — it hid a live bug, where a ``np.int64``
-    scalar refused to compose because the composer tested ``isinstance(i, int)`` directly
-    instead of asking the value. Comparing the two spellings needs no oracle for *when*
-    composition ought to succeed, and still catches exactly that class of regression.
+    rather than failed. A ``np.int64`` scalar that refused to compose (say, because the
+    composer tested ``isinstance(i, int)`` directly instead of asking the value) would hide
+    there. Comparing the two spellings needs no oracle for *when* composition ought to
+    succeed, and still catches that class of bug.
     """
     _, outer, inner = case
     as_int = _compose_indexer(

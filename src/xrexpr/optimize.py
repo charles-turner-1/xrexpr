@@ -9,8 +9,8 @@ Two things to keep when adding a rule. Termination rests on a lexicographic meas
 ``(len(plan), sum of the indices of the Select and Project nodes)``, so **no rule may push
 a node right, and none may lengthen a plan**; one that wants to needs a new measure, not
 an exception. And the dim algebra has a single dispatch site, :func:`dim_effect`, a
-``match`` closed with ``assert_never`` — a new node kind may still take the conservative
-answer, but no longer *by accident*.
+``match`` closed with ``assert_never``, so a new node kind has to choose its answer
+there, even if the answer is the conservative one.
 
 The schema fold lives here, not in recording, because only the optimiser knows how far it
 can be trusted. :func:`~xrexpr.schema.apply_schema` models :class:`~xrexpr.ir.Opaque` as
@@ -118,12 +118,10 @@ def optimize(nodes: Plan, schema: SchemaState[Hashable]) -> Plan:
     detects the fixpoint from that signal rather than by comparing whole plans each pass.
 
     **Termination.** Every rule strictly decreases the lexicographic measure
-    ``(len(plan), sum of the indices of the Select and Project nodes)``. Merging and
-    dropping a spent rechunk shrink the plan; the three pushdown rules leave the length
-    alone but move a select or projection strictly left. Neither component can grow, so
-    no rule may ever push a node *right* or lengthen a plan — the invariant a new rule
-    has to preserve. (The pushdown rules fire on disjoint adjacencies — ``(*, select)``,
-    ``(*, project)`` and ``(rechunk, select)`` — so they can't undo one another.)
+    ``(len(plan), sum of the indices of the Select and Project nodes)``. The merges and
+    eliminations shrink the plan; the pushdowns leave the length alone but move a select
+    or projection strictly left. Neither component can grow, so no rule may ever push a
+    node *right* or lengthen a plan — the invariant a new rule has to preserve.
     """
     plan = list(nodes)
     while True:
@@ -253,14 +251,9 @@ def dim_effect(node: LoweredOp) -> DimEffect:
     Notes
     -----
     The point of gathering these here is that a **new variant must answer every question at
-    once**. Before this existed the same facts were spread over three partial matches — one
-    in ``pushdown_selects``, one in ``_fused_dims``, four arms in
-    :func:`pushdown_projections` — each with its own silent "anything else is left"
-    fallback, so a new node kind would quietly get the conservative answer from all three
-    without anyone deciding it should.
-
-    A conservative answer is still available, and is what most kinds take: ``None`` on both
-    fields. What is no longer available is taking it *by accident*.
+    once**: the rules read this rather than matching on node kinds themselves, so none of
+    them has a silent "anything else is left" fallback. The conservative answer, ``None``
+    on both fields, is still available, but a new kind only gets it by choosing it here.
     """
     match node:
         case Reduce(consumes=consumes) as reduce if reduce.keepdims:
@@ -345,19 +338,17 @@ def dim_effect(node: LoweredOp) -> DimEffect:
             # a renamed variable cannot precede the rename that mints its new name), which
             # that machinery cannot see, so no projection crosses via the generic rule. A
             # schema-aware rename/projection rule, and the name-translating select cross
-            # (``11-relabel-rename-drop.md`` §4), are follow-ups. The schema is exact for the
-            # node regardless, which is what re-opens the trusted prefix past it.
+            # (``11-relabel-rename-drop.md`` §4), are not written. The schema is exact for
+            # the node regardless, which is what re-opens the trusted prefix past it.
             return DimEffect(blocks=frozenset(mapping.values()), requires=None)
         case Drop():
             # ``drop_vars`` remaps no dim, so a select commutes with it freely (empty
             # ``blocks`` -- every select is disjoint). But a *projection* may not cross it
             # blindly: moved before the drop it could remove the very name ``drop_vars``
             # targets, turning a valid chain into a ``KeyError`` -- so ``requires=None``. The
-            # profitable schema-aware rewrites next to it (a projection excluding the dropped
-            # data vars makes the drop redundant; one retaining a dropped coord may hop it)
-            # want a dedicated trusted-prefix rule -- issue #176. The schema is exact for the
-            # node regardless (``apply_schema``), which is what re-opens the trusted prefix
-            # past it; crossability is the secondary question.
+            # schema-aware hop is :func:`push_projection_past_drop`'s job instead. The schema
+            # is exact for the node (``apply_schema``), which is what re-opens the trusted
+            # prefix past it.
             return DimEffect(blocks=frozenset(), requires=None)
         case Project() | Rechunk() | Opaque():
             return _OPAQUE_EFFECT
@@ -475,8 +466,8 @@ def _compose_into(
 
     Notes
     -----
-    A dim in only one of the two carries over untouched. A dim in **both** is the case
-    the plain ``dict.update`` got wrong: ``isel(time=slice(100,1000)).isel(time=slice(10,20))``
+    A dim in only one of the two carries over untouched. A dim in **both** is why this is
+    not a ``dict.update``: ``isel(time=slice(100,1000)).isel(time=slice(10,20))``
     is *not* ``isel(time=slice(10,20))`` — the second indexer addresses positions
     **within the first's result**, so the two must compose (here to ``slice(110,120)``).
     ``_compose_indexer`` does that for the cases it can prove; ``None`` from either
@@ -532,7 +523,7 @@ def _compose_indexer(outer: Indexer, inner: Indexer) -> Indexer | None:
 
     The rest yield ``None`` for reasons that are *not* interchangeable: a ``GeneralSlice``
     has negative or reversed bounds that count from an end the composer cannot locate; a
-    ``Label`` is not positional at all (§3.2); and a ``Scalar`` drops the dim outright, so
+    ``Label`` is not positional at all; and a ``Scalar`` drops the dim outright, so
     ``inner`` has nothing left to apply to.
 
     Those three are spelled out rather than caught by a wildcard, and ``assert_never`` closes
@@ -808,14 +799,12 @@ def merge_adjacent_projects(nodes: Plan, schema: SchemaState[Hashable]) -> Plan 
     coordinate (``ds[["lat", "temperature"]][["lat"]]``, which composes correctly), which
     a ``data_vars`` guard confined to ``_trusted_prefix`` could not do.
 
-    It also lets the rule fire past an :class:`~xrexpr.ir.Opaque` — but nothing recorded
-    supplies such a pair any more. An ``Opaque`` may *return a DataArray*
+    The rule would also fire past an :class:`~xrexpr.ir.Opaque`, but recording never
+    produces such a pair: an ``Opaque`` may *return a DataArray*
     (``ds.plan.pipe(lambda d: d["tas"])``), on which a list key indexes rather than
-    projects, so ``_getitem_is_projection`` demotes every
-    ``__getitem__`` after one; without that, ``[[1, 2]][[1]]`` would satisfy the subset
-    test and collapse to the wrong row. The behaviour stays for plans built by hand or by
-    a future producer that *can* prove the receiver — the rule's contract is unchanged,
-    only its supply.
+    projects, so ``accessor._getitem_is_projection`` records every ``__getitem__`` after
+    one as ``Opaque``. Without that, ``[[1, 2]][[1]]`` would satisfy the subset test and
+    collapse to the wrong row.
 
     One merge per call; :func:`optimize`'s fixpoint collapses a run of three. The rule
     shrinks the plan, so the termination measure is satisfied on its first component.
@@ -974,7 +963,7 @@ def push_projection_past_drop(
     exact. The elimination case shrinks the plan; the hop case moves the projection one left
     (and a ``Drop`` is neither a ``Select`` nor a ``Project``, so it does not enter the
     measure) -- either way the termination measure strictly decreases. One rewrite per call;
-    :func:`optimize`'s fixpoint composes them. Issue #176.
+    :func:`optimize`'s fixpoint composes them.
 
     ``drop_vars`` is a metadata-only op, so eliminating it saves little *runtime*; whether
     this rule earns the schema fold it triggers is a cost/benefit question to be profiled,
@@ -1056,8 +1045,7 @@ def pushdown_selects(nodes: Plan, schema: SchemaState[Hashable]) -> Plan | None:
       ``cumsum("time").isel(time=5)`` is left untouched because order matters there.
 
     That last distinction is what makes this one generic rule rather than one per node
-    kind. A
-    pushed select also cannot disturb window *boundaries* (``02-lowering.md`` §11.2):
+    kind. A pushed select also cannot disturb window *boundaries* (``02-lowering.md`` §11.2):
     windows run along their own dims independently at each position of the others,
     ``center``/``min_periods`` included, so a select on a **disjoint** dim cannot change
     which elements a window sees — and an intersecting one never moves.
@@ -1160,10 +1148,9 @@ def pushdown_projections(nodes: Plan, schema: SchemaState[Hashable]) -> Plan | N
     free to skip one raised by discarded work — is written up in
     ``planning/roadmap/07-small-wins.md`` §8.
 
-    **Weighted reduces are admitted too**, on the strength of that same contract. The
-    argument that once excluded them — a weighted reduce *refuses* a variable lacking a
-    named dim where a plain one merely skips it, so the hop would mask an error — is
-    precisely what §8 reclassifies as a win, and it is the sharpest instance of it:
+    **Weighted reduces are admitted too**, on the strength of that same contract. A
+    weighted reduce *refuses* a variable lacking a named dim where a plain one merely
+    skips it, so the hop can skip an error — the sharpest instance of §8:
     ``ds.plan.weighted(w).mean("time")[["temperature"]]`` raises eagerly over
     ``elevation``, which the chain discards, and succeeds once the projection runs first.
     A projection also never has to subset the weights, which is what keeps
@@ -1173,10 +1160,8 @@ def pushdown_projections(nodes: Plan, schema: SchemaState[Hashable]) -> Plan | N
     load-bearing rather than decorative. Projecting drops a dim *coordinate* no surviving
     variable uses, and what the weights do with a dim turns on whether its coord is
     present: inner-join against it if so, broadcast a fresh one if not. Verified against
-    xarray 2026.7.0, and without the extra term two chains diverge in *values*, not just
-    in errors — see the :func:`dim_effect` arm. With it, a sweep of 512 weighted chains
-    (278 of them hopped) changed no value, no coordinate and raised nothing new; the 36
-    that skipped an error each returned exactly the projection-first answer.
+    xarray 2026.7.0: without the extra term two chains diverge in *values*, not just in
+    errors — see the :func:`dim_effect` arm.
 
     One hop per call. :func:`optimize`'s fixpoint composes hops so a projection walks to
     the front of the plan (where issue #43 wants to eventually turn it into a backend
@@ -1388,8 +1373,7 @@ def _pushable_rechunk(node: Rechunk) -> bool:
     site is enforced: a new variant fails mypy here until someone decides which side of the
     line it falls on. ``Rechunk`` classifies its uniform form too, so ``chunk("auto")``
     reaches this match as an :class:`~xrexpr.chunks.Auto` and ``chunk((100, 400, 500))`` as a
-    :class:`~xrexpr.chunks.BlockSeq` — the same arms their mapping spellings take, rather
-    than a pair of ``isinstance`` checks on ``args`` restating the answer.
+    :class:`~xrexpr.chunks.BlockSeq` — the same arms their mapping spellings take.
 
     The line is whether **dask resolves the spec by measuring the array it is handed**:
 
@@ -1398,7 +1382,7 @@ def _pushable_rechunk(node: Rechunk) -> bool:
       byte target are resolved by *dividing* a byte budget by the array's own extent, so a
       select in front changes what they mean — and if it empties a dim, into a
       ``ZeroDivisionError`` where the eager chain succeeds on xarray before 2026.09.0
-      (issue #121, and the notes on :class:`~xrexpr.chunks.Auto`). The separate
+      (see the notes on :class:`~xrexpr.chunks.Auto`). The separate
       :func:`_empty_autochunk_is_pushable` admits only the corresponding fixed-version,
       provably-empty auto case. Someone writing either is already reasoning about chunking
       against the data as it stands, so nothing else crosses such a call, scalar selects
@@ -1416,9 +1400,8 @@ def _pushable_rechunk(node: Rechunk) -> bool:
 
     ``specs`` is annotated, and that is load-bearing rather than decorative: gathering the
     two sites as ``(*node.chunks.values(), *uniform)`` infers ``Any``, which makes
-    ``assert_never`` accept anything and voids the exhaustiveness guarantee **silently** —
-    the probe technique reports success. Any rewrite of these three lines has to re-run that
-    proof.
+    ``assert_never`` accept anything and voids the exhaustiveness guarantee **silently**.
+    After rewriting these lines, delete a ``case`` arm and check mypy still fails.
     """
     if any(key not in node.chunks for key in node.kwargs):
         return False
@@ -1504,10 +1487,9 @@ def merge_adjacent_rechunks(nodes: Plan, schema: SchemaState[Hashable]) -> Plan 
     earlier node left it unspecified, while every concrete later spec wins outright.
 
     The merged node is rebuilt exactly as :func:`pushdown_selects_past_rechunks` rebuilds a
-    trimmed one — mapping form, ``kwargs`` dropped (safe, since both inputs were pushable
-    and so carried no option kwarg). A leading ``Mapping`` in ``args`` makes
-    ``Rechunk.__post_init__`` derive ``uniform = None``, so the result is again a clean
-    mapping-form node the rule can merge further.
+    trimmed one — ``chunks`` only, no ``args`` or ``kwargs`` (safe, since both inputs were
+    pushable and so carried no option kwarg). With no ``args`` its ``uniform`` is ``None``,
+    so the result is again a mapping-form node the rule can merge further.
 
     One merge per call; :func:`optimize`'s fixpoint collapses a run of three. The rewrite
     replaces two nodes with one, shrinking the plan, so the termination measure holds on its
