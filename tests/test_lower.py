@@ -3,7 +3,7 @@
 Two things are pinned here. The *contract* — lowering is semantics-preserving and
 idempotent, and ``emit`` derives each call header from the node's *semantic fields* (the
 inverse of ``to_opnode``), so a rewritten semantic field flows into the replayed call — and
-the *fusion policy*: which builder pairs v1 claims to understand, and that everything else
+the *fusion policy*: which builder pairs fusion claims to understand, and that everything else
 takes the mandatory opaque fallback rather than being modelled on a guess.
 
 Because the header is *derived*, ``emit`` produces the **canonical** spelling of a call, not
@@ -241,8 +241,7 @@ def test_emit_follows_the_semantic_field_not_a_stale_header():
 
     Notes
     -----
-    The regression the whole change exists for: an optimiser (a rule, or a Rust backend that
-    never sees ``args``/``kwargs`` at all) rewrites the *semantic field* and leaves the
+    An optimiser (a rule, or a Rust backend that never sees ``args``/``kwargs`` at all) rewrites the *semantic field* and leaves the
     recorded header untouched. ``emit`` must read the field, not the stale header — otherwise
     a rewritten plan replays its pre-rewrite call.
     """
@@ -259,7 +258,7 @@ def test_emit_follows_the_reduce_dim_not_a_stale_header():
 
     Notes
     -----
-    The ``Select`` regression above, for the one *derived* arm that threads the recorded
+    The ``Select`` case above, for the one *derived* arm that threads the recorded
     ``args``/``kwargs`` back through :func:`~xrexpr.lower._dim_call`. Start from a reduce as the
     recorder built it — header and ``consumes`` agreeing — then rewrite *only* the semantic
     field, the way a rule (or a Rust backend that never sees ``args``/``kwargs``) would, and
@@ -669,9 +668,8 @@ def test_a_keepdims_closer_refuses_to_fuse(opener):
     Notes
     -----
     ``keepdims=True`` keeps the reduced dims at size 1, so a fused node (which removes them)
-    would misdescribe it — the same reason a within-group map refuses. Recording ``Opaque``
-    for the closer gave this for free before #117 modelled ``keepdims`` as a live ``Reduce``;
-    the ``closer.keepdims`` guard in each ``_fuse_*`` restores it.
+    would misdescribe it — the same reason a within-group map refuses. The closer is a
+    live ``Reduce``, so it is the ``closer.keepdims`` guard in each ``_fuse_*`` that refuses.
     """
     lowered = _lower(opener, ("mean", (), {"keepdims": True}))
     assert [type(n) for n in lowered] == [Opaque, Opaque]
@@ -680,16 +678,16 @@ def test_a_keepdims_closer_refuses_to_fuse(opener):
 @pytest.mark.parametrize(
     "opener",
     [
-        # issue #90: each of these reads a plausible ``group_dim`` off the call, and each
-        # reading is wrong -- the dim actually consumed is whichever one the *coordinate*
-        # is defined on, which the call does not say. Refusing is the fix.
+        # each of these reads a plausible ``group_dim`` off the call, and each reading is
+        # wrong -- the dim actually consumed is whichever one the *coordinate* is defined
+        # on, which the call does not say. So they refuse.
         ("groupby", ("region",), {}),
         ("groupby", ("region.foo",), {}),
         ("groupby_bins", ("region", 2), {}),
         ("resample", (), {"region": "2D"}),
         # dotted bins: the head is a dim, so a head-only guard would admit it, but the
         # minted name is ``month_bins`` rather than ``time.month_bins`` (verified against
-        # xarray 2026.7.0). Refused until it has its own goldens.
+        # xarray 2026.7.0). Refused rather than modelled.
         ("groupby_bins", ("time.month", 2), {}),
     ],
 )
@@ -698,8 +696,8 @@ def test_a_grouper_whose_head_is_not_a_dim_does_not_fuse(opener):
 
     Notes
     -----
-    Issue #90: each of these reads a plausible ``group_dim`` off the call, and each
-    reading is wrong — the dim actually consumed is whichever one the *coordinate* is
+    Each of these reads a plausible ``group_dim`` off the call, and each reading is
+    wrong — the dim actually consumed is whichever one the *coordinate* is
     defined on, which the call does not say.
     """
     lowered = _lower(opener, ("mean", (), {}))

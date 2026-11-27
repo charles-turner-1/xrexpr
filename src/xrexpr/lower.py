@@ -146,9 +146,8 @@ def to_lower_ir(
     is **demoted to** :class:`~xrexpr.ir.Opaque` together with its closer — the pair then
     replays verbatim and no rule can fire on it. That fallback is what makes the closer's
     provisional typing safe: a closer recorded under a shape no rule expects simply fails
-    to match, so the failure mode is pessimisation, never wrongness. It is also what the
-    openers no fused node describes (``rolling_exp``, ``cumulative``) rely on permanently,
-    rather than only until their own rule lands.
+    to match, so the failure mode is pessimisation, never wrongness. It is also how the
+    openers no fused node describes (``rolling_exp``, ``cumulative``) replay.
 
     Idempotent and semantics-preserving (see the module docstring). Idempotence is not
     incidental: the output contains no ``ContextOpen`` at all, so a second pass has
@@ -204,7 +203,7 @@ def _fuse_grouped(
         The node recorded immediately after it.
     dim_names : frozenset of Hashable
         The base dataset's dim names, passed through to ``_grouper_dims`` — a grouper
-        that does not name one refuses (issue #90).
+        that does not name one refuses.
 
     Returns
     -------
@@ -215,7 +214,7 @@ def _fuse_grouped(
     Notes
     -----
     Refusing is always safe (the caller demotes to ``Opaque``), so every condition below
-    is a *narrowing* of what v1 claims to understand rather than a correctness risk.
+    is a *narrowing* of what fusion claims to understand rather than a correctness risk.
 
     - **The opener must be groupby-family.** ``rolling``/``coarsen`` and ``weighted`` have
       their own nodes, fused by the two functions below, so they refuse here.
@@ -247,8 +246,7 @@ def _fuse_grouped(
         # never minted ``month`` (pydata/xarray#11519); #11521 stops groupby/resample
         # honouring ``keepdims`` at all, so it now raises instead. ``GroupedReduce``
         # describes neither (it removes the group dim and mints ``new_dim``), so fusing
-        # would misdescribe it: refuse and let the pair replay verbatim, exactly as an
-        # opaque closer did before #117.
+        # would misdescribe it: refuse and let the pair replay verbatim.
         return None
 
     grouped = _grouper_dims(opener, dim_names)
@@ -302,13 +300,13 @@ def _fuse_windowed(opener: ContextOpen, closer: FluentOp) -> WindowedReduce | No
     builder's clothes. Neither is described by ``window``, so both keep replaying
     verbatim rather than being squeezed into a node that would misdescribe them.
 
-    **The closer must have named no dim** — and that is a stronger condition than it
-    looks. ``DatasetRolling.mean`` is ``(keep_attrs=None, **kwargs)``: it takes no dim
-    argument at all, so ``ds.rolling(time=3).mean("lat")`` passes ``"lat"`` as
-    *keep_attrs* and reduces nothing. ``to_opnode``, which cannot know the call is
-    windowed, records that as ``consumes={"lat"}``. Fusing it would import a dim effect
-    invented by a misparse, so a closer carrying any parsed dim spec is refused and the
-    pair replays verbatim.
+    **A closer's parsed dim is ignored.** ``DatasetRolling.mean`` is
+    ``(keep_attrs=None, **kwargs)``: it takes no dim argument at all, so
+    ``ds.rolling(time=3).mean("lat")`` passes ``"lat"`` as *keep_attrs* and reduces
+    nothing. ``to_opnode``, which cannot know the call is windowed, records that as
+    ``consumes={"lat"}``. The fused node drops that misparse rather than carrying it: its
+    dim effect depends only on ``window``, and ``reduce_args`` replays the closer
+    verbatim.
     """
     match opener.name:
         case "rolling" | "coarsen":
@@ -316,19 +314,13 @@ def _fuse_windowed(opener: ContextOpen, closer: FluentOp) -> WindowedReduce | No
         case _:
             return None
     if not isinstance(closer, Reduce) or closer.keepdims:
-        # ``keepdims=True`` still refuses: ``coarsen.mean(keepdims=True)`` raises
-        # ``TypeError`` and rolling's is an inert no-op -- neither a size effect a
-        # ``WindowedReduce`` describes -- so both stay ``Opaque`` to replay verbatim.
+        # ``keepdims=True`` refuses: ``coarsen.mean(keepdims=True)`` raises ``TypeError``
+        # and rolling's is an inert no-op -- neither a size effect a ``WindowedReduce``
+        # describes -- so both stay ``Opaque`` to replay verbatim.
         #
-        # A closer that *named a dim* no longer refuses. A windowed reduce has no dim
-        # parameter (``mean(keep_attrs=None, **kwargs)``): a positional (``mean("lat")``)
-        # binds to ``keep_attrs``, a ``dim=`` keyword falls into ``**kwargs`` and is ignored
-        # (with a warning). Either way the closer reduces no dim, so ``rolling(time=12)
-        # .mean("lat")`` reduces the same dims as ``.mean()`` (differing only in attrs). The
-        # ``to_opnode`` misparse in ``closer.consumes`` is dropped here rather than carried,
-        # and the node reads neither it nor ``reduce_args`` -- its schema and dim effects
-        # depend only on ``window``. ``reduce_args`` rides along verbatim, so replay
-        # reproduces the closer (``keep_attrs`` truthiness included) exactly.
+        # A closer that *named a dim* is fused (see the notes). A positional
+        # (``mean("lat")``) binds to ``keep_attrs`` and a ``dim=`` keyword falls into
+        # ``**kwargs`` and is ignored (with a warning), so either way it reduces no dim.
         return None
 
     window = _window_spec(opener)
@@ -485,7 +477,7 @@ def _grouper_dims(
 
     Notes
     -----
-    Read off the call, since v1 fuses only string groupers:
+    Read off the call, since only string groupers fuse:
 
     - ``groupby("time.month")`` groups along ``time`` and mints ``month``;
     - ``groupby("lat")`` mints the dim it grouped over, now holding the distinct values;
@@ -496,23 +488,21 @@ def _grouper_dims(
     ``dim_names``. The name alone cannot tell them apart: ``groupby("region")`` where ``region``
     is a coordinate *on* ``lat`` groups along ``lat`` and mints ``region``, so reading
     ``group_dim`` off the call gives ``region`` — a dim the grouping never consumed, while
-    the one it did consume is reported as surviving. That was issue #90, and it reached
-    ``dim_effect``'s ``blocks``/``requires`` as well as the schema fold. Refusing puts these
-    pairs on the opaque fallback, which is what ``02-lowering.md`` §5.5 specified all along.
+    the one it did consume is reported as surviving, which would mislead both
+    ``dim_effect`` and the schema fold. Refusing puts these pairs on the opaque fallback
+    (``02-lowering.md`` §5.5).
 
-    Verified against xarray 2026.7.0, since the guard's reach is wider than the issue's
-    title suggests — all three kinds share the assumption:
+    Verified against xarray 2026.7.0 — all three kinds share the assumption:
 
     - ``resample`` accepts a non-dim coordinate too (``resample(t2="2D")`` with ``t2`` on
       ``lat`` yields ``{t2: 2, time: 4}``), so the keyword is checked, not trusted;
     - ``groupby_bins("time.month", 2)`` yields ``{lat: 3, month_bins: 2}`` — group dim
-      ``time``, minting ``month_bins``, whereas this function's pre-guard reading was
-      ``("time.month", "time.month_bins")``, wrong twice. The dotted bins form is therefore
-      refused rather than corrected: fusing it needs its own node-level goldens, and
-      refusing is the safe half of the fix. Future work.
+      ``time``, minting ``month_bins``, where the naive reading is
+      ``("time.month", "time.month_bins")``, wrong twice. The dotted bins form is refused
+      rather than modelled.
     - a multi-dim coordinate grouper stacks (``cell`` on ``(time, lat)`` yields
       ``{cell: 3}``, consuming both), which is why modelling non-dim groupers properly
-      needs a ``group_dim`` that is a *set* — the larger question #90 leaves open.
+      needs a ``group_dim`` that is a *set*.
 
     A ``Grouper`` object or a keyword grouper (``groupby(x=UniqueGrouper())``) already
     refuses by leaving ``args`` empty or non-``str``; the guard does not change that.
@@ -554,8 +544,8 @@ def emit(nodes: list[LoweredOp]) -> list[Call]:
     -----
     The inverse direction of :func:`to_lower_ir`: a node that stands for two calls emits
     two. A pure function of the plan — no dataset in sight — so codegen is unit-testable
-    on its own, and ``_replay`` stays the short
-    ``getattr`` loop it has always been instead of growing an arm per variant. That is
+    on its own, and ``_replay`` stays a short ``getattr`` loop instead of growing an arm
+    per variant. That is
     what keeps per-call verbatim-ness a property of the whole pipeline rather than
     something each node kind has to be trusted with.
     """

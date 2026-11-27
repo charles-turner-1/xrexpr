@@ -4,8 +4,8 @@ These are golden-node assertions: each recorded call, in every dim spelling, mus
 resolve to the same :data:`~xrexpr.ir.Op` variant and normalised metadata
 (``consumes`` / ``indexer``) while keeping ``args``/``kwargs`` verbatim for replay.
 The headline case is that a no-dim ``mean()`` consumes :data:`~xrexpr.ir.ALL_DIMS` — the
-symbolic set, *not* an expansion against any schema — which is what fixes the empty-dim
-reorder bug downstream without freezing dim names the recorder may have wrong.
+symbolic set, *not* an expansion against any schema — so a following select is rejected
+downstream rather than reordered, without freezing dim names the recorder may have wrong.
 
 ``to_opnode`` takes no schema: these tests pass none, and the ``schema`` fixture appears
 only where a node is then folded through ``apply_schema``.
@@ -63,8 +63,8 @@ def test_reduce_no_dim_consumes_all_dims_symbolically():
     Notes
     -----
     The headline case: the set is left symbolic rather than expanded against a record-time
-    schema, which is what fixes the empty-dim reorder bug without freezing dim names the
-    recorder may have wrong. See ``ir``'s module docstring.
+    schema, so a following select is rejected rather than reordered, without freezing dim
+    names the recorder may have wrong. See ``ir``'s module docstring.
     """
     node = to_opnode("mean", (), {})
     assert node.consumes is ALL_DIMS
@@ -119,8 +119,7 @@ def test_reduce_keeps_non_dim_kwargs_verbatim(schema):
 # --- ``.reduce``, whose first positional is a function ----------------------------
 #
 # ``Dataset.reduce(func, dim, ...)`` is the one tabulated reduction that does not take its
-# dim spec first. Reading ``args[0]`` as one recorded the *function* as a dim (#96) -- a
-# node whose ``consumes`` was nonsense, and a written claim that was untrue.
+# dim spec first. Reading ``args[0]`` as one would record the *function* as a dim.
 
 
 def test_reduce_method_reads_its_dim_from_the_second_positional(schema):
@@ -132,7 +131,7 @@ def test_reduce_method_reads_its_dim_from_the_second_positional(schema):
 
 
 def test_reduce_method_keyword_dim(schema):
-    """``.reduce(func, dim="lat")`` resolves the same way; the kwarg spelling was never affected."""
+    """``.reduce(func, dim="lat")`` resolves the same way."""
     node = to_opnode("reduce", (sum,), {"dim": "lat"})
     assert node.consumes == frozenset({"lat"})
 
@@ -148,9 +147,9 @@ def test_bare_reduce_method_consumes_all_dims_symbolically(schema):
 
     Notes
     -----
-    The regression this guards: with the dim read off ``args[0]``, the lone function
-    argument made the call look like a *named* reduce over ``frozenset({func})`` rather
-    than a bare one -- the empty-dim reorder bug, reintroduced through a side door.
+    With the dim read off ``args[0]``, the lone function argument would make the call look
+    like a *named* reduce over ``frozenset({func})`` rather than a bare one, so a following
+    select on any real dim would be swapped in front instead of rejected.
     """
     node = to_opnode("reduce", (sum,), {})
     assert node.consumes is ALL_DIMS
@@ -167,9 +166,8 @@ def test_keepdims_records_a_reduce_carrying_the_flag(schema):
     Verified against xarray 2026.7.0: ``ds.mean("lat", keepdims=True)`` keeps ``lat`` at
     size 1. ``consumes`` still names the dim -- what differs is that :attr:`Reduce.keepdims`
     tells ``dim_effect``/``apply_schema`` the dim is *resized to 1* rather than removed, so
-    a valid chain optimises (#117, ``07-small-wins.md`` §9). Before this it recorded
-    ``Opaque`` (the conservative #96 fix); the correctness that fix protected is now carried
-    by the ``immovable`` dim effect instead of a full barrier.
+    a valid chain optimises (``07-small-wins.md`` §9), and the ``immovable`` dim effect
+    keeps a select on that dim in place.
     """
     node = to_opnode("mean", ("lat",), {"keepdims": True})
     assert isinstance(node, Reduce)
@@ -302,16 +300,11 @@ def test_sel_option_kwarg_excluded(schema):
     assert node.consumes == frozenset({"lat"})
 
 
-def test_scan_carries_no_resolved_dims(schema):
-    """A scan records as ``Scan`` with its dim left in ``args``, and no resolved metadata.
-
-    Notes
-    -----
-    A ``Scan`` has no ``consumes``/``indexer`` at all — its scanned-dim metadata arrives
-    with the first scan-aware rule (W6).
-    """
+def test_scan_records_its_dims(schema):
+    """A scan records as ``Scan`` with its dim parsed into ``dims`` and kept in ``args``."""
     node = to_opnode("cumsum", ("time",), {})
     assert isinstance(node, Scan)
+    assert node.dims == frozenset({"time"})
     assert node.args == ("time",)  # dim kept in args for replay
 
 

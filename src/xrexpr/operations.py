@@ -60,8 +60,8 @@ class ReduceSpec:
     -----
     ``dim_arg`` defaults to 0 because reductions take ``dim`` first, and is 1 for
     ``Dataset.reduce``, which is ``reduce(func, dim, ...)`` — reading its first
-    positional as a dim spec is what made ``ds.reduce(np.mean, "time")`` record a
-    nonsense ``consumes`` (#96). A field rather than a lookup in a second name-keyed
+    positional as a dim spec would record the *function* as the dim of
+    ``ds.reduce(np.mean, "time")``. A field rather than a lookup in a second name-keyed
     table, so a signature this odd travels with the row that has it.
     """
 

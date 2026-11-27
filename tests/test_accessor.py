@@ -193,8 +193,8 @@ def test_ellipsis_dim_reduces_over_every_dim_and_matches_eager(ds, chain):
 
     Notes
     -----
-    Before the fix ``...`` parsed as a dim *named* ``Ellipsis``, so the plan replayed a
-    reduce over nothing: ``ds.plan.mean(...)`` came back with every dim intact.
+    Read as a name, ``...`` would be a dim *named* ``Ellipsis``, and the plan would replay a
+    reduce over nothing: ``ds.plan.mean(...)`` would come back with every dim intact.
     """
     assert_equal(chain(ds.plan).collect(), chain(ds))
 
@@ -293,9 +293,8 @@ def test_reduce_method_then_select_matches_eager(ds):
 
     Notes
     -----
-    The payoff of reading the dim spec from the *second* positional (#96): the node now
-    carries a true ``consumes``, so ``.reduce`` chains optimise like any other reduction
-    instead of being a barrier.
+    The dim spec is read from the *second* positional, so the node carries a true
+    ``consumes`` and ``.reduce`` chains optimise like any other reduction.
     """
     chain = ds.plan.reduce(np.mean, "lat").isel(time=0)
     assert [type(n) for n in chain._optimized()] == [Select, Reduce]
@@ -319,11 +318,10 @@ def test_keepdims_reduce_then_select_on_kept_dim_matches_eager(ds):
 
     Notes
     -----
-    The regression this pins was **live**: ``keepdims=True`` keeps ``time`` at size 1, but
-    the node once claimed ``consumes={"time"}`` as if it removed it, so ``pushdown_selects``
-    classified the select as indexing a reduced-away dim and raised on a chain that works
-    eagerly. Now modelled (#117): the ``immovable`` dim effect leaves the select in place,
-    so it replays equal.
+    ``keepdims=True`` keeps ``time`` at size 1. Treated as a plain reduce of ``time``,
+    ``pushdown_selects`` would read the select as indexing a reduced-away dim and raise on a
+    chain that works eagerly. The ``immovable`` dim effect leaves the select in place
+    instead, so it replays equal.
     """
     got = ds.plan.mean("time", keepdims=True).isel(time=0).collect()
     assert_equal(got, ds.mean("time", keepdims=True).isel(time=0))
@@ -354,7 +352,7 @@ def test_select_on_reduced_dim_raises(ds):
 
 
 def test_bare_mean_then_select_raises(ds):
-    """A bare ``mean()`` followed by a select raises, end to end -- the empty-dim reorder bug is now an error, not a wrong swap."""
+    """A bare ``mean()`` followed by a select raises, end to end, rather than being swapped."""
     with pytest.raises(InvalidExpressionError):
         ds.plan.mean().isel(time=0).collect()
 
@@ -425,9 +423,8 @@ def test_fillna_in_a_chain_records_elementwise_and_replays_equal(ds):
 
     Notes
     -----
-    Records the variant and exercises record -> optimise -> replay end to end. Nothing
-    reorders around the elementwise op yet (W5 PR 1 leaves it a barrier in ``dim_effect``);
-    that the plan is still correct is what this pins.
+    Records the variant and exercises record -> optimise -> replay end to end, with the
+    select free to hop the elementwise op.
     """
     chain = ds.plan.mean("lat").fillna(0.0).isel(time=0)
     assert any(isinstance(n, Elementwise) for n in chain._ops)
@@ -483,8 +480,8 @@ def test_a_redundant_drop_is_eliminated_and_replays_equal(ds):
     Notes
     -----
     ``drop_vars("elevation")[["temperature"]]`` collapses to ``[["temperature"]]`` --
-    ``elevation`` is never computed -- via :func:`~xrexpr.optimize.push_projection_past_drop`
-    (#176). The value must still match the eager chain.
+    ``elevation`` is never computed -- via :func:`~xrexpr.optimize.push_projection_past_drop`.
+    The value must still match the eager chain.
     """
     chain = ds.plan.drop_vars("elevation")[["temperature"]]
     optimised = optimize(list(chain._ops), chain._base_schema())
@@ -561,7 +558,7 @@ def test_orthogonal_dataarray_select_records_a_select_and_replays_equal(ds):
 
     Notes
     -----
-    The optimisation payoff: the select is no longer a barrier, so ``mean("lat").isel(...)``
+    The optimisation payoff: the select is not a barrier, so ``mean("lat").isel(...)``
     optimises (the select hops the disjoint reduce — pinned structurally in
     ``test_optimize``) and still equals the eager chain.
     """
@@ -585,9 +582,9 @@ def test_invalid_dataarray_select_chain_raises_instead_of_laundering(ds):
 
     Notes
     -----
-    The bug this fixes: the advanced ``isel`` was misfiled as a dim-dropping ``Scalar``, so
-    the bare ``mean()`` understated its ``consumes`` and the trailing ``isel(time=0)`` was
-    swapped in front — returning a value where the eager chain errors. Now the orthogonal
+    Misfiled as a dim-dropping ``Scalar``, the advanced ``isel`` would make the bare
+    ``mean()`` understate its ``consumes``, and the trailing ``isel(time=0)`` would be
+    swapped in front — returning a value where the eager chain errors. The orthogonal
     indexer resizes ``time`` rather than dropping it, so ``time`` survives the fold and
     ``ALL_DIMS`` refuses the trailing select.
     """
@@ -693,9 +690,8 @@ def test_a_projection_feeding_a_coord_is_dropped_and_replays_equal(ds):
     ``ds[["temperature"]]["lat"]`` materialises ``temperature`` only to discard it and
     return the ``lat`` coordinate. ``lat`` survives ``p1`` (``temperature`` spans it), so
     the optimal plan reads the coord from the base and never touches the data variable --
-    ``eliminate_projection_before_coord`` drops ``p1``. This is the schema-based rewrite
-    #115 asked for, distinct from the syntactic merge: it proves ``lat`` passes through
-    ``p1`` untouched.
+    ``eliminate_projection_before_coord`` drops ``p1``. A schema-based rewrite, distinct
+    from the syntactic merge: it proves ``lat`` passes through ``p1`` untouched.
     """
     chain = ds.plan[["temperature"]]["lat"]
     assert [type(n) for n in chain._optimized()] == [Project]
@@ -876,8 +872,8 @@ def test_stripped_rechunk_still_replays(chunky_ds):
 
     Notes
     -----
-    The regression this rewrite exists to avoid: leaving ``time`` in the spec after the
-    select has dropped it raises ``ValueError: chunks keys ... not found``.
+    Leaving ``time`` in the spec after the select has dropped it would raise
+    ``ValueError: chunks keys ... not found``.
     """
     ds = chunky_ds
     chain = ds.plan.chunk({"time": 100, "lat": 2}).isel(time=0)
@@ -1231,7 +1227,7 @@ def test_context_chain_records_an_opener_then_lowers_to_one_node(ds):
 
 @pytest.fixture
 def regioned_ds() -> xr.Dataset:
-    """A dataset with a non-dim coordinate grouper, the shape issue #90 was about.
+    """A dataset with a non-dim coordinate grouper.
 
     Returns
     -------
@@ -1256,12 +1252,12 @@ def test_a_non_dim_coordinate_grouper_does_not_fuse(regioned_ds):
 
     Notes
     -----
-    Issue #90. The grouper's *name* is not the dim it consumes: ``groupby("region")``
-    consumes ``lat`` and mints ``region``, but nothing in the call says so, and fusing on the
-    call's own reading gave ``group_dim="region"`` — a schema claiming ``lat`` survived a
+    The grouper's *name* is not the dim it consumes: ``groupby("region")`` consumes ``lat``
+    and mints ``region``, but nothing in the call says so, and fusing on the call's own
+    reading would give ``group_dim="region"`` — a schema claiming ``lat`` survived a
     grouping that removed it, read by the fold *and* by ``dim_effect``'s ``blocks`` and
-    ``requires``. Refusing puts the pair on the opaque fallback: correct, unoptimised, and
-    what ``02-lowering.md`` §5.5 specified from the start.
+    ``requires``. Refusing puts the pair on the opaque fallback: correct, unoptimised
+    (``02-lowering.md`` §5.5).
     """
     chain = regioned_ds.plan.groupby("region").mean()
 
@@ -1274,9 +1270,9 @@ def test_explain_prints_no_group_arrow_for_a_coordinate_grouper(regioned_ds):
 
     Notes
     -----
-    The user-visible half of the issue #90 fix: ``explain()`` renders a fused node's
-    inference as ``[group_dim -> new_dim]``, so pre-fix it stated ``[region -> region]`` --
-    the tool asserting a wrong fact about the data. There is no arrow to get wrong now.
+    ``explain()`` renders a fused node's inference as ``[group_dim -> new_dim]``; fused, this
+    pair would state ``[region -> region]`` -- the tool asserting a wrong fact about the
+    data. Unfused, there is no arrow to get wrong.
     """
     text = str(regioned_ds.plan.groupby("region").mean().explain())
 
@@ -1289,9 +1285,8 @@ def test_ops_after_an_unfusable_context_are_modelled_again(ds):
 
     Notes
     -----
-    The trailing barrier is retired. ``first`` closes the context and returns a Dataset, so
-    the ``mean`` after it is an ordinary Dataset reduce -- a chain the barrier used to render
-    permanently opaque from the groupby onward.
+    ``first`` closes the context and returns a Dataset, so the ``mean`` after it is an
+    ordinary Dataset reduce, not opaque from the groupby onward.
     """
     chain = ds.plan.groupby("lat").first().mean("time")
 
@@ -1937,7 +1932,7 @@ def test_getitem_after_a_bare_name_projection_is_indexing_too(ds):
     The base is a ``Dataset`` here, so the classification cannot be read off the base
     alone: after a bare-name projection the live object is a ``DataArray``, and
     ``ds["temperature"][[1, 2]][[1]]`` is the same wrong-row collapse as on a
-    ``DataArray`` base -- one op later, and reachable before this accessor existed.
+    ``DataArray`` base, one op later.
     ``merge_adjacent_projects``' barrier on a single ``p1`` stops the *first* pair, not
     this one.
     """
@@ -1964,7 +1959,7 @@ def test_getitem_after_an_opaque_is_not_a_projection(ds, escape):
     ``Opaque`` is the node the IR does not model, and that covers its *result type*: both
     ``pipe`` and ``get`` take a ``Dataset`` to a ``DataArray`` without a modelled node in
     sight. Classified on the key alone the pair would be two ``Project``s, and
-    ``merge_adjacent_projects`` -- which is licensed to fire past an ``Opaque`` -- would
+    ``merge_adjacent_projects`` -- which would fire past an ``Opaque`` -- would
     collapse ``[[1, 2]][[1]]`` to ``[[1]]``. That returns a valid array of the *wrong rows*
     rather than raising, so the equality assertion is the one that matters here.
     """
@@ -1985,10 +1980,8 @@ def test_getitem_after_a_dataset_valued_opaque_is_demoted_too(ds):
     and a table of Dataset-preserving names would rot as xarray grows. Projection pushdown
     loses nothing, since :func:`~xrexpr.optimize._trusted_prefix` already stops it at the
     first ``Opaque``; ``merge_adjacent_projects`` is the whole of what is forfeited.
-
-    (``rename`` used to stand here, but it is a modelled :class:`~xrexpr.ir.Rename` now --
-    W11 -- so the merge across it *does* fire; ``transpose`` is an unmodelled op that still
-    demonstrates the demotion.)
+    (``rename`` would not do here: it is a modelled :class:`~xrexpr.ir.Rename`, so the
+    merge across it fires.)
     """
     chain = ds.plan.transpose()[["temperature", "elevation"]][["temperature"]]
 
@@ -2007,7 +2000,7 @@ def test_projections_merge_across_a_modelled_rename(ds):
     The flip side of ``test_getitem_after_a_dataset_valued_opaque_is_demoted_too``: because
     ``rename`` is a modelled :class:`~xrexpr.ir.Rename` (not an ``Opaque`` receiver-unknown
     barrier), the ``__getitem__``s after it stay :class:`~xrexpr.ir.Project`, so
-    ``merge_adjacent_projects`` collapses the redundant pair -- exactly the W11 payoff.
+    ``merge_adjacent_projects`` collapses the redundant pair.
     """
     chain = ds.plan.rename({"temperature": "t2m"})[["t2m", "elevation"]][["t2m"]]
     assert [type(n) for n in chain._ops] == [Rename, Project, Project]

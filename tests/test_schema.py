@@ -169,10 +169,8 @@ def test_scalar_isel_removes_dim_but_keeps_the_coord(ds):
         ds.isel(time=0).sizes    # {'lat': 3, 'lon': 5}      -- time is gone
         ds.isel(time=0).coords   # time, lat, lon            -- time survives, scalar
 
-    The coordinate half was previously asserted the other way round, matching a schema
-    that dropped any coordinate sharing a name with a removed dim because a name was all
-    it had. Now that a coordinate carries dims it can lose ``time`` and remain, which is
-    what xarray does (verified against 2026.7.0).
+    A coordinate carries dims, so it can lose ``time`` and remain, which is what xarray
+    does (verified against 2026.7.0).
     """
     schema = SchemaState.from_dataset(ds)
     node = Select(name="isel", indexer={"time": 0})  # scalar -> consumes={"time"}
@@ -610,8 +608,8 @@ def _weighted(consumes, weight_dims, weights):
         ),
         # weights carrying a dim *one* variable has and another lacks: ``temperature``
         # already spans ``time`` while ``elevation`` does not, and the broadcast reaches
-        # both. The mint is per variable, not per dataset -- issue #125, where testing the
-        # dim against the dataset skipped ``elevation`` because a sibling still carried it.
+        # both. The mint is per variable, not per dataset: testing the dim against the
+        # dataset would skip ``elevation`` because a sibling still carries it.
         (
             lambda ds: xr.DataArray(
                 [1.0, 2.0, 3.0, 4.0], dims="time", coords={"time": ds["time"]}
@@ -760,7 +758,7 @@ def _orphaning_cases():
     wl = xr.DataArray([1.0, 1.0, 1.0], dims="lat")
     return [
         pytest.param(
-            # #193: ``time`` is left with only its index coord after ``drop_vars``
+            # ``time`` is left with only its index coord after ``drop_vars``
             xr.Dataset(
                 {"elevation": ("lat", [0.0, 1.0, 2.0])},
                 coords={"time": [0], "lat": [0, 1, 2]},
@@ -960,16 +958,12 @@ def test_project_of_an_unknown_name_is_declined_whole(ds):
     """An unmodellable projection gains no information, so the schema is left as it was.
 
     ``ds[["nope"]]`` raises ``KeyError`` in xarray, so this state is only reachable when
-    something untracked introduced the name — an ``Opaque`` such as ``rename`` — which puts
+    something untracked introduced the name — an ``Opaque`` such as ``assign`` — which puts
     the plan past ``optimize._trusted_prefix`` and out of reach of the variable-level rules
     regardless.
 
-    **This is the one behavioural change the derivation forced.** The old shape restricted
-    ``data_vars`` to the known names (so ``{}``) while leaving ``dims`` untouched — a state
-    where no variable spanned ``time`` yet ``time`` existed, i.e. exactly the phantom-dim
-    contradiction deriving exists to forbid. It was chosen because over-reporting dims is
-    the safe direction and knowing no variables is *also* safe, and only the two fields
-    being independent made having both possible.
+    Restricting ``data_vars`` to the known names (so ``{}``) would leave ``time`` spanned
+    by nothing, so the derived dims would drop it — under-reporting, the unsafe direction.
 
     Declining the whole projection keeps the safe direction on dims — the assertion below,
     and ``test_project_of_an_unknown_name_leaves_dims_alone`` — at the cost of reporting

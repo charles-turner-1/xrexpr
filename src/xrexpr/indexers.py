@@ -382,7 +382,6 @@ class Label(GenericIndex):
         -------
         int | None
             The sequence's own length for an array or list/tuple of labels; None otherwise.
-            See the class notes on why no caller should reach that fallback.
         """
         if isinstance(self.value, np.ndarray):
             return int(self.value.size)
@@ -417,7 +416,7 @@ class Advanced(GenericIndex):
         **orthogonal** indexing (``dims`` contains that dim) keeps it, resized;
         **vectorized** indexing (``dims`` is a fresh name) drops it and adds the array's
         dims. That decision needs the dim key, which lives one level up, so it is not
-        modelled here yet.
+        modelled here.
 
     Notes
     -----
@@ -433,10 +432,9 @@ class Advanced(GenericIndex):
     (``schema._select_has_advanced``): a lone indexer cannot move the trust boundary — only
     an op can — and neither ``drops_dim`` nor a fixed :meth:`size` can honestly describe an
     effect that mints dims. So this variant is never emitted on a live plan: it *represents*
-    the value (the alternative was the ``_scalar`` catch-all silently modelling it as a
-    dim-dropping :class:`Scalar`, both wrong and unhashable) and *signals* the demotion. The
-    full vectorized modelling that would make it a live ``Select`` is a further follow-up
-    (#60).
+    the value and *signals* the demotion. Without it the ``_scalar`` catch-all in
+    :func:`classify` would model the array as a dim-dropping :class:`Scalar`, which is both
+    wrong and unhashable. Modelling vectorized indexing as a live ``Select`` is #60.
     """
 
     dims: tuple[Hashable, ...]
@@ -534,7 +532,7 @@ def _scalar(value: Any) -> Scalar:
     same two reasons: an ``np.int64`` position must compare equal to the ``int`` spelling of
     the same selection (golden plan assertions, and plan equality in general), and a variant
     holding a numpy *array* is unhashable — which would silently make the enclosing ``Select``
-    unhashable too. Labels pass through untouched: they are open by nature (§3.2).
+    unhashable too. Labels pass through untouched.
     """
     return Scalar(int(value) if _is_int(value) else value)
 

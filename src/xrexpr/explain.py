@@ -1,9 +1,8 @@
 """Render a lowered plan as text — what :meth:`~xrexpr.accessor.LazyProxy.explain` returns.
 
 Formats the **lowered nodes** rather than the emitted calls — the same choice Polars'
-``explain`` makes: show the plan the optimiser actually reasoned about. Three things the
-call-level form could not
-say, each a question users were left to guess at:
+``explain`` makes: show the plan the optimiser actually reasoned about. That says three
+things a list of calls could not:
 
 - a fused node is **one** op, so ``groupby("time.month").mean()`` reads as the single
   semantic operation it is instead of two unrelated calls;
@@ -12,9 +11,8 @@ say, each a question users were left to guess at:
 - the derived facts the rules key on (a bare reduce consuming *every* dim, a grouped
   reduce minting a new one, a weighted reduce's weight dims) appear at all.
 
-Nothing is lost in the switch, because each node is still rendered as the calls it emits,
-via :func:`~xrexpr.lower.emit` itself — so the line remains a faithful answer to "what will
-run", and cannot drift from the replay.
+Each node is still rendered as the calls it emits, via :func:`~xrexpr.lower.emit` itself,
+so the line remains a faithful answer to "what will run" and cannot drift from the replay.
 
 Pure text, no dataset and no accessor: :func:`format_plan` is a function of the plan, which
 is what lets the whole format be tested without recording anything.

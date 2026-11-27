@@ -57,7 +57,7 @@ class Explanation(str):
 #: object instead of recording a lazy op — otherwise the call would be silently
 #: recorded and never run (``collect`` is never reached, so the rewrite never fires).
 #: ``plot`` is xarray's plot *accessor*, so delegating the attribute (not calling it)
-#: also fixes ``plot.line()`` / ``plot.scatter()``. The set is shared by both base types:
+#: also covers ``plot.line()`` / ``plot.scatter()``. The set is shared by both base types:
 #: a name absent from one of them (``to_array`` on a ``DataArray``, ``to_index`` on a
 #: ``Dataset``) simply raises off the realised object, as it would eagerly.
 _EAGER_ATTRS = frozenset(
@@ -194,8 +194,8 @@ class LazyProxy:
         ``Opaque`` the folded ``data_vars`` is a guess, so
         ``_trusted_prefix`` already keeps
         :func:`~xrexpr.optimize.pushdown_projections` out. Two list-form projections behind
-        a genuinely ``Dataset``-valued opaque (``ds.plan.rename(...)[["a", "b"]][["a"]]``)
-        therefore stop merging — the case that cannot be told from the unsafe one without
+        a genuinely ``Dataset``-valued opaque (``ds.plan.transpose()[["a", "b"]][["a"]]``)
+        therefore do not merge — the case that cannot be told from the unsafe one without
         the receiver.
 
         Once not a ``Dataset``, assumed not a ``Dataset`` for the rest of the chain: an
@@ -267,10 +267,8 @@ class LazyProxy:
         Weighted reject ``__getitem__``, so xarray offers no builder→builder call that
         would keep one open across two nodes.
 
-        This is what retires the trailing barrier the previous design needed: the closer
-        is recorded normally and lowering, which can see the pair, decides what it meant —
-        so ops *after* a context are modelled again instead of every one of them being
-        opaque forever.
+        The closer is recorded normally and lowering, which can see the pair, decides what
+        it meant, so ops *after* a context are modelled as usual.
         """
         return bool(self._ops) and isinstance(self._ops[-1], ContextOpen)
 
@@ -315,8 +313,7 @@ class LazyProxy:
         ``resample``, ``rolling``, ``coarsen``, ``weighted``, ...) — the live object is a
         builder, not a Dataset or DataArray, so the callable test above (which asks the
         *base object*) is meaningless: ``DatasetGroupBy.first`` does not exist on
-        ``Dataset``. Such a
-        call is therefore always recorded, and the *meaning* of the resulting pair is
+        ``Dataset``. Such a call is therefore always recorded, and the *meaning* of the resulting pair is
         settled later by :func:`~xrexpr.lower.to_lower_ir`, which can see both halves at
         once. A pair it fuses is modelled and optimisable; a pair it does not understand
         is demoted to ``Opaque`` — replayed verbatim, correct, merely unoptimised — and in
@@ -325,8 +322,8 @@ class LazyProxy:
         One cost of recording unconditionally in a context: a builder *property* such as
         ``ds.plan.groupby("x").groups`` comes back as a recording wrapper rather than the
         property's value, because telling methods from attributes would mean materialising.
-        It does not work today either (the property branch collects eagerly and the builder
-        has no ``.compute()``).
+        The property branch would not help: it collects eagerly, and the builder has no
+        ``.compute()``.
         """
         # protect internal / dunder attribute lookups
         if name.startswith("_"):
@@ -447,8 +444,8 @@ class LazyProxy:
         Notes
         -----
         Takes calls rather than nodes, so it never needs to know what a node *means* —
-        deciding that is :func:`~xrexpr.lower.emit`'s job, and this stays the short
-        ``getattr`` loop it was when every node was exactly one call.
+        deciding that is :func:`~xrexpr.lower.emit`'s job, and this stays a short
+        ``getattr`` loop.
         """
         obj: xr.Dataset | xr.DataArray = self._base
         for call in calls:

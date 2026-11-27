@@ -1,9 +1,8 @@
 """Tests for the op metadata table.
 
 The headline behaviour is the reduce/scan split — reductions destroy their dim,
-scans keep it — which a single flat "aggregations" set could not express. Each row is
-now a *variant* rather than a record with a ``kind`` string, so that split is a type
-distinction and ``to_opnode``'s dispatch is exhaustive under mypy.
+scans keep it. Each row is a *variant* rather than a record with a ``kind`` string, so
+that split is a type distinction and ``to_opnode``'s dispatch is exhaustive under mypy.
 
 ``CONTEXT_METHODS`` lives here too, and is pinned against the one thing it must agree with
 that no derivation can settle: xarray itself. Agreement with the ``Literal`` that types
@@ -74,9 +73,9 @@ def test_reduce_and_scan_are_distinguished():
 
     Notes
     -----
-    The core fix this table exists for: ``cumsum`` is no longer lumped in with ``mean``,
-    which is what let a rule reorder across an order-significant op. Written as a type
-    distinction, so the two cannot be confused by a mistyped string.
+    Lumping ``cumsum`` in with ``mean`` would let a rule reorder across an
+    order-significant op. Written as a type distinction, so the two cannot be confused by
+    a mistyped string.
     """
     assert type(spec("cumsum")) is not type(spec("mean"))
     assert isinstance(spec("mean"), ReduceSpec)
@@ -88,7 +87,7 @@ def test_reduce_takes_its_dim_spec_second():
 
     Notes
     -----
-    ``reduce(func, dim, ...)`` puts a *function* first (#96). The offset rides on the row
+    ``reduce(func, dim, ...)`` puts a *function* first. The offset rides on the row
     that has the odd signature rather than in a second table keyed by name, so a second
     such method is one more field, not one more lookup.
     """
@@ -139,8 +138,7 @@ def test_every_spec_variant_is_tabulated():
     Notes
     -----
     mypy already rejects a *new* variant with no arm in ``to_opnode`` (the ``match`` is
-    closed with ``assert_never``), which is what the old string ``kind`` could not do.
-    This pins the other direction, which types cannot: a variant that exists but is never
+    closed with ``assert_never``). This pins the other direction, which types cannot: a variant that exists but is never
     tabulated is an arm no call can reach, so it would go quietly dead.
     """
     assert {type(op) for op in OP_TABLE.values()} == set(get_args(OpSpec))
@@ -176,10 +174,8 @@ def test_context_methods_are_context_specs(name):
 
     Notes
     -----
-    It used to be a separate frozenset consulted *before* the kind dispatch, so a name in
-    both tables would have had its ``OpSpec`` silently ignored — a hazard a test had to
-    police. One table per name makes that unconstructible: ``CONTEXT_METHODS`` is now
-    derived from these rows rather than pinned against them.
+    ``CONTEXT_METHODS`` is derived from these rows rather than kept as a separate set, so
+    a name cannot sit in two tables with one of its specs silently ignored.
     """
     assert isinstance(spec(name), ContextSpec)
 

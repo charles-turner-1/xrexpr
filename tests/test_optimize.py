@@ -231,13 +231,13 @@ def test_a_vectorized_dataarray_select_does_not_cross_a_following_select(schema)
 
 
 def test_dataarray_select_then_bare_mean_then_select_raises(schema):
-    """The invalid chain the fix exists for is rejected, not laundered into a replayable plan.
+    """An invalid chain through an orthogonal DataArray select is rejected, not laundered.
 
     Notes
     -----
-    ``isel(time=da)`` used to be misfiled as a dim-dropping ``Scalar``, dropping ``time``
-    from the schema; the bare ``mean()`` then understated ``consumes`` and the trailing
-    ``isel(time=0)`` was silently swapped in front. Now ``time`` survives the select (the
+    Misfiled as a dim-dropping ``Scalar``, ``isel(time=da)`` would drop ``time`` from the
+    schema; the bare ``mean()`` would then understate ``consumes`` and the trailing
+    ``isel(time=0)`` would be silently swapped in front. ``time`` survives the select (the
     orthogonal indexer resizes it), and ``ALL_DIMS`` rejects the trailing select outright.
     """
     da = xr.DataArray([0, 2], dims="time")
@@ -252,9 +252,9 @@ def test_bare_mean_needs_no_schema_to_reject_a_following_select():
     Notes
     -----
     ``ALL_DIMS`` makes the rejection independent of any dim names: whatever dims exist when
-    the reduce runs, it removes all of them, so *every* select dim intersects. Under the old
-    eager expansion ``consumes`` would have been ``frozenset()`` here, and the select would
-    have been swapped in front.
+    the reduce runs, it removes all of them, so *every* select dim intersects. Expanded
+    eagerly against this empty schema, ``consumes`` would be ``frozenset()`` and the select
+    would be swapped in front.
     """
     plan = [_node("mean"), _node("isel", whatever=0)]
     with pytest.raises(InvalidExpressionError):
@@ -388,7 +388,7 @@ def test_generic_pushdown_does_not_cross_a_drop():
     The profitable rewrites next to it (a projection excluding the dropped data vars makes the
     drop redundant; a projection retaining a dropped coord may hop it) turn on the folded
     schema, so they live in the dedicated :func:`~xrexpr.optimize.push_projection_past_drop`
-    rule (#176), not in ``dim_effect``.
+    rule, not in ``dim_effect``.
     """
     assert dim_effect(_node("drop_vars", ["elevation"])).requires is None
 
@@ -422,7 +422,7 @@ def test_generic_pushdown_does_not_cross_a_rename():
     The hazard is a *variable*-key rename -- a projection naming a renamed variable cannot
     precede the rename that mints its new name -- which the dim-keyed pushdown cannot see, so
     no projection crosses via the generic rule. A schema-aware rename/projection rule and the
-    name-translating select cross (``11-relabel-rename-drop.md`` §4) are follow-ups.
+    name-translating select cross (``11-relabel-rename-drop.md`` §4) are not written.
     """
     assert dim_effect(_node("rename", {"tas": "temp"})).requires is None
 
@@ -432,9 +432,9 @@ def test_projection_hops_a_reduce_behind_a_rename(schema):
 
     Notes
     -----
-    As an ``Opaque`` a rename was a trust boundary that blacked out the projection rules for
-    the rest of the plan; as a modelled ``Rename`` the prefix spans it, so the projection
-    reaches the front past the ``mean`` -- the payoff W11 exists for.
+    An ``Opaque`` is a trust boundary that blacks out the projection rules for the rest of
+    the plan; a modelled ``Rename`` is inside the prefix, so the projection reaches the
+    front past the ``mean``.
     """
     plan = [
         _node("rename", {"time": "t"}),
@@ -451,10 +451,10 @@ def test_projection_hops_a_reduce_behind_a_drop(schema):
 
     Notes
     -----
-    When ``drop_vars`` recorded ``Opaque`` it was a trust boundary: ``_trusted_prefix``
-    returned its index and the schema-reading projection rules went dark on everything after
-    it. As a modelled ``Drop`` the prefix spans it, so the projection reaches the front past
-    the ``mean`` (the payoff W11 exists for) -- and once it sits ahead of the drop,
+    Recorded as ``Opaque``, ``drop_vars`` would be a trust boundary: ``_trusted_prefix``
+    would return its index and the schema-reading projection rules would go dark on
+    everything after it. A modelled ``Drop`` is inside the prefix, so the projection reaches
+    the front past the ``mean`` -- and once it sits ahead of the drop,
     :func:`~xrexpr.optimize.push_projection_past_drop` removes the drop of ``elevation``,
     which the projection excludes anyway. So the whole ``drop_vars("elevation").mean("time")
     [["temperature"]]`` collapses to ``[["temperature"]].mean("time")``.
@@ -1251,7 +1251,7 @@ def test_optimize_is_idempotent_with_a_projection(schema):
 
 # --- same-dim composition -------------------------------------------------------
 #
-# The regression these guard: merging a run of selects by ``dict.update`` would let a
+# What these guard: merging a run of selects by ``dict.update`` would let a
 # second indexer on an already-indexed dim *replace* the first instead of composing
 # with it. The later indexer addresses positions within the earlier one's result, so
 # ``isel(time=slice(100, 1000)).isel(time=slice(10, 20))`` is ``slice(110, 120)``, not

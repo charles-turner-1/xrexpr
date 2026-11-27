@@ -9,10 +9,9 @@ The generators are deliberately narrow (see ``_calls``), because a chain that is
 in this module, never expected noise. Two narrowings are worth naming:
 
 - **No dim is indexed by two selects anywhere in the chain** (the ``selected_dims``
-  bookkeeping in ``_calls``). ``merge_adjacent_selects`` *composes* same-dim indexers
-  today — and safely splits the run where composition isn't statically provable — so
-  the original reason for this restriction is gone; it survives as a candidate widening
-  that nobody has done. The restriction is chain-wide rather than run-local, which is
+  bookkeeping in ``_calls``). ``merge_adjacent_selects`` *composes* same-dim indexers —
+  and safely splits the run where composition isn't statically provable — so soundness
+  does not need this restriction; lifting it is a possible widening. The restriction is chain-wide rather than run-local, which is
   worth stating because it is not obvious: the two selects need never be adjacent in
   the chain the user wrote. ``pushdown_selects`` hops a select left past a reduce, so
   ``isel(time=[1]).all(dim=['lat']).isel(time=0)`` becomes a run before it folds.
@@ -20,20 +19,16 @@ in this module, never expected noise. Two narrowings are worth naming:
   manager, so :data:`HAS_DASK` gates the kind out rather than letting a drawn chain
   raise. Where it is installed, both call forms are generated — see :func:`_rechunks`.
 
-``.reduce`` **is** generated, as of #96. It used to be excluded because ``_dim_spec``
-read its first positional — a *function* — as a dim spec; now that the dim spec is read
-from the second, the node is honest and the chains are worth generating. It is drawn
-separately from :data:`REDUCE_NAMES` rather than added to it, because its call shape
-differs (the function comes first) and the builder closers are generated as
-``name(**spec)``.
+``.reduce`` **is** generated. It is drawn separately from :data:`REDUCE_NAMES` rather
+than added to it, because its call shape differs (the function comes first, and the dim
+spec second) and the builder closers are generated as ``name(**spec)``.
 
-**Scans** (``cumsum``/``cumprod``/``diff``, :data:`SCAN_NAMES`) are generated too, as of
-W6. They are order-significant but dim-keeping, so the equality-vs-eager property is what
+**Scans** (``cumsum``/``cumprod``/``diff``, :data:`SCAN_NAMES`) are generated too. They are order-significant but dim-keeping, so the equality-vs-eager property is what
 proves the optimiser hops a *disjoint* select or projection across a scan while leaving an
 intersecting one put — the leave-don't-raise leg the hand-written goldens pin by example.
 
-**Elementwise ops** (``astype``/``fillna``/``clip``/``round``) are generated too, as of
-W5, with scalar arguments only — so they record :class:`~xrexpr.ir.Elementwise` and the
+**Elementwise ops** (``astype``/``fillna``/``clip``/``round``) are generated too, with
+scalar arguments only — so they record :class:`~xrexpr.ir.Elementwise` and the
 equality-vs-eager property covers a select or projection crossing them in arbitrary
 interleavings. The unsafe-argument path (a data- or per-variable-shaped argument demoting
 to :class:`~xrexpr.ir.Opaque`) is left to the hand-written suite; the generator draws only
@@ -44,8 +39,8 @@ positions, labels and scalars. An *orthogonal* one would add nothing anyway — 
 layer normalises it to the very positional indexer already generated (``schema``'s
 ``_orthogonal_advanced``), so it is exactly a positional select the suite covers. The
 *vectorized* form, which demotes to :class:`~xrexpr.ir.Opaque`, is pinned by the
-hand-written suite as the unsafe-elementwise path above is; its full dim modelling is still
-open (#60).
+hand-written suite as the unsafe-elementwise path above is; its full dim modelling is
+#60.
 
 **Scattered NaNs** in the float data (see :func:`datasets`) are what give the
 equality-vs-eager property its teeth for the elementwise ops above: ``fillna`` and every
@@ -186,7 +181,7 @@ class Call(dict):
     when spelled positionally: ``groupby("lat")``'s grouper is read off ``args[0]``, so a
     generated ``groupby(group="lat")`` would refuse to fuse and the builder widening would
     quietly test nothing. (That refusal is safe but avoidable — ``lower._grouper_dims``
-    could read the ``group=`` keyword too, which xarray accepts. Noted, not fixed here.)
+    could read the ``group=`` keyword too, which xarray accepts.)
     """
 
     def __init__(self, name: str, *args: object, **kwargs: object) -> None:
@@ -330,8 +325,7 @@ def datasets(draw, dated=False):
     The resolution of the index here is **not pinned**, deliberately: it is whatever the
     installed pandas produces (``us`` on pandas 3, ``ns`` on pandas 2), so both are
     exercised across the supported matrix rather than only the newest. That makes
-    :func:`_label` load-bearing — see its docstring for the trap, which was live and
-    invisible until CI ran the older environment.
+    :func:`_label` load-bearing — see its docstring for the trap.
     """
     ndim = draw(st.integers(min_value=2, max_value=3))
     dims = DIM_NAMES[:ndim]
@@ -362,8 +356,8 @@ def datasets(draw, dated=False):
             )
             arr.flat[list(holes)] = np.nan
     # A **non-dim coordinate** on the last dim — the docs' ``region(lat)``, and everyday
-    # xarray. It is what the builder generators were blind to until issue #90: a grouper's
-    # *name* does not say which dim it consumes, because ``groupby("region")`` groups along
+    # xarray. It exercises the fact that a grouper's *name* does not say which dim it
+    # consumes, because ``groupby("region")`` groups along
     # the dim ``region`` is defined on and mints ``region`` in its place. Two labels
     # whatever the size, so the grouping really aggregates rather than being the identity.
     # Numeric region *ids* rather than the docs' ``"a"``/``"b"`` strings, because the coord
@@ -389,8 +383,8 @@ def _label(value):
     at microsecond resolution but to a bare ``int`` of nanoseconds-since-epoch at
     nanosecond resolution, because ``datetime`` cannot represent the latter. Which one a
     ``pd.date_range`` produces depends on the pandas version — pandas 3 gives ``us``,
-    pandas 2 gives ``ns`` — so ``sel(time=946684800000000000)`` reached xarray on the older
-    pinned environment and raised ``KeyError``, while every newer one passed.
+    pandas 2 gives ``ns`` — so on pandas 2 ``sel(time=946684800000000000)`` reaches xarray
+    and raises ``KeyError``.
 
     ``pd.Timestamp`` is exact at either resolution and is a label ``sel`` accepts, so it
     sidesteps the version split rather than pinning around it. Numbers keep ``.item()``,
@@ -476,8 +470,7 @@ NON_FLOAT_EMPTY_UNSAFE_REDUCES = frozenset({"median"})
 #: reduce passes ``dim=[]`` down to any variable that lacks every dim it named, and
 #: ``std``/``var`` then build a 0-d result while still claiming the variable's dims:
 #: ``ValueError: dimensions ('lat',) must have the same length as ... ndim=0``. Reachable
-#: only with a variable that lacks a dim — i.e. only since the generator grew one; and
-#: ``rolling``/``coarsen`` are unaffected (they only touch variables having the window dim).
+#: only with a variable that lacks a dim; ``rolling``/``coarsen`` are unaffected (they only touch variables having the window dim).
 #:
 #: **This is a numbagg bug, not an xarray one** (``07-small-wins.md`` §8): numbagg reads
 #: ``axis=()`` as ``axis=None`` and hands back a scalar, and xarray raises on being given
@@ -602,10 +595,10 @@ def _builder_pair(draw, obj, kind=None):
         if dim == "time" and _has_datetime_index(obj):
             groupers += ["time.month", "time.day"]
         # The non-dim coordinate groupers defined on *this* dim, so the pair's group dim is
-        # still ``dim`` and the ``reduced`` bookkeeping below stays correct. This is the
-        # widening issue #90 asked for: pre-fix these fused with ``group_dim="region"`` and
-        # ``test_tracked_schema_agrees_with_evaluation`` catches it; post-fix they refuse and
-        # the equality property covers them through the opaque fallback.
+        # still ``dim`` and the ``reduced`` bookkeeping below stays correct. They refuse to
+        # fuse, so the equality property covers them through the opaque fallback; one that
+        # fused with ``group_dim="region"`` would fail
+        # ``test_tracked_schema_agrees_with_evaluation``.
         coord_groupers = _coord_groupers(obj, dim)
         groupers += coord_groupers
         # positional: the grouper is read off ``args[0]`` (see ``Call``)
@@ -632,8 +625,8 @@ def _builder_pair(draw, obj, kind=None):
     # ``_closer_dims`` draws over is stated in terms of the group dim, and under a coordinate
     # grouper the closer cannot name it — ``groupby("region").mean("region")`` is not the
     # aggregation case, and naming the underlying dim instead is a shape whose eager
-    # behaviour would have to be established before it could be a reference. Bare is the
-    # case #90 is about, and unambiguously legal.
+    # behaviour would have to be established before it could be a reference. Bare is
+    # unambiguously legal.
     spec = {} if coord_grouper else draw(_closer_dims(obj, kind, dim))
     reduced = None
     if kind in {"groupby", "resample"}:
@@ -690,8 +683,8 @@ def _closer_dims(draw, obj, kind, dim):
         # as :data:`EMPTY_AXIS_UNSAFE_REDUCES` -- the chains excluded are the ones whose
         # eager *reference* is broken. ``07-small-wins.md`` §8 states the sharpened
         # contract; the behaviour is pinned by hand in ``test_optimize``/``test_accessor``.
-        # The hop itself is still well covered here: it fires on ~21% of generated
-        # weighted-plus-projection plans, all of which assert equality with eager.
+        # The hop itself is still covered here: the weighted-plus-projection plans that do
+        # hop all assert equality with eager.
         shared = set(obj.sizes)
         for var in obj.data_vars.values():
             shared &= set(var.dims)
@@ -785,8 +778,8 @@ def _rechunks(draw, obj):
     obj : xr.Dataset
         The dataset the call will be applied to, drawn against its *current* sizes. Every
         dim may be empty on xarray 2026.09.0 and later. That version works around dask's
-        auto-chunking divide-by-zero for a zero-length dimension; older xarray versions
-        keep the historical exclusion in :func:`_calls`.
+        auto-chunking divide-by-zero for a zero-length dimension; on older xarray versions
+        :func:`_calls` draws no ``chunk`` once a dim is empty.
 
     Returns
     -------
@@ -880,8 +873,7 @@ def _calls(draw, ds, max_ops=4, builders=False):
             # A **list** key only, so the result stays a Dataset. A bare name yields a
             # DataArray, whose downstream algebra is a different thing entirely (no
             # ``data_vars``, and ``__getitem__`` becomes indexing rather than projection);
-            # that case is covered by the hand-written suites, and ``.plan`` is not even
-            # registered for DataArray yet (``07-small-wins.md`` §5).
+            # that case is covered by the hand-written suites.
             names = sorted(map(str, current.data_vars))
             if not names:
                 break
@@ -1000,7 +992,7 @@ def _calls(draw, ds, max_ops=4, builders=False):
             )
             name = draw(st.sampled_from(names))
             # ``keepdims=True`` keeps the named dims at size 1 rather than removing them
-            # (#117). The reduce stays a ``Reduce`` and its chains optimise, so the tracked
+            # The reduce stays a ``Reduce`` and its chains optimise, so the tracked
             # schema must report those dims at size 1 exactly -- which the size-exactness
             # property is where a wrong arm would surface. The same xarray limitations still
             # apply (``max`` over an empty dim raises with or without ``keepdims``), so the
@@ -1014,9 +1006,8 @@ def _calls(draw, ds, max_ops=4, builders=False):
                 ... if set(dims) == set(current.sizes) and draw(st.booleans()) else dims
             )
             # ``.reduce`` is spelled ``reduce(func, dim)``, and generated **positionally**
-            # on purpose: that is the shape #96 fixed, where the function used to be read
-            # as the dim spec. The kwarg spelling was never affected and is pinned by the
-            # hand-written suite instead.
+            # on purpose: that is the spelling where the function could be misread as the
+            # dim spec. The kwarg spelling is pinned by the hand-written suite instead.
             call = (
                 Call(name, REDUCE_METHOD_FUNC, spec, **extra)
                 if name == "reduce"
@@ -1100,7 +1091,8 @@ def coord_projection_plans(draw):
 
 @st.composite
 def drop_projection_plans(draw):
-    """A plain chain ending in the ``drop_vars(names)`` then ``[[keep]]`` pair #176 rewrites.
+    """A plain chain ending in the ``drop_vars(names)`` then ``[[keep]]`` pair that
+    ``push_projection_past_drop`` rewrites.
 
     ``keep`` is a list-form data-variable projection; ``names`` is drawn from the names that
     projection excludes -- other data variables (redundant, the drop is eliminated) and
@@ -1261,16 +1253,16 @@ def test_optimised_plan_matches_eager_evaluation_under_a_tiny_chunk_target(case)
 
     Notes
     -----
-    This is what makes the generated chains a real test of issue #121 rather than a vacuous
-    one. Dask's ``auto_chunks`` pins every dim below ``limit ** (1 / ndim)`` and returns
+    This is what makes the generated chains a real test of the ``"auto"`` barrier rather
+    than a vacuous one. Dask's ``auto_chunks`` pins every dim below ``limit ** (1 / ndim)`` and returns
     *before* it can divide, so at the default 128 MiB target these 1-to-5-long dims survive
     an emptied neighbour by arithmetic — a rule that made the hop would pass here all day.
     At 1 kB they do not.
 
     The setting stands in for a multi-hundred-megabyte fixture, and it names the condition
     the crash actually depends on, which a fixture would only imply. It is also why
-    ``_calls`` no longer refuses to draw an emptying select once a ``chunk`` is in the
-    chain: that exclusion was #121's, and this is the property that would report it back.
+    ``_calls`` may draw an emptying select once a ``chunk`` is in the chain: a rule that
+    wrongly hopped one is what this property reports.
     """
     import dask
 
@@ -1462,15 +1454,16 @@ def test_tracked_schema_agrees_with_evaluation(case):
       about — ``consumes`` and the pushdown conflict check are name-based.
     - **coords**: exactly the result's, not merely a subset. A scalar select drops the dim
       while xarray keeps a scalar coordinate behind, and an aggregating op removes that
-      coordinate outright — both are modelled now that a coordinate is a variable with
-      dims, so there is nothing left to be conservative about.
+      coordinate outright — both are modelled, since a coordinate is a variable with
+      dims.
     - **variables**: each with **the dims it spans**, not merely by name. The store is
       per-variable, so a name-only comparison cannot see a variable whose dims are wrong
       — and the dataset-level dim set cannot either, as long as some *sibling* still
-      carries the dim. That is exactly how issue #125 survived here: the ``WeightedReduce``
-      arm skipped minting ``time`` onto ``elevation`` because ``temperature`` still had it,
-      and every dataset-level fact stayed true. It became visible only through a trailing
-      ``[["elevation"]]``, a conjunction this generator draws roughly once in 20,000 plans.
+      carries the dim. A ``WeightedReduce`` arm that skipped minting ``time`` onto
+      ``elevation`` because ``temperature`` still had it would keep every dataset-level fact
+      true; only a trailing ``[["elevation"]]`` shows it, a conjunction this generator
+      rarely draws (see
+      ``test_every_builder_kind_is_generated_and_replays_equal_to_eager``).
 
     Dim *order* is deliberately not asserted: ``Dataset.sizes`` does not promise the
     insertion order the schema threads, and ``_minted`` sorts minted dims by ``str`` to
@@ -1499,11 +1492,10 @@ def test_tracked_schema_agrees_with_evaluation(case):
 
     assert set(schema.sizes) == set(result.sizes)
 
-    # Every tracked coordinate, not just the dim coordinates — the restriction issue #109
-    # asked for is gone, because coordinates are variables now and their lifetimes are
-    # modelled per-op: an aggregating op drops one over the dim it aggregates, an indexing
-    # one demotes it to 0-d. Asserted **exactly** rather than as a subset, which the
-    # bare-name ``coords`` set could never have supported.
+    # Every tracked coordinate, not just the dim coordinates: coordinates are variables and
+    # their lifetimes are modelled per-op -- an aggregating op drops one over the dim it
+    # aggregates, an indexing one demotes it to 0-d. Asserted **exactly** rather than as a
+    # subset.
     #
     # Checked unconditionally on every version. ``cumsum``/``cumprod`` drop the scanned
     # dim's coordinates on xarray before the 2026.04.0 retention fix (pull 10987) and keep
@@ -1564,8 +1556,8 @@ def test_sel_label_slice_size_is_tracked_correctly():
     *unsafe* direction, since it is the error a size-driven rule would act on.
 
     **Kept xfail deliberately** (``planning/roadmap/03-schema-sizes.md`` §5.5). The size
-    is ``None`` rather than ``0``: the unsafe answer is gone, and this test's stricter
-    claim — that the size is tracked *exactly* — remains unmet, so the marker stays.
+    is ``None``, not the unsafe ``0``, but this test's stricter claim — that the size is
+    tracked *exactly* — is unmet, so the marker stays.
     Reaching the exact 2 means reading ``ds.indexes["lat"]`` at ``apply_schema`` time,
     which is a separate call about how far the schema layer may consult coordinate
     values; ``03-schema-sizes.md`` §2 opens that door for lowering's own use but does
@@ -1635,10 +1627,9 @@ def test_every_builder_kind_is_generated_and_replays_equal_to_eager(data, kind):
     :func:`test_tracked_schema_agrees_with_evaluation`, and for the reason this test
     exists: each fused arm mints or resizes dims on its own terms, and asking for the kind
     by name is what makes that arm's schema checked *every run* rather than on the ~9% of
-    random chains that happen to contain one. Issue #125 — a weight dim minted onto the
-    dataset instead of onto each variable — is caught by ~12% of the ``weighted`` pairs
-    drawn here, so this parametrisation fails essentially every run, where the general
-    property found it in none of 20,000 plans.
+    random chains that happen to contain one. A weight dim minted onto the dataset instead
+    of onto each variable, for instance, is caught by a good share of the ``weighted``
+    pairs drawn here, where the general property almost never draws the conjunction.
     """
     ds = data.draw(datasets(dated=True))
     pair = data.draw(_builder_pair(ds, kind=kind))
@@ -1688,7 +1679,7 @@ def test_a_coord_projection_drops_its_input_and_replays_equal(case):
 
 @given(drop_projection_plans())
 def test_a_drop_before_a_projection_is_absorbed_and_replays_equal(case):
-    """Anti-vacuity plus value: the ``drop_vars`` then projection pair fires #176 and preserves the answer.
+    """Anti-vacuity plus value: the ``drop_vars`` then projection pair fires ``push_projection_past_drop`` and preserves the answer.
 
     ``push_projection_past_drop`` fires on no random chain reliably -- the ``(Drop, Project)``
     adjacency with the right schema shape is too rare -- so it is asked for by name here, like
