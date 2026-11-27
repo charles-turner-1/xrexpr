@@ -24,6 +24,8 @@ import numbers
 from dataclasses import dataclass
 from typing import Any
 
+from xrexpr.payload import Payload
+
 __all__ = [
     "Auto",
     "BlockSeq",
@@ -244,8 +246,9 @@ class OpaqueChunk:
 
     Attributes
     ----------
-    value : Any
-        The spec, exactly as it was passed to ``chunk``.
+    value : Payload[Any]
+        The spec, exactly as it was passed to ``chunk``. A :data:`~xrexpr.payload.Payload`:
+        the Rust reasoner never reads it.
 
     Notes
     -----
@@ -257,7 +260,7 @@ class OpaqueChunk:
     conditional hashability ``ir.py``'s module docstring already describes.
     """
 
-    value: Any
+    value: Payload[Any]
 
     def to_raw(self) -> Any:
         """Return the xarray-facing value: the spec itself.
