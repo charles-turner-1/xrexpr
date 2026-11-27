@@ -27,7 +27,7 @@ See ``docs/internals/values.md``.
 import numbers
 from abc import ABC, abstractmethod
 from collections.abc import Hashable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 import numpy as np
@@ -339,6 +339,10 @@ class Label(GenericIndex):
     value : Payload[Any]
         The label, label slice or label sequence, verbatim. A
         :data:`~xrexpr.payload.Payload`: the Rust reasoner sees only :attr:`known_size`.
+    known_size : int or None
+        The number of labels for an array, list or tuple of labels; ``None`` otherwise
+        (a single label slice, whose length depends on coordinate values). Derived from
+        :attr:`value`, never passed in.
     drops_dim : bool
         Always ``False``. A scalar label is a :class:`Scalar`, so anything that reaches
         this variant keeps its dim.
@@ -353,10 +357,20 @@ class Label(GenericIndex):
     values. ``apply_schema`` doesn't ask: it returns ``None`` (unknown) for any slice
     under a ``sel``, including this variant. :meth:`size`'s keep-the-current-size
     fallback is only for callers that go around the schema layer.
+
+    ``known_size`` is a stored field (``init=False``) rather than a property so it survives
+    the Rust boundary: there :attr:`value` is replaced by a
+    :class:`~xrexpr.payload.PayloadRef`, and a property would then compute ``None``. Same
+    pattern as ``Rechunk.uniform``: derived in ``__post_init__``, so it can't disagree with
+    :attr:`value`.
     """
 
     value: Payload[Any]
+    known_size: int | None = field(init=False, default=None)
     drops_dim: ClassVar[bool] = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "known_size", _label_count(self.value))
 
     def size(self, current: int) -> int:
         """Return the labelled dim's length, exactly where the labels are listed.
@@ -377,22 +391,6 @@ class Label(GenericIndex):
         return (
             ks if ks is not None else current
         )  # a label slice needs coord values to size — leave it unchanged
-
-    @property
-    def known_size(self) -> int | None:
-        """Return the labelled dim's length, if the labels are listed.
-
-        Returns
-        -------
-        int | None
-            The sequence's own length for an array, list or tuple of labels; ``None``
-            otherwise.
-        """
-        if isinstance(self.value, np.ndarray):
-            return int(self.value.size)
-        if isinstance(self.value, (list | tuple)):
-            return len(self.value)
-        return None
 
     def to_raw(self) -> Any:
         """Return the xarray-facing value: the label payload itself.
@@ -492,6 +490,26 @@ class Advanced(GenericIndex):
 #: One dim's indexer, as a closed union. The optimiser and schema layers ``match`` on
 #: it; :func:`classify` is the only way to build one from a raw value.
 Indexer = Scalar | ForwardSlice | GeneralSlice | Positions | Mask | Label | Advanced
+
+
+def _label_count(value: Any) -> int | None:
+    """Count the labels in a ``Label``'s value, if they're listed.
+
+    Parameters
+    ----------
+    value : Any
+        The label, label slice or label sequence.
+
+    Returns
+    -------
+    int or None
+        The length of an array, list or tuple of labels; ``None`` otherwise.
+    """
+    if isinstance(value, np.ndarray):
+        return int(value.size)
+    if isinstance(value, (list | tuple)):
+        return len(value)
+    return None
 
 
 def _is_int(x: Any) -> bool:
