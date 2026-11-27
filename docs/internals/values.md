@@ -1,65 +1,64 @@
-# The value taxonomies
+# The value types
 
-Two of the package's operations carry an argument that is a sum type in disguise:
+Two operations carry an argument that is really one of a fixed set of shapes:
 
-- `Select.indexer` maps each dim to one **indexer** value: a position, a slice, a
-  sequence, an array, a coordinate label.
-- `Rechunk.chunks` maps each dim to one **chunk spec**: a size, a symbolic request, an
-  explicit block sequence.
+- `Select.indexer` maps each dim to one **indexer**: a position, a slice, a sequence, an
+  array, or a coordinate label.
+- `Rechunk.chunks` maps each dim to one **chunk spec**: a size, a symbolic request like
+  `"auto"`, or an explicit list of block sizes.
 
-Held as `Any`, either one forces every call site in `ir.py`, `optimize.py` and
-`schema.py` to re-derive the shapes by hand. `indexers.py` and `chunks.py` make each
-taxonomy a *type* instead. They were written months apart and ended up with the same four
-design moves, which is the interesting part.
+Stored as `Any`, either would force every user in `ir.py`, `optimize.py` and `schema.py`
+to work out the shape by hand. `indexers.py` and `chunks.py` turn each into a proper type
+instead. They were written months apart and ended up following the same four rules.
 
-## Move 1: `classify` is the sole constructor
+## Rule 1: one function builds every value
 
-One function per taxonomy decides which variant a raw value is, and every raw value goes
-through it. There is no second place where a value is sorted, and no call site guesses.
+One function per type decides which variant a raw value is (`classify` and
+`classify_chunk`), and every raw value goes through it. Nothing else sorts values, and no
+caller guesses.
 
-Both are **total**: anything the taxonomy cannot model gets the escape-hatch variant
-rather than an error. That matters because classification happens at record time, on
-whatever the user handed the accessor, and refusing there would turn a chain xarray would
-have accepted into a chain `xrexpr` rejects.
+Both accept anything. A value the type can't model gets the fallback variant rather than
+an error. That matters because classification happens at recording time, on whatever the
+user passed. Raising there would reject a chain xarray would have accepted.
 
-## Move 2: what follows becomes a method, not a re-decision
+## Rule 2: facts about a value are methods
 
-Each variant answers the questions its consumers ask:
+Each variant answers the questions its users ask:
 
 | | indexers | chunk specs |
 |---|---|---|
 | does it drop the dim? | `drops_dim` | n/a |
 | how long is the dim afterwards? | `size()` | n/a |
-| what does replay get handed? | `to_raw()` | `to_raw()` |
+| what does replay pass to xarray? | `to_raw()` | `to_raw()` |
 
-`to_raw` is the one both need, and it exists because a rewrite may *rebuild* a node's
-`args` from its normalised field: a select that merged with another, a rechunk that lost
-a dim to a hoisted select. Replay must then be handed the exact xarray-facing value, and
-the variant is what knows it.
+Both need `to_raw`, because replay rebuilds each call from the node's parsed fields. A
+select merged with another, or a rechunk that lost a dim to a select moved in front of
+it, has to be turned back into exactly the value xarray expects, and the variant knows
+what that is.
 
-## Move 3: policy stays with the optimiser
+## Rule 3: decisions stay in the optimiser
 
-Neither module models what the optimiser should *do*.
+Neither module decides what the optimiser should *do*.
 
-Whether two indexers **compose** is not on `Indexer`; whether a chunk spec may be
-**crossed** is not on `ChunkSpec`. Both are policies the optimiser chooses to prove, not
-intrinsic facts about a value, so both stay a `match` in `optimize.py`, closed with
-`assert_never` so that a new variant fails type-checking until someone decides which side
-of the line it falls on.
+Whether two indexers **compose** isn't a method on `Indexer`, and whether a chunk spec
+may be **crossed** isn't a method on `ChunkSpec`. Both are choices the optimiser makes
+about what it's willing to prove, not facts about a value. So both are a `match` in
+`optimize.py`, closed with `assert_never`, so a new variant fails type-checking until
+someone decides which side it belongs on.
 
-What the value modules guarantee is the *discriminant* that policy matches on. No variant
-carries a flag saying what should therefore happen to it.
+The value modules just provide the variants those decisions are based on. No variant has a
+flag saying what should happen to it.
 
-## Move 4: one escape hatch per layer
+## Rule 4: one fallback per level
 
-`Label` for indexers, `OpaqueChunk` for chunk specs, and `Opaque` for op kinds one level
-up. The same idea at three depths: a variant meaning "this is real, it will replay
-verbatim, and nothing may be inferred from it."
+`Label` for indexers, `OpaqueChunk` for chunk specs, and `Opaque` for whole operations.
+The same idea at three levels: "this is real, it will replay verbatim, and nothing may be
+inferred from it."
 
-That is what lets `classify` be total, and it is why an unrecognised value costs a rewrite
-rather than correctness.
+That's what lets the classify functions accept anything, and why an unrecognised value
+costs a rewrite rather than correctness.
 
-## The indexer taxonomy
+## Indexers
 
 ```{mermaid}
 flowchart TB
@@ -92,30 +91,29 @@ flowchart TB
     style keeps fill:#d8f3dc,stroke:#333,color:#000
 ```
 
-Exactly one variant drops its dimension, which is the fact `Select.consumes` is derived
-from. Order matters twice in that tree: a boolean sequence is a `Mask` and not
-`Positions`, even though `bool` subclasses `int`, so the all-boolean test runs first; and
-a 0-d array is a `Scalar` rather than a one-element enumeration, so the rank check runs
-before the dtype dispatch.
+Only one variant drops its dimension, and `Select.consumes` is derived from that. The
+order of the checks matters in two places:
 
-**`ForwardSlice` earns its own variant** so that the "forward, non-negative bounds"
-carve-out the composer needs is a *constructor invariant* (a `ForwardSlice` cannot be
-built with a negative bound) rather than a guard re-run at every call site. `GeneralSlice`
-takes every other integer slice, and a slice with a non-integer bound is a label slice,
-which is not positional at all.
+- A boolean sequence is a `Mask`, not `Positions`, even though `bool` is a subclass of
+  `int`. So the all-boolean check runs first.
+- A 0-d array is a `Scalar`, not a one-element list, so the rank check runs before the
+  dtype checks.
 
-**`Label` is the escape hatch.** A `sel` coordinate label (a string, a timestamp, a tuple
-key, a label slice, a label sequence) is genuinely open and cannot be reasoned about
-positionally.
+**`ForwardSlice` is its own variant** so that "forward, non-negative bounds", which the
+composer relies on, is guaranteed by the constructor (you can't build a `ForwardSlice`
+with a negative bound) rather than re-checked everywhere. `GeneralSlice` takes every
+other integer slice. A slice with a non-integer bound is a label slice, which isn't
+positional at all.
 
-`size()` has a boundary worth noting: sizing a dim whose current length is unknown, or a
-`sel` label slice, is not this layer's call. Those answer "unknown" one level up, in the
-guard that wraps every call to it.
+**`Label` is the fallback.** A `sel` coordinate label (a string, a timestamp, a tuple key,
+a label slice, a list of labels) can't be reasoned about positionally.
 
-## The chunk taxonomy
+`size()` doesn't handle unknowns. Sizing a dim of unknown length, or a `sel` label slice,
+is answered as "unknown" one level up, by the check that wraps every call to `size()`.
 
-Seven variants, and the same tree shape, but grouped by a discriminant that has no
-counterpart on the indexer side.
+## Chunk specs
+
+Seven variants, in a similar tree, but grouped by a property indexers don't have.
 
 ```{mermaid}
 flowchart TB
@@ -153,45 +151,43 @@ flowchart TB
     style esc fill:#eeeeee,stroke:#333,color:#000
 ```
 
-The variants are one per *behaviour*, not one per spelling, and the split was checked
-against the pinned xarray and dask rather than reasoned about. The case that settles it:
-on an already-chunked dim, `None` leaves the existing blocks alone and `-1` collapses them
-into one. So `NoChange` and `FullDim` both exist.
+There's one variant per *behaviour*, not per spelling, and the split was checked against
+the pinned xarray and dask rather than reasoned about. The deciding case: on an
+already-chunked dim, `None` leaves the existing blocks alone, while `-1` merges them into
+one. So `NoChange` and `FullDim` are separate.
 
 ### Extent-dependence is the discriminant
 
-`Auto`, `ByteSize` and `BlockSeq` are the specs dask resolves by **measuring the array it
-is handed**. What they mean therefore changes when a select changes the data; a size,
+`Auto`, `ByteSize` and `BlockSeq` are the specs dask resolves by **measuring the array
+it's given**. So their meaning changes if a select changes the data first. A fixed size,
 `-1` and `None` mean the same thing on any array.
 
-That, and nothing else, is what the rechunk pushdown matches on. Note what it does *not*
-do: it reads no extent, no size and no schema, so the barrier follows from the spec alone
-and the "no rewrite reads a size" property holds unqualified.
+That's the only thing the rechunk pushdown checks. It reads no size and no schema, so the
+decision comes from the spec alone, and "no rule reads a size" holds without exceptions.
 
-The three extent-dependent variants differ only in **how** they would fail, which is why
-they share an arm despite looking unalike:
+The three extent-dependent variants share a rule even though they look different. They
+only differ in **how** they'd fail if a select moved in front:
 
 | variant | what a select in front would cause |
 |---|---|
-| `BlockSeq` | cannot replay at all: the blocks no longer sum to the dim |
-| `ByteSize` | replays to a different answer: the byte target divides a different extent |
+| `BlockSeq` | can't replay at all: the blocks no longer add up to the dim |
+| `ByteSize` | replays to a different answer: the byte target divides a different size |
 | `Auto` | either of the above, or a `ZeroDivisionError` if the select empties a dim |
 
-The `Auto` case is the one that forced the whole variant to be a barrier rather than some
-narrower condition. Whether it raises depends on dask's configured chunk size and on the
-array's rank (nothing a plan can read), so no narrower discriminant exists.
+`Auto` is why the whole variant blocks selects rather than some narrower condition.
+Whether it raises depends on dask's configured chunk size and on the number of dims, and
+a plan can't see either. (The one exception: on xarray 2026.09.0 and later, a select that
+provably empties the dim may cross, because xarray handles that case before dask sees it.)
 
-`OpaqueChunk` is reached by a spelling xarray tolerates but does not document (a whole
-float; `True`, which asks for blocks of 1) and by one it rejects outright (`0`, `-2`, a
-set). Neither is modelled: the first is a spelling xarray's own API does not offer, and
-the second is an error that stays the caller's to see. Recording it opaquely leaves the
-rechunk a barrier and lets the failure surface at replay in xarray's words, exactly as it
-would have eagerly.
+`OpaqueChunk` catches two kinds of value: spellings xarray tolerates but doesn't document
+(a whole float, or `True`, which asks for blocks of 1), and ones it rejects (`0`, `-2`, a
+set). Neither is modelled. Recording them opaquely makes the rechunk a barrier, and any
+error comes from xarray at replay, in its own words, as it would have eagerly.
 
-A byte-target string is never opaque even when it is nonsense. It is a `ByteSize`, and
-whether it parses is dask's judgement at replay, for the same reason.
+A byte-target string is never opaque, even when it's nonsense. It's a `ByteSize`, and
+whether it parses is left to dask at replay, for the same reason.
 
-## Where the user-facing version lives
+## The user-facing version
 
-[Rechunking](../guide/rechunking.md) walks the chunk taxonomy with an executed plan per
-variant.
+[Rechunking](../guide/rechunking.md) walks through the chunk spec variants with a real
+plan for each.

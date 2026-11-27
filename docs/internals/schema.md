@@ -1,13 +1,12 @@
 # The logical schema
 
 `SchemaState` is an immutable snapshot of a dataset's *logical* shape at one point in a
-plan: which variables exist, which dims each spans, which names are coordinates, and how
-big the dims are.
+plan: which variables exist, which dims each one spans, which names are coordinates, and
+how big the dims are.
 
-It holds **no array data**, and that is the whole point. The `.plan` proxy starts from a
-real dataset, so this much can be folded forward through a plan without touching a single
-value. That is what lets a rule know the shape each node sees, and what a symbolic
-`ALL_DIMS` is finally resolved against.
+It holds **no array data**. The `.plan` proxy starts from a real dataset, so this much can
+be tracked through a plan without reading a single value. That's how a rule knows the
+shape each node sees, and what a symbolic `ALL_DIMS` is resolved against.
 
 ```python
 @dataclass(frozen=True)
@@ -17,61 +16,58 @@ class SchemaState:
     sizes: frozendict[Hashable, int | None]
 ```
 
-All three fields are coerced to immutable containers on construction, so a snapshot is
-hashable and safe to thread through a plan.
+All three fields are converted to immutable containers on construction, so a snapshot is
+hashable and safe to pass around.
 
-## Variables are the store; dims are derived
+## Variables are stored; dims are derived
 
-`variables` maps **every** name (coordinate or not) to the dims it spans. Dim existence
-is not stored anywhere: a dim exists exactly when some variable spans it.
+`variables` maps **every** name, coordinate or not, to the dims it spans. Which dims
+exist isn't stored anywhere: a dim exists exactly when some variable spans it.
 
-That mirrors `xr.Dataset`, which keeps `_variables` plus `_coord_names` and derives
-`.dims`, and it is load-bearing rather than cosmetic. Storing dims separately would mean
-storing one fact twice, and a schema could then say `sizes={"time": 4}` while a variable
-spanned `("time", "lat")`, a phantom `lat`, dutifully reported to any rule that asked.
-Deriving makes that state *unconstructible* rather than merely unlikely, which is the same
-trade the `assert_never` discipline makes elsewhere in the package.
+That's how `xr.Dataset` works too (it stores `_variables` and `_coord_names`, and derives
+`.dims`), and it matters. Storing dims separately would store the same fact twice. A
+schema could then say `sizes={"time": 4}` while a variable spans `("time", "lat")`: a
+phantom `lat` that would be reported to any rule that asked. Deriving the dims makes that
+state impossible to build, not just unlikely.
 
-`data_vars` is derived the same way, `variables` minus `coord_names`. It is what makes
-variable-level reasoning possible at all: whether a projection may hop left past an op
-depends on whether the projected subset still carries the dims that op names.
+`data_vars` is derived the same way, as `variables` minus `coord_names`. That's what makes
+variable-level rules possible: whether a projection may move left past an op depends on
+whether the kept variables still have the dims that op names.
 
-Coordinates are modelled as **variables with dims**, not as bare names. Without that,
-`apply_schema` could not state their lifetimes: an aggregating op drops a coordinate over
-the dimension it aggregates while an indexing op keeps it, demoted to 0-d, a distinction
-that is inexpressible if a coordinate has no dims to lose.
+Coordinates are stored as **variables with dims**, not bare names. Otherwise
+`apply_schema` couldn't track their lifetimes. An aggregating op drops a coordinate over
+the dimension it aggregates, while an indexing op keeps it as a 0-d coordinate. You can't
+express that if a coordinate has no dims to lose.
 
-`coord_names` is a *role*, not a type, for the same reason `xr.Dataset` treats it as one:
-`reset_coords` moves a name between the two sets without touching the variable.
+`coord_names` is a *role*, not a different kind of variable, as in `xr.Dataset`:
+`reset_coords` moves a name between the two sets without changing the variable.
 
-## `sizes` answers *how big*, never *which*
+## `sizes` says *how big*, never *which*
 
-There is deliberately no `dims` attribute. That name meant both things before the
-variables store existed, and this class is now free of the ambiguity, so it is not
-reintroduced under a familiar spelling.
+There's deliberately no `dims` attribute, because that name could mean either "which dims
+exist" or "how big they are". `dim_names` answers the first, `sizes` the second.
 
-A size of `None` means **don't know**: the dim exists, but its extent is not statically
-evident. Callers must read that as "no rewrite", never as *size zero*. Under-reporting a
-size is the unsafe direction, because it is the one a rewrite could act on.
+A size of `None` means **don't know**: the dim exists, but its length can't be known
+statically. Callers must treat it as "no rewrite", never as size zero. Under-reporting a
+size is the dangerous direction, because a rewrite could act on it.
 
 In fact **no optimiser rule reads a size at all.** Every rule reasons about dimension
-*names*, and a property test pins that by blanking every size in the schema and demanding
-the same output. The rechunk pushdown is the rule that most looks like it should need an
-extent. It doesn't; it decides from
-[the chunk spec alone](values.md#extent-dependence-is-the-discriminant).
+*names*. A property test checks this by blanking every size in the schema and requiring
+the same output. The rechunk pushdown looks like it should need sizes, but it doesn't: it
+decides from [the chunk spec alone](values.md#extent-dependence-is-the-discriminant).
 
 ## The optimiser owns the fold
 
-`to_opnode` is a pure function of one call, so nothing is resolved at record time against
-a schema that would only be a guess about where the op will run. The fold lives in
-`optimize._schemas` instead, one fold, in the stage that also knows how far it can be
+`to_opnode` handles one call at a time, so nothing is resolved at recording time against
+a schema that would only be a guess about where the op ends up running. The fold lives in
+`optimize._schemas` instead: one fold, in the stage that also knows how far it can be
 trusted.
 
-Three pieces make up the module:
+The module has three main pieces:
 
 - **`SchemaState`**: the immutable snapshot.
-- **`apply_schema`**: the next snapshot after one `Op` node is applied.
-- **`to_opnode`**: normalise a raw recorded call into that `Op` variant.
+- **`apply_schema`**: the next snapshot after one node is applied.
+- **`to_opnode`**: turns a raw recorded call into its node.
 
-Where the boundary of trust falls, and why `Opaque` moves it, is on
+Where the trust boundary falls, and why an `Opaque` moves it, is on
 [the optimiser page](optimiser.md#the-schema-fold-and-how-far-it-can-be-trusted).

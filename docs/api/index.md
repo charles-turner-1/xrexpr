@@ -38,7 +38,7 @@ yourself.
 
 ## The plan
 
-The intermediate representation: a flat list of frozen dataclasses. The six shared
+The intermediate representation: a flat list of frozen dataclasses. The nine shared
 variants appear at both levels, `ContextOpen` only before lowering, and the three fused
 kinds only after it. See [the IR](../internals/ir.md) for why the levels differ and why the
 list is a list.
@@ -53,7 +53,10 @@ list is a list.
    Reduce
    Select
    Scan
+   Elementwise
    Project
+   Drop
+   Rename
    Rechunk
    Opaque
    ContextOpen
@@ -143,8 +146,8 @@ The two translation boundaries either side of the optimiser. See
 
 ## The optimiser
 
-`optimize` is the entry point; the five rules below are what it runs to a fixpoint, and
-`dim_effect` is the single site both pushdown rules consult. See
+`optimize` is the entry point; the rules below are what it runs to a fixpoint, and
+`dim_effect` is the one place the pushdown rules get their dim facts from. See
 [the optimiser](../internals/optimiser.md).
 
 ```{eval-rst}
@@ -158,6 +161,9 @@ The two translation boundaries either side of the optimiser. See
    Plan
    merge_adjacent_selects
    merge_adjacent_projects
+   merge_adjacent_rechunks
+   eliminate_projection_before_coord
+   push_projection_past_drop
    pushdown_selects
    pushdown_projections
    pushdown_selects_past_rechunks

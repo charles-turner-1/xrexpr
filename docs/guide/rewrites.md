@@ -6,8 +6,8 @@ kernelspec:
 
 # What it rewrites
 
-Five rewrites, all of them local, all of them decided from dimension and variable names
-alone. Every plan below is produced by running the code.
+The main rewrites, all local, all decided from dimension and variable names alone. Every
+plan below is produced by running the code.
 
 ```{code-cell} python
 import numpy as np
@@ -108,12 +108,15 @@ exist until the grouped reduce mints it:
 ds.plan.groupby("time.month").mean().isel(month=0).explain()
 ```
 
-**Anything it doesn't recognise.** An untabulated call (`fillna`, `astype`, ...) is a
-barrier: it replays verbatim, and rewrites don't cross it.
+**Anything it doesn't recognise.** A call it doesn't model (`transpose`, `assign`, ...)
+is a barrier: it replays verbatim, and rewrites don't cross it.
 
 ```{code-cell} python
-ds.plan.fillna(0).isel(time=0).explain()
+ds.plan.transpose().isel(time=0).explain()
 ```
+
+(Simple per-element methods like `fillna(0)` or `astype("float32")` *are* recognised, and
+selections move straight past them.)
 
 ## It catches one class of mistake early
 

@@ -12,8 +12,8 @@ untouched. That list is the **plan**.
 
 The plan is deliberately a flat list rather than a tree: an xarray method chain is
 linear, each call taking one object and returning one, so a list is what it is. Ops are
-identified by their **kind** (`Reduce`, `Select`, `Project`, `Scan`, `Rechunk`,
-`Opaque`), not by which xarray method produced them. `mean` and `std` differ in the call
+identified by their **kind** (`Reduce`, `Select`, `Project`, `Scan`, `Elementwise`,
+`Drop`, `Rename`, `Rechunk`, `Opaque`), not by which xarray method produced them. `mean` and `std` differ in the call
 they will replay as, not in how the plan may be rearranged around them.
 
 Two things end a plan:
