@@ -5,6 +5,8 @@ plan against ``_rust_view``. These pin the exact shape of that view on hand-buil
 and the cases a random plan is unlikely to produce.
 """
 
+from types import MappingProxyType
+
 import numpy as np
 import pytest
 from frozendict import frozendict
@@ -16,6 +18,7 @@ from xrexpr.intern import (
     InternedContextOpen,
     InternedProject,
     InternedRechunk,
+    InternedRename,
     InternedReduce,
     InternedSelect,
     InternedVal,
@@ -90,3 +93,18 @@ def test_each_plan_kind_rejects_the_other_kinds_ops():
         TypeError, match="cannot convert InternedContextOpen to LoweredOp"
     ):
         view_lowered_plan([opener])
+
+
+def test_a_mapping_need_not_be_a_dict():
+    """Mapping fields are read through ``items()``, not as a ``dict``.
+
+    ``frozendict``'s C build (conda-forge's Python 3.10 one) is not a ``dict`` subclass,
+    which pyo3's own ``HashMap`` extraction requires. A ``MappingProxyType`` is never a
+    ``dict``, so this pins the behaviour whichever ``frozendict`` is installed.
+    """
+    op = InternedRename(
+        name="rename", mapping=MappingProxyType({InternedVal(0): InternedVal(1)})
+    )
+    assert view_lowered_plan([op]) == [
+        ("InternedRename", {"name": "rename", "mapping": {0: 1}})
+    ]

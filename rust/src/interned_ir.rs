@@ -8,10 +8,12 @@
 //! compares it with the same projection made in Python, which is how a field Rust misreads
 //! or misses gets caught.
 
+use pyo3::conversion::FromPyObjectOwned;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyFrozenSet, PyTuple};
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use crate::indexers::Indexer;
 use crate::chunks::ChunkSpec;
 use crate::ir::{AllDims, ALL_DIMS};
@@ -29,6 +31,26 @@ impl<'py> FromPyObject<'_, '_> for InternedVal {
     fn extract(obj: pyo3::Borrowed<'_, '_, pyo3::PyAny>) -> PyResult<Self> {
         Ok(InternedVal(obj.getattr("handle")?.extract::<i32>()?))
     }
+}
+
+/// Read any Python mapping into a `HashMap`, through its `items()`.
+///
+/// pyo3's own `HashMap` extraction accepts only a real `dict`. The records hold
+/// `frozendict`s, and whether a `frozendict` *is* a `dict` depends on how it was built: the
+/// pure-Python package subclasses `dict`, its C extension (conda-forge's Python 3.10 build)
+/// does not. Every mapping field goes through here so neither build matters.
+///
+/// Used as `#[pyo3(from_py_with = extract_mapping)]`; the compiler infers `K` and `V` from
+/// the field's type.
+fn extract_mapping<'py, K, V>(obj: &Bound<'py, PyAny>) -> PyResult<HashMap<K, V>>
+where
+    K: FromPyObjectOwned<'py> + Eq + Hash,
+    V: FromPyObjectOwned<'py>,
+{
+    obj.call_method0("items")?
+        .try_iter()?
+        .map(|item| item?.extract::<(K, V)>())
+        .collect()
 }
 
 #[derive(Clone, PartialEq, Debug, Eq)]
@@ -73,6 +95,7 @@ pub struct InternedReduce{
 #[derive(Debug, Clone, PartialEq, Eq, FromPyObject, IntoPyObject)]
 pub struct InternedSelect{
     name: String,
+    #[pyo3(from_py_with = extract_mapping)]
     indexer: HashMap<InternedVal, Indexer>
 }
 
@@ -97,6 +120,7 @@ pub struct InternedProject{
 #[derive(Debug, Clone, PartialEq, Eq, FromPyObject, IntoPyObject)]
 pub struct InternedRechunk{
     name: String,
+    #[pyo3(from_py_with = extract_mapping)]
     chunks: HashMap<InternedVal, ChunkSpec>,
     /// The one spec every dim gets (`chunk(10)`), or `None` for a per-dim mapping.
     uniform: Option<ChunkSpec>,
@@ -116,6 +140,7 @@ pub struct InternedDrop{
 #[derive(Debug, Clone, PartialEq, Eq, FromPyObject, IntoPyObject)]
 pub struct InternedRename{
     name: String,
+    #[pyo3(from_py_with = extract_mapping)]
     mapping: HashMap<InternedVal, InternedVal>,
 }
 
@@ -138,6 +163,7 @@ pub struct InternedWindowedReduce{
     name: String,
     reduce: String,
     /// Window length per dim: `rolling(time=3)` is `{time: 3}`.
+    #[pyo3(from_py_with = extract_mapping)]
     window: HashMap<InternedVal, i64>,
 }
 
