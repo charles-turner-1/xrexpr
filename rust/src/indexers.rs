@@ -1,7 +1,9 @@
 use crate::interned_ir::InternedVal;
+use crate::payload::PayloadRef;
 use std::num::{NonZeroU64, NonZeroI64};
+use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
-use pyo3::types::PyTuple;
+use pyo3::types::{PyDict, PySlice, PyTuple};
 
 /// A trait for generic indexing operations.
 /// `current` is the current size of the dimension being indexed. 
@@ -28,11 +30,24 @@ fn slice_len(start: Option<i64>, stop: Option<i64>, step: Option<NonZeroI64>, le
     if span <= 0 { 0 } else { (span as u64).div_ceil(step.unsigned_abs()) as i64 }
 }
 
-#[derive(FromPyObject, IntoPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
+/// A Python `slice` with integer bounds, read from its `start`/`stop`/`step` attributes.
+#[derive(FromPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 struct Slice {
     start: Option<i64>,
     stop: Option<i64>,
     step: Option<NonZeroI64>,
+}
+
+/// Converts back to a real Python `slice`, which is what `GeneralSlice.value` holds.
+impl<'py> IntoPyObject<'py> for Slice {
+    type Target = PyAny;
+    type Output = Bound<'py, PyAny>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Self::Output> {
+        py.get_type::<PySlice>()
+            .call1((self.start, self.stop, self.step.map(NonZeroI64::get)))
+    }
 }
 
 
@@ -53,12 +68,41 @@ impl GenericIndex for ForwardSlice {
     }
 }
 
-#[derive(FromPyObject, IntoPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
-pub struct Scalar{
-    /// Read from Python's `Scalar.position` property: the integer position, or `None` for a
-    /// coordinate label (`sel(time="2020")`). The value itself may be any label, so it is
-    /// not extracted -- an `i64` field would reject every label scalar.
-    position: Option<i64>
+/// A single position or label, which drops its dim.
+///
+/// Half semantic, half payload. An integer position (`isel(time=3)`) is data a rule can
+/// compose. A coordinate label (`sel(time="2020")`) could be any Python object, so Python
+/// swaps it for a [`PayloadRef`] before crossing, and Rust can only carry it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scalar {
+    Position(i64),
+    Label(PayloadRef),
+}
+
+impl Scalar {
+    /// The integer position, or `None` for a label.
+    pub fn position(&self) -> Option<i64> {
+        match self {
+            Scalar::Position(p) => Some(*p),
+            Scalar::Label(_) => None,
+        }
+    }
+}
+
+/// Reads Python's `Scalar.value`: a `PayloadRef` is a label, an `int` is a position.
+/// Anything else is a label Python forgot to swap out, and is rejected.
+impl FromPyObject<'_, '_> for Scalar {
+    type Error = PyErr;
+
+    fn extract(obj: pyo3::Borrowed<'_, '_, PyAny>) -> PyResult<Self> {
+        let value = obj.getattr("value")?;
+        if let Ok(label) = value.extract::<PayloadRef>() {
+            return Ok(Scalar::Label(label));
+        }
+        value.extract::<i64>().map(Scalar::Position).map_err(|_| {
+            PyTypeError::new_err("a Scalar's value must be an int position or a PayloadRef")
+        })
+    }
 }
 
 impl GenericIndex for Scalar {
@@ -101,15 +145,17 @@ impl GenericIndex for Mask {
     }
 }
 
-#[derive(FromPyObject, IntoPyObject, Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
+/// A coordinate label, label slice or label sequence. The labels themselves are a payload;
+/// Rust only sees how many there are, when that's known.
+#[derive(FromPyObject, IntoPyObject, Debug, Clone, PartialEq, Eq)]
 pub struct Label{
-    #[pyo3(attribute("known_size"))]
-    size: Option<i64>,
+    value: PayloadRef,
+    known_size: Option<i64>,
 }
 
 impl GenericIndex for Label {
     fn size(&self, _current: i64) -> Option<i64> {
-        self.size
+        self.known_size
     }
 }
 
@@ -168,9 +214,8 @@ impl FromPyObject<'_, '_> for Indexer {
     }
 }
 
-/// Rust's *view* of an indexer, as a `(variant, fields)` tuple: `("Positions", {"values":
-/// [1, 3]})`. Not the Python indexer rebuilt -- a `Label` keeps only its `known_size` here,
-/// not the labels. Used by the boundary test (`interned_ir::view_*`).
+/// Converts to `(variant, fields)`, e.g. `("Positions", {"values": [1, 3]})`, which
+/// `xrexpr.intern.crossing.from_rust` rebuilds into the Python indexer.
 impl<'py> IntoPyObject<'py> for Indexer {
     type Target = PyTuple;
     type Output = Bound<'py, PyTuple>;
@@ -179,7 +224,14 @@ impl<'py> IntoPyObject<'py> for Indexer {
     fn into_pyobject(self, py: Python<'py>) -> PyResult<Self::Output> {
         // Each inner struct derives `IntoPyObject`, which turns it into a dict of its fields.
         match self {
-            Indexer::Scalar(s) => ("Scalar", s).into_pyobject(py),
+            Indexer::Scalar(s) => {
+                let fields = PyDict::new(py);
+                match s {
+                    Scalar::Position(p) => fields.set_item("value", p)?,
+                    Scalar::Label(label) => fields.set_item("value", label)?,
+                }
+                ("Scalar", fields).into_pyobject(py)
+            }
             Indexer::ForwardSlice(s) => ("ForwardSlice", s).into_pyobject(py),
             Indexer::GeneralSlice(s) => ("GeneralSlice", s).into_pyobject(py),
             Indexer::Positions(s) => ("Positions", s).into_pyobject(py),
@@ -263,8 +315,14 @@ mod tests {
         let mask = Indexer::Mask(Mask {
             values: vec![true, false, true],
         });
-        let known_label = Indexer::Label(Label { size: Some(7) });
-        let unknown_label = Indexer::Label(Label { size: None });
+        let known_label = Indexer::Label(Label {
+            value: PayloadRef::for_test(0),
+            known_size: Some(7),
+        });
+        let unknown_label = Indexer::Label(Label {
+            value: PayloadRef::for_test(1),
+            known_size: None,
+        });
 
         assert_eq!(positions.size(99), Some(3));
         assert_eq!(mask.size(99), Some(2));

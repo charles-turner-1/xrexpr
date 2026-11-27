@@ -59,10 +59,7 @@ What's generated, and what isn't:
   :func:`test_a_coord_projection_drops_its_input_and_replays_equal`.
 """
 
-import dataclasses
 import importlib.util
-from collections.abc import Mapping
-from typing import Any, get_type_hints
 
 import numpy as np
 import pandas as pd
@@ -77,20 +74,11 @@ import xrexpr  # noqa: F401 -- registers the ``.plan`` accessor
 
 # aliased: this module's own ``Call`` is a generated *recorded* call (name +
 # args/kwargs), a different thing from the emitted call header ``lower.Call`` denotes.
-from xrexpr._xrexprs import view_fluent_plan, view_lowered_plan
-from xrexpr.chunks import (
-    Auto,
-    BlockSeq,
-    ByteSize,
-    FullDim,
-    NoChange,
-    OpaqueChunk,
-    SingleSize,
-)
-from xrexpr.indexers import GeneralSlice, Label, Scalar
-from xrexpr.intern import InternedVal, Interner, deintern, intern
-from xrexpr.ir import AllDims, ContextOpen, Opaque, Rechunk, Select
-from xrexpr.payload import _Payload
+from xrexpr._xrexprs import roundtrip_fluent_plan, roundtrip_lowered_plan
+from xrexpr.chunks import Auto, BlockSeq, ByteSize
+from xrexpr.intern import Interner, deintern, intern
+from xrexpr.intern.crossing import PayloadTable, from_rust, to_rust
+from xrexpr.ir import ContextOpen, Opaque, Rechunk, Select
 from xrexpr.lower import Call as Lowered
 from xrexpr.lower import emit, to_lower_ir
 from xrexpr.operations import CONTEXT_METHODS, OP_TABLE, ReduceSpec, ScanSpec
@@ -1268,86 +1256,39 @@ def test_roundtrip_intern_ops_unchanged(case):
         assert deintern(intern(op)) == op
 
 
-def _rust_view(value: Any) -> Any:
-    """Project an interned value onto what the Rust reader keeps, in the shape it returns.
-
-    The Python half of the boundary contract ``rust/src/interned_ir.rs`` implements. A
-    record or indexer becomes ``(class name, {field: view})`` over its fields that *aren't*
-    marked ``Payload``, and a handle becomes its ``int``. The variants Rust keeps less of are
-    cut down to what it keeps: a ``Scalar`` to its ``position``, a ``Label`` to its
-    ``known_size``, a chunk spec to ``(name, value)``.
-
-    Parameters
-    ----------
-    value : Any
-        An interned op, or any value inside one.
-
-    Returns
-    -------
-    Any
-        The value as ``view_fluent_plan``/``view_lowered_plan`` should return it.
-    """
-    if isinstance(value, InternedVal):
-        return value.handle
-    if isinstance(value, AllDims):
-        return value
-    if isinstance(value, Scalar):
-        return ("Scalar", {"position": value.position})
-    if isinstance(value, Label):
-        return ("Label", {"size": value.known_size})
-    if isinstance(value, GeneralSlice):
-        s = value.value
-        return (
-            "GeneralSlice",
-            {"value": {"start": s.start, "stop": s.stop, "step": s.step}},
-        )
-    if isinstance(value, SingleSize):
-        return ("SingleSize", value.size)
-    if isinstance(value, ByteSize):
-        return ("ByteSize", value.value)
-    if isinstance(value, BlockSeq):
-        return ("BlockSeq", list(value.sizes))
-    if isinstance(value, (Auto, FullDim, NoChange, OpaqueChunk)):
-        return (type(value).__name__, None)
-    if dataclasses.is_dataclass(
-        value
-    ):  # the interned records and the remaining indexers
-        hints = get_type_hints(type(value), include_extras=True)
-        return (
-            type(value).__name__,
-            {
-                f.name: _rust_view(getattr(value, f.name))
-                for f in dataclasses.fields(value)
-                if _Payload not in getattr(hints[f.name], "__metadata__", ())
-            },
-        )
-    if isinstance(value, Mapping):
-        return {_rust_view(k): _rust_view(v) for k, v in value.items()}
-    if isinstance(value, (set, frozenset)):
-        return frozenset(_rust_view(v) for v in value)
-    if isinstance(value, (tuple, list)):
-        return [_rust_view(v) for v in value]
-    return value
-
-
 @SETTINGS
 @given(any_plans())
-def test_rust_reads_every_interned_op(case):
-    """Rust extracts every op of every generated plan, and reads each field it uses correctly.
+def test_a_plan_crosses_the_rust_boundary_and_back_unchanged(case):
+    """Every generated plan crosses to Rust and back with nothing lost or changed.
 
-    ``view_*_plan`` extracts each interned op into its Rust struct and converts it straight
-    back. So a field Rust misnames, mistypes or leaves out, or an op it dispatches to the
-    wrong variant, shows up as a mismatch against :func:`_rust_view` or as an extraction
-    error.
+    Each op is interned, its payloads swapped for refs (``to_rust``), extracted into its
+    Rust struct and converted straight back (``roundtrip_*_plan``), then rebuilt
+    (``from_rust``). The rebuilt records must equal the ones that were sent, de-intern to
+    the original plan, and hash the same where they're hashable. A field Rust misnames,
+    mistypes or drops, or an op it dispatches to the wrong struct, fails here.
     """
     ds, calls = case
     Interner()._clear()
 
     fluent = _build_plan(ds, calls)[0]
     lowered = to_lower_ir(fluent, _dim_names(ds))
-    for plan, view in ((fluent, view_fluent_plan), (lowered, view_lowered_plan)):
+    for plan, roundtrip in (
+        (fluent, roundtrip_fluent_plan),
+        (lowered, roundtrip_lowered_plan),
+    ):
         interned = [intern(op) for op in plan]
-        assert view(interned) == [_rust_view(op) for op in interned]
+        table = PayloadTable()
+        crossed = roundtrip([to_rust(op, table) for op in interned])
+        rebuilt = [from_rust(view, table) for view in crossed]
+
+        assert rebuilt == interned
+        assert [deintern(op) for op in rebuilt] == plan
+        for before, after in zip(interned, rebuilt):
+            try:
+                expected = hash(before)
+            except TypeError:  # an array payload: unhashable, see test_ir.py
+                continue
+            assert hash(after) == expected
 
 
 @pytest.mark.skipif(not HAS_DASK, reason="rechunk replay needs a chunk manager")
