@@ -29,6 +29,8 @@ from typing import Any, ClassVar
 import numpy as np
 import xarray as xr
 
+from xrexpr.payload import Payload
+
 __all__ = [
     "Advanced",
     "ForwardSlice",
@@ -57,7 +59,10 @@ class Scalar(GenericIndex):
     Attributes
     ----------
     value : Any
-        The position or label, verbatim.
+        The position or label, verbatim. Half semantic, half payload: an integer position
+        is something the Rust reasoner may compose (``isel(time=3)`` after a slice), a label
+        is a :data:`~xrexpr.payload.Payload` it can only carry. Which one is decided by
+        :attr:`position`, so the field is not annotated either way.
     drops_dim : bool
         Always ``True``: a scalar index removes the dim it addresses.
     """
@@ -327,8 +332,9 @@ class Label(GenericIndex):
 
     Attributes
     ----------
-    value : Any
-        The label, label slice or label sequence, verbatim.
+    value : Payload[Any]
+        The label, label slice or label sequence, verbatim. A
+        :data:`~xrexpr.payload.Payload`: the Rust reasoner sees only :attr:`known_size`.
     drops_dim : bool
         Always ``False``: a label *scalar* is a :class:`Scalar`, so what reaches this
         variant keeps its dim.
@@ -345,7 +351,7 @@ class Label(GenericIndex):
     fallback exists only for a caller reaching past the schema layer.
     """
 
-    value: Any
+    value: Payload[Any]
     drops_dim: ClassVar[bool] = False
 
     def size(self, current: int) -> int:

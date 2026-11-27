@@ -17,7 +17,8 @@ values inside them (slice bounds, positions, block sizes). So interning is **sel
   typed fields, so the reasoner never parses ``args``/``kwargs``.
 - **``args``/``kwargs``** stay verbatim — the Python replay header (``lower._emit_node``
   re-invokes them, and they carry options like ``skipna`` that live nowhere else). They are
-  the one loosely-typed slot; the Rust reasoning struct does not extract them.
+  the one loosely-typed slot, marked :data:`~xrexpr.payload.Payload`: the Rust reasoner
+  carries them but never reads or changes them.
 
 Because a handle is a distinct *type* (``InternedVal``), it is never confused with a literal
 ``int`` value: de-interning looks up an ``InternedVal`` and leaves a bare ``int`` alone.
@@ -29,7 +30,7 @@ type error here until both directions handle it.
 """
 
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Literal, TypeVar
+from typing import Any, Literal
 
 from frozendict import frozendict
 
@@ -37,16 +38,7 @@ from xrexpr.chunks import ChunkSpec
 from xrexpr.indexers import Indexer
 from xrexpr.intern.interner import InternedVal
 from xrexpr.ir import AllDims, ContextOpenName
-
-T = TypeVar("T")
-
-
-class _PyOnly: ...
-
-
-# Anything marked with PyOnly is ignored when serialising operations to the
-# rust version of the optimiser.
-PyOnly = Annotated[T, _PyOnly]
+from xrexpr.payload import Payload
 
 # Mirror the Rust Enum DimSet for readability.
 DimSet = frozenset[InternedVal] | AllDims
@@ -78,8 +70,8 @@ class InternedReduce:
     name: str
     consumes: DimSet = frozenset()
     keepdims: bool = False
-    args: PyOnly[tuple[Any, ...]] = ()
-    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
+    args: Payload[tuple[Any, ...]] = ()
+    kwargs: Payload[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -88,8 +80,8 @@ class InternedSelect:
 
     name: Literal["isel", "sel"]
     indexer: frozendict[InternedVal, Indexer] = field(default_factory=frozendict)
-    args: PyOnly[tuple[Any, ...]] = ()
-    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
+    args: Payload[tuple[Any, ...]] = ()
+    kwargs: Payload[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -98,8 +90,8 @@ class InternedScan:
 
     name: Literal["cumsum", "cumprod", "diff"]
     dims: DimSet = frozenset()
-    args: PyOnly[tuple[Any, ...]] = ()
-    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
+    args: Payload[tuple[Any, ...]] = ()
+    kwargs: Payload[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -107,8 +99,8 @@ class InternedElementwise:
     """Interned :class:`~xrexpr.ir.Elementwise` — no names; just the replay header."""
 
     name: str
-    args: PyOnly[tuple[Any, ...]] = ()
-    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
+    args: Payload[tuple[Any, ...]] = ()
+    kwargs: Payload[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -118,8 +110,8 @@ class InternedProject:
     name: Literal["__getitem__"]
     variables: tuple[InternedVal, ...] = ()
     single: bool = False
-    args: PyOnly[tuple[Any, ...]] = ()
-    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
+    args: Payload[tuple[Any, ...]] = ()
+    kwargs: Payload[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -129,8 +121,8 @@ class InternedRechunk:
     name: Literal["chunk"]
     chunks: frozendict[InternedVal, ChunkSpec] = field(default_factory=frozendict)
     uniform: ChunkSpec | None = None
-    args: PyOnly[tuple[Any, ...]] = ()
-    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
+    args: Payload[tuple[Any, ...]] = ()
+    kwargs: Payload[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -138,8 +130,8 @@ class InternedOpaque:
     """Interned :class:`~xrexpr.ir.Opaque` — no names; the replay header may hold arrays."""
 
     name: str
-    args: PyOnly[tuple[Any, ...]] = ()
-    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
+    args: Payload[tuple[Any, ...]] = ()
+    kwargs: Payload[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -148,8 +140,8 @@ class InternedDrop:
 
     name: Literal["drop_vars"]
     variables: tuple[InternedVal, ...] = ()
-    args: PyOnly[tuple[Any, ...]] = ()
-    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
+    args: Payload[tuple[Any, ...]] = ()
+    kwargs: Payload[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -163,8 +155,8 @@ class InternedRename:
 
     name: Literal["rename"]
     mapping: frozendict[InternedVal, InternedVal] = field(default_factory=frozendict)
-    args: PyOnly[tuple[Any, ...]] = ()
-    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
+    args: Payload[tuple[Any, ...]] = ()
+    kwargs: Payload[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -172,8 +164,8 @@ class InternedContextOpen:
     """Interned :class:`~xrexpr.ir.ContextOpen` — fluent-only; never survives lowering."""
 
     name: ContextOpenName
-    args: PyOnly[tuple[Any, ...]] = ()
-    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
+    args: Payload[tuple[Any, ...]] = ()
+    kwargs: Payload[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -185,10 +177,10 @@ class InternedGroupedReduce:
     new_dim: InternedVal
     reduce: str
     consumes: frozenset[InternedVal] = frozenset()
-    args: PyOnly[tuple[Any, ...]] = ()
-    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
-    reduce_args: PyOnly[tuple[Any, ...]] = ()
-    reduce_kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
+    args: Payload[tuple[Any, ...]] = ()
+    kwargs: Payload[frozendict[str, Any]] = field(default_factory=frozendict)
+    reduce_args: Payload[tuple[Any, ...]] = ()
+    reduce_kwargs: Payload[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -198,10 +190,10 @@ class InternedWindowedReduce:
     name: Literal["rolling", "coarsen"]
     reduce: str
     window: frozendict[InternedVal, int] = field(default_factory=frozendict)
-    args: PyOnly[tuple[Any, ...]] = ()
-    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
-    reduce_args: PyOnly[tuple[Any, ...]] = ()
-    reduce_kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
+    args: Payload[tuple[Any, ...]] = ()
+    kwargs: Payload[frozendict[str, Any]] = field(default_factory=frozendict)
+    reduce_args: Payload[tuple[Any, ...]] = ()
+    reduce_kwargs: Payload[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 @dataclass(frozen=True)
@@ -212,10 +204,10 @@ class InternedWeightedReduce:
     reduce: str
     weight_dims: frozenset[InternedVal] = frozenset()
     consumes: DimSet = frozenset()
-    args: PyOnly[tuple[Any, ...]] = ()
-    kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
-    reduce_args: PyOnly[tuple[Any, ...]] = ()
-    reduce_kwargs: PyOnly[frozendict[str, Any]] = field(default_factory=frozendict)
+    args: Payload[tuple[Any, ...]] = ()
+    kwargs: Payload[frozendict[str, Any]] = field(default_factory=frozendict)
+    reduce_args: Payload[tuple[Any, ...]] = ()
+    reduce_kwargs: Payload[frozendict[str, Any]] = field(default_factory=frozendict)
 
 
 #: The interned counterpart of :data:`~xrexpr.ir.Op`.
