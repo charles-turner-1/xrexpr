@@ -1,21 +1,24 @@
-"""Lowering — what the user *wrote* → what it *means* → the calls that reproduce it.
+"""Lowering: turn what the user *wrote* into what it *means*, and back into calls.
 
-The two pure translation stages either side of the optimiser. :func:`to_lower_ir` fuses
-the builder pairs xarray spells as two calls (``ds.groupby("time.month").mean()``) into
-the three fused kinds, and :func:`emit` maps one lowered node back to the call sequence
-that reproduces it — which is what makes a node standing for *two* calls ordinary rather
-than a special case the replay loop has to know about.
+Two pure translation steps sit either side of the optimiser:
 
-Fusion is a stage rather than a rewrite rule for two reasons, and both matter when editing
-here. :func:`~xrexpr.schema.to_opnode` is a *per-call* function and cannot see a pair;
-``optimize``'s rules run to a shared fixpoint under a strictly-decreasing measure, whereas
-fusion runs **once** and is a *precondition* of those rules rather than one of them. The
-contract is that :func:`to_lower_ir` is **semantics-preserving** — ``emit(to_lower_ir(p))``
-replays as ``p`` does — and **idempotent**, which is what lets it run without first asking
-whether it has.
+- :func:`to_lower_ir` fuses the builder pairs xarray spells as two calls
+  (``ds.groupby("time.month").mean()``) into single fused nodes.
+- :func:`emit` turns each lowered node back into the calls that reproduce it. That's
+  what lets one node stand for two calls without replay needing a special case.
 
-A builder pair no rule claims (``rolling_exp``, ``cumulative``) demotes to
-:class:`~xrexpr.ir.Opaque`, taking *both* halves with it.
+Fusion is a separate stage, not a rewrite rule, for two reasons:
+
+- :func:`~xrexpr.schema.to_opnode` sees one call at a time, so it can't see a pair.
+- The optimiser's rules run repeatedly under a termination measure. Fusion runs once,
+  and the rules assume it has already happened.
+
+The contract: :func:`to_lower_ir` preserves semantics (``emit(to_lower_ir(p))`` replays
+the same as ``p``) and is idempotent, so it's safe to run without checking whether it
+already has.
+
+A builder pair no fusion rule handles (``rolling_exp``, ``cumulative``) is demoted to
+:class:`~xrexpr.ir.Opaque`, both halves together.
 
 See ``docs/internals/lowering.md``.
 """
@@ -52,14 +55,14 @@ from xrexpr.operations import spec as op_spec
 __all__ = ["Call", "emit", "to_lower_ir"]
 
 #: ``rolling``/``coarsen`` keyword arguments that are *options*, not per-dim windows
-#: (xarray 2026.7.0's signatures, unioned — the two share this shape).
+#: (the union of both signatures in xarray 2026.7.0).
 _WINDOW_OPTION_KWARGS = frozenset(
     {"min_periods", "center", "boundary", "side", "coord_func", "keep_attrs"}
 )
 
 #: ``resample`` keyword arguments that are *options*, not the dim being resampled
-#: (xarray 2026.7.0's signature). Drift is safe in one direction only, and it is the
-#: right one: an option this misses leaves two candidate keys, which refuses to fuse.
+#: (xarray 2026.7.0's signature). If xarray adds an option and this list misses it, the
+#: call ends up with two candidate dim keys and refuses to fuse. That failure is safe.
 _RESAMPLE_OPTION_KWARGS = frozenset(
     {"closed", "label", "offset", "origin", "restore_coord_dims", "skipna"}
 )
@@ -67,12 +70,12 @@ _RESAMPLE_OPTION_KWARGS = frozenset(
 
 @dataclass(frozen=True)
 class Call:
-    """One xarray method invocation — the unit replay actually performs.
+    """One xarray method call: the unit replay actually performs.
 
     Attributes
     ----------
     name : str
-        The method to invoke, e.g. ``"mean"`` or ``"__getitem__"``.
+        The method to call, e.g. ``"mean"`` or ``"__getitem__"``.
     args : tuple
         Positional arguments, verbatim.
     kwargs : frozendict
@@ -80,10 +83,10 @@ class Call:
 
     Notes
     -----
-    Deliberately *not* an :data:`~xrexpr.ir.Op`: a node carries the normalised metadata
-    the optimiser reasons about, whereas a ``Call`` is codegen output and carries only
-    what ``getattr(ds, name)(*args, **kwargs)`` needs. Keeping them distinct is what lets
-    one node emit several calls, and stops replay from growing an arm per variant.
+    Deliberately not an :data:`~xrexpr.ir.Op`. A node carries the metadata the optimiser
+    reasons about; a ``Call`` is codegen output and carries only what ``getattr(ds,
+    name)(*args, **kwargs)`` needs. Keeping them separate is what lets one node emit
+    several calls, and keeps replay from needing a branch per node kind.
     """
 
     name: str
@@ -98,60 +101,59 @@ class Call:
 def to_lower_ir(
     nodes: list[FluentOp], dim_names: frozenset[Hashable]
 ) -> list[LoweredOp]:
-    """Translate a recorded plan into what it means, fusing builder chains.
+    """Translate a recorded plan into what it means, fusing builder pairs.
 
     Parameters
     ----------
     nodes : list of FluentOp
-        The recorded plan, one node per call as the fluent API spelled it.
+        The recorded plan, one node per call as the user wrote it.
     dim_names : frozenset of Hashable
-        The base dataset's dim names — the one thing this pass cannot read off the calls.
-        See the notes for why base dims, and why names rather than a schema.
+        The base dataset's dim names. This is the one fact lowering can't read off the
+        calls. See the notes for why it's the base dims, and why only names.
 
     Returns
     -------
     list of LoweredOp
-        The same plan with every builder pair resolved: fused into one node where a
-        rule claims it, demoted to :class:`~xrexpr.ir.Opaque` where none does. Contains
-        no :class:`~xrexpr.ir.ContextOpen`, which its return type enforces.
+        The same plan with every builder pair resolved: fused into one node where a rule
+        handles it, or demoted to :class:`~xrexpr.ir.Opaque` where none does. Contains
+        no :class:`~xrexpr.ir.ContextOpen`, and the return type enforces that.
 
     Notes
     -----
-    Where the fluent API is one-to-one with semantics the recorded node is already right,
-    so it passes through untouched — this is the *same* vocabulary plus the nodes a single
-    call cannot express, not a translation into a poorer language. Only the multi-call
-    spellings are rewritten.
+    Most nodes pass through unchanged. The lowered IR is the same vocabulary as the
+    fluent IR, plus nodes for operations that take two calls to spell. Only those
+    multi-call spellings get rewritten.
 
-    ``dim_names`` is the **base dataset's dim names**, and it is the one thing this pass cannot
-    read off the calls: whether ``groupby("region")`` groups along a dim or along a
-    coordinate defined on one is a fact about the data, not the call (see
-    ``_grouper_dims``). Dim names rather than a ``SchemaState`` because that is the
-    whole of what lowering needs to know — a set keeps this module's dependencies at
-    ``xrexpr.ir`` alone, and makes the requirement legible in the signature.
+    **Why ``dim_names``.** Whether ``groupby("region")`` groups along a dim, or along a
+    coordinate defined on one, is a fact about the data, not the call (see
+    ``_grouper_dims``). Only names are needed, so this takes a set rather than a
+    ``SchemaState``. That keeps this module depending on ``xrexpr.ir`` alone.
 
-    Base dims rather than the dims *at* each opener, which would mean folding the schema
-    forward through lowering. The gap is one-sided and pessimising: a dim minted mid-plan
-    and then grouped over (``groupby("time.month").mean().groupby("month")``) refuses and
-    falls to the fallback below. The converse — a name that is a base dim but no longer one
-    by the time of the groupby — needs an intervening ``stack``/``rename``, which is
-    ``Opaque``, so the plan is already past ``optimize._trusted_prefix`` and the tracked
-    schema is a guess by contract rather than by this shortcut.
+    **Why the base dims** rather than the dims at each opener (which would mean folding
+    the schema through lowering). The shortcut can only lose fusions, never cause wrong
+    ones:
 
-    Contexts are **pairs, not runs** (verified against xarray 2026.7.0): there is no
-    builder→builder middle call to skip, because ``DatasetGroupBy.__getitem__`` selects a
-    *group* and closes the context, and Rolling/Coarsen/Weighted reject ``__getitem__``
-    outright. So this matches adjacent pairs only.
+    - A dim created mid-plan and then grouped over
+      (``groupby("time.month").mean().groupby("month")``) isn't in the base dims, so it
+      refuses to fuse and falls back to ``Opaque``.
+    - The reverse, a base dim that's gone by the time of the groupby, needs a ``stack``
+      or similar in between. That's ``Opaque``, so the plan is already past
+      ``optimize._trusted_prefix`` and the schema is a guess anyway.
 
-    Every :class:`~xrexpr.ir.ContextOpen` must leave, and one that no fusion rule claims
-    is **demoted to** :class:`~xrexpr.ir.Opaque` together with its closer — the pair then
-    replays verbatim and no rule can fire on it. That fallback is what makes the closer's
-    provisional typing safe: a closer recorded under a shape no rule expects simply fails
-    to match, so the failure mode is pessimisation, never wrongness. It is also how the
-    openers no fused node describes (``rolling_exp``, ``cumulative``) replay.
+    **Contexts are pairs, not runs** (checked against xarray 2026.7.0). There's no call
+    that goes from one builder to another: ``DatasetGroupBy.__getitem__`` selects a
+    group and ends the context, and Rolling/Coarsen/Weighted reject ``__getitem__``. So
+    only adjacent pairs are matched.
 
-    Idempotent and semantics-preserving (see the module docstring). Idempotence is not
-    incidental: the output contains no ``ContextOpen`` at all, so a second pass has
-    nothing left to match.
+    **Every** :class:`~xrexpr.ir.ContextOpen` **must go.** One that no rule fuses is
+    demoted to :class:`~xrexpr.ir.Opaque` together with its closer, and the pair replays
+    verbatim. This fallback is what makes it safe for ``to_opnode`` to type the closer
+    provisionally: a closer with an unexpected shape just doesn't fuse, so the worst
+    case is a missed optimisation, never a wrong result. Openers with no fused node at
+    all (``rolling_exp``, ``cumulative``) always take this path.
+
+    Idempotent because the output contains no ``ContextOpen``, so a second pass has
+    nothing to match.
     """
     out: list[LoweredOp] = []
     i, n = 0, len(nodes)
@@ -175,12 +177,11 @@ def to_lower_ir(
             i += 2
             continue
 
-        # The mandatory fallback. The *closer* must be demoted with the opener, not just
-        # the opener: a closer left as the node ``to_opnode`` provisionally typed it is a
-        # Dataset-level reading of a call that was never Dataset-level --
-        # ``rolling(time=2).mean()`` would keep a ``Reduce`` whose bare dim spec means
-        # "every dim", and a following select would be rejected against dims the grouped
-        # mean never removed. Demoting the pair is what makes the provisional typing safe.
+        # The fallback. The *closer* must be demoted along with the opener. Left as
+        # ``to_opnode`` typed it, it would be a Dataset-level reading of a call that
+        # wasn't Dataset-level: ``rolling(time=2).mean()`` would keep a ``Reduce`` whose
+        # bare dim spec means "every dim", and a following select would be rejected
+        # against dims the rolling mean never removed.
         out.append(Opaque(name=node.name, args=node.args, kwargs=node.kwargs))
         if closer is not None:
             out.append(Opaque(name=closer.name, args=closer.args, kwargs=closer.kwargs))
@@ -200,53 +201,55 @@ def _fuse_grouped(
     opener : ContextOpen
         The builder-returning call.
     closer : FluentOp
-        The node recorded immediately after it.
+        The node recorded right after it.
     dim_names : frozenset of Hashable
-        The base dataset's dim names, passed through to ``_grouper_dims`` — a grouper
-        that does not name one refuses.
+        The base dataset's dim names, passed to ``_grouper_dims``. A grouper that
+        doesn't name a dim refuses.
 
     Returns
     -------
     GroupedReduce or None
-        The fused node, or ``None`` to refuse — which the caller turns into a verbatim
-        opaque pair.
+        The fused node, or ``None`` to refuse (the caller then keeps the pair as opaque
+        calls).
 
     Notes
     -----
-    Refusing is always safe (the caller demotes to ``Opaque``), so every condition below
-    is a *narrowing* of what fusion claims to understand rather than a correctness risk.
+    Refusing is always safe, so every condition below just narrows what gets fused. None
+    of them is a correctness risk.
 
-    - **The opener must be groupby-family.** ``rolling``/``coarsen`` and ``weighted`` have
-      their own nodes, fused by the two functions below, so they refuse here.
-    - **The grouper must be a string naming a dim** — a dim name (``groupby("lat")``) or a
-      component of a dim coordinate (``groupby("time.month")``), from which ``group_dim``
-      reads off directly. A ``DataArray`` grouper or a ``Grouper`` object has no single
-      ``group_dim``, so it refuses; so does a *non-dim coordinate* name, which is what
-      ``dim_names`` is threaded here to establish (``_grouper_dims``).
-    - **The closer must be an aggregating reduce.** This is the subtle one, and it is a
-      correction to the obvious reading: a grouped reduce over dims that *exclude* the
-      group dim is not an aggregation at all. ``ds.groupby("time.month").mean("lat")``
-      returns dims ``{time, lon}`` — a per-group *map*, reassembled along the original
-      dim, minting no ``month``. Only a bare closer or one naming the group dim
-      aggregates, and only that case fuses.
+    - **The opener must be groupby-family.** ``rolling``/``coarsen`` and ``weighted``
+      have their own fused nodes, handled by the functions below.
+    - **The grouper must be a string naming a dim**, either a dim name
+      (``groupby("lat")``) or a component of one (``groupby("time.month")``).
+      ``group_dim`` is read straight off it. A ``DataArray`` grouper or a ``Grouper``
+      object has no single ``group_dim``, so it refuses. So does the name of a *non-dim
+      coordinate*, which is why ``dim_names`` is passed in (``_grouper_dims``).
+    - **The closer must be an aggregating reduce.** This one is easy to get wrong. A
+      grouped reduce over dims that *exclude* the group dim isn't an aggregation at all:
+      ``ds.groupby("time.month").mean("lat")`` returns dims ``{time, lon}``. It's a
+      per-group *map*, reassembled along the original dim, and creates no ``month``.
+      Only a bare closer, or one that names the group dim, aggregates, and only that
+      case fuses.
     """
     match opener.name:
-        # Spelled as a match rather than a set membership so mypy narrows the opener's
-        # name to ``GroupedReduce``'s own (narrower) Literal -- the set would need a cast,
-        # and a cast is exactly the check being skipped.
+        # A ``match`` rather than ``in {...}`` so mypy narrows the opener's name to
+        # ``GroupedReduce``'s own narrower ``Literal``. A set test would need a
+        # ``cast``, which would skip exactly the check we want.
         case "groupby" | "groupby_bins" | "resample":
             kind = opener.name
         case _:
             return None
     if not isinstance(closer, Reduce) or closer.keepdims:
-        # A grouped ``keepdims=True`` reduce is nothing ``GroupedReduce`` models. Before
-        # pydata/xarray#11521 it *retained the group dim* (sized to the group count, and
-        # left without a coordinate) instead of minting ``new_dim`` --
-        # ``groupby("time.month").mean(keepdims=True)`` kept a coordinate-less ``time`` and
-        # never minted ``month`` (pydata/xarray#11519); #11521 stops groupby/resample
-        # honouring ``keepdims`` at all, so it now raises instead. ``GroupedReduce``
-        # describes neither (it removes the group dim and mints ``new_dim``), so fusing
-        # would misdescribe it: refuse and let the pair replay verbatim.
+        # ``GroupedReduce`` doesn't model a grouped ``keepdims=True`` reduce:
+        #
+        # - Before pydata/xarray#11521, it kept the group dim (sized to the number of
+        #   groups, with no coordinate) instead of creating ``new_dim``. For example
+        #   ``groupby("time.month").mean(keepdims=True)`` kept a coordinate-less
+        #   ``time`` and no ``month`` (pydata/xarray#11519).
+        # - Since #11521, groupby/resample ignore ``keepdims`` entirely, so it raises.
+        #
+        # ``GroupedReduce`` (removes the group dim, creates ``new_dim``) describes
+        # neither, so refuse and let the pair replay verbatim.
         return None
 
     grouped = _grouper_dims(opener, dim_names)
@@ -254,8 +257,8 @@ def _fuse_grouped(
         return None
     group_dim, new_dim = grouped
 
-    # A bare closer consumes nothing extra: unlike a Dataset-level ``mean()``, a grouped
-    # one reduces only along the group dim, so ``lat``/``lon`` survive.
+    # A bare closer consumes nothing extra. Unlike a Dataset-level ``mean()``, a grouped
+    # one only reduces along the group dim, so ``lat``/``lon`` survive.
     match closer.consumes:
         case AllDims():
             extra: frozenset[Hashable] = frozenset()
@@ -285,28 +288,26 @@ def _fuse_windowed(opener: ContextOpen, closer: FluentOp) -> WindowedReduce | No
     opener : ContextOpen
         The builder-returning call.
     closer : FluentOp
-        The node recorded immediately after it.
+        The node recorded right after it.
 
     Returns
     -------
     WindowedReduce or None
-        The fused node, or ``None`` to refuse — which the caller turns into a verbatim
-        opaque pair.
+        The fused node, or ``None`` to refuse (the caller then keeps the pair as opaque
+        calls).
 
     Notes
     -----
-    ``rolling_exp`` and ``cumulative`` are deliberately not here: the first is an
-    exponential weighting rather than a fixed window, and the second is a scan wearing a
-    builder's clothes. Neither is described by ``window``, so both keep replaying
-    verbatim rather than being squeezed into a node that would misdescribe them.
+    ``rolling_exp`` and ``cumulative`` aren't handled here. The first is an exponential
+    weighting, not a fixed window; the second is really a scan. ``window`` can't
+    describe either, so both replay verbatim.
 
-    **A closer's parsed dim is ignored.** ``DatasetRolling.mean`` is
-    ``(keep_attrs=None, **kwargs)``: it takes no dim argument at all, so
-    ``ds.rolling(time=3).mean("lat")`` passes ``"lat"`` as *keep_attrs* and reduces
-    nothing. ``to_opnode``, which cannot know the call is windowed, records that as
-    ``consumes={"lat"}``. The fused node drops that misparse rather than carrying it: its
-    dim effect depends only on ``window``, and ``reduce_args`` replays the closer
-    verbatim.
+    **A closer's parsed dim is ignored.** ``DatasetRolling.mean`` is ``(keep_attrs=None,
+    **kwargs)`` and takes no dim at all. So in ``ds.rolling(time=3).mean("lat")``,
+    ``"lat"`` is actually ``keep_attrs``, and nothing is reduced. ``to_opnode`` can't
+    know the call is windowed, so it records ``consumes={"lat"}``. The fused node drops
+    that wrong ``consumes``: its dim effect depends only on ``window``, and
+    ``reduce_args`` replays the closer verbatim.
     """
     match opener.name:
         case "rolling" | "coarsen":
@@ -314,13 +315,13 @@ def _fuse_windowed(opener: ContextOpen, closer: FluentOp) -> WindowedReduce | No
         case _:
             return None
     if not isinstance(closer, Reduce) or closer.keepdims:
-        # ``keepdims=True`` refuses: ``coarsen.mean(keepdims=True)`` raises ``TypeError``
-        # and rolling's is an inert no-op -- neither a size effect a ``WindowedReduce``
-        # describes -- so both stay ``Opaque`` to replay verbatim.
+        # ``keepdims=True`` refuses. ``coarsen.mean(keepdims=True)`` raises
+        # ``TypeError``, and on rolling it does nothing. Neither is a size effect
+        # ``WindowedReduce`` describes, so both stay ``Opaque`` and replay verbatim.
         #
-        # A closer that *named a dim* is fused (see the notes). A positional
-        # (``mean("lat")``) binds to ``keep_attrs`` and a ``dim=`` keyword falls into
-        # ``**kwargs`` and is ignored (with a warning), so either way it reduces no dim.
+        # A closer that *names a dim* still fuses (see the notes). A positional dim
+        # (``mean("lat")``) binds to ``keep_attrs``, and a ``dim=`` keyword lands in
+        # ``**kwargs`` and is ignored with a warning. Either way no dim is reduced.
         return None
 
     window = _window_spec(opener)
@@ -349,16 +350,16 @@ def _window_spec(opener: ContextOpen) -> frozendict[Hashable, int]:
     Returns
     -------
     frozendict
-        The windowed dims and their integer window sizes. Empty when no window is
-        statically known, which the caller reads as a refusal to fuse.
+        The windowed dims and their integer window sizes. Empty when no window is known,
+        which the caller treats as a refusal to fuse.
 
     Notes
     -----
-    Both spell it the same two ways — a positional mapping or dim keywords — alongside
-    option kwargs that are not dims, exactly as ``isel`` and ``chunk`` do; this is
-    ``schema._select_indexer``'s shape for a third caller. A window that isn't a plain
-    ``int`` is dropped rather than modelled, which (an empty result being a refusal to
-    fuse) means an unrecognised spelling replays verbatim instead of being guessed at.
+    Both calls take the window either as a positional dict or as dim keywords, mixed
+    with option kwargs that aren't dims. That's the same shape ``isel`` and ``chunk``
+    use (see ``schema._select_indexer``). A window that isn't a plain ``int`` is
+    dropped, so an unrecognised spelling ends up with an empty result and replays
+    verbatim rather than being guessed at.
     """
     raw: dict[Hashable, Any] = {}
     if opener.args and isinstance(opener.args[0], dict):
@@ -377,41 +378,38 @@ def _fuse_weighted(opener: ContextOpen, closer: FluentOp) -> WeightedReduce | No
     opener : ContextOpen
         The builder-returning call.
     closer : FluentOp
-        The node recorded immediately after it.
+        The node recorded right after it.
 
     Returns
     -------
     WeightedReduce or None
-        The fused node, or ``None`` to refuse — which the caller turns into a verbatim
-        opaque pair.
+        The fused node, or ``None`` to refuse (the caller then keeps the pair as opaque
+        calls).
 
     Notes
     -----
-    Unlike ``_fuse_windowed``, a closer that named dims is **fused, not refused**, and
-    the asymmetry is a fact about the two signatures rather than a judgement:
-    ``DatasetWeighted.mean`` is ``(dim=None, *, skipna=None, keep_attrs=None)`` — it really
-    does take a dim — whereas ``DatasetRolling.mean`` takes none, which is what makes
-    ``rolling(time=3).mean("lat")`` a misparse. So ``to_opnode``'s parsed dim spec is
-    meaningful here and carries over untouched, :data:`~xrexpr.ir.ALL_DIMS` included.
+    Unlike ``_fuse_windowed``, a closer that names dims is fused *with* those dims.
+    That's because the signatures differ: ``DatasetWeighted.mean`` is ``(dim=None, *,
+    skipna=None, keep_attrs=None)``, so it really does take a dim, while
+    ``DatasetRolling.mean`` doesn't. So ``to_opnode``'s parsed dim is correct here and
+    is kept as is, :data:`~xrexpr.ir.ALL_DIMS` included.
 
-    The one thing that must be read off the opener is the **weights' dims**, because they
-    have a dim effect of their own (see :class:`~xrexpr.ir.WeightedReduce`). Reading
-    ``w.dims`` materialises nothing — it is metadata, the same class of access
-    ``SchemaState.from_dataset`` already makes. Duck-typed rather than
-    ``isinstance(w, xr.DataArray)`` so this module keeps needing no xarray import; anything
-    with no ``dims`` tuple refuses, which covers the weights xarray would itself reject
-    (it raises ``ValueError: `weights` must be a DataArray``) and costs only a fusion the
-    plan could not have replayed anyway.
+    The one thing read off the opener is the **weights' dims**, because they have a dim
+    effect of their own (see :class:`~xrexpr.ir.WeightedReduce`). Reading ``w.dims`` is
+    metadata only and computes nothing, like the reads ``SchemaState.from_dataset``
+    already makes. It's duck-typed rather than ``isinstance(w, xr.DataArray)`` so this
+    module needs no xarray import. Anything without a ``dims`` tuple refuses. That
+    covers weights xarray would reject anyway (``ValueError: `weights` must be a
+    DataArray``), so the only cost is a fusion that couldn't have replayed.
 
-    An untabulated closer refuses for free by not being a ``Reduce``, which is the right
-    answer for the weighted-only methods: ``sum_of_weights``/``sum_of_squares``/``quantile``
-    are not in ``OP_TABLE``, and ``quantile`` in particular takes ``q`` first positionally,
-    which a reduce's dim-spec parse would misread.
+    A closer that isn't a tabulated reduce refuses automatically, because it isn't a
+    ``Reduce``. That's the right answer for the weighted-only methods:
+    ``sum_of_weights``/``sum_of_squares``/``quantile`` aren't in ``OP_TABLE``, and
+    ``quantile`` takes ``q`` first, which a reduce's dim parse would misread.
     """
     if opener.name != "weighted" or not isinstance(closer, Reduce) or closer.keepdims:
-        # A ``keepdims=True`` closer keeps its dims at size 1: fusing it into a
-        # ``WeightedReduce`` (which removes the weighted dims) would misdescribe it, so
-        # refuse and replay verbatim.
+        # A ``keepdims=True`` closer keeps its dims at size 1. A ``WeightedReduce``
+        # removes them, so fusing would misdescribe it. Refuse and replay verbatim.
         return None
 
     weight_dims = _weight_dims(opener)
@@ -431,25 +429,24 @@ def _fuse_weighted(opener: ContextOpen, closer: FluentOp) -> WeightedReduce | No
 
 
 def _weight_dims(opener: ContextOpen) -> frozenset[Hashable] | None:
-    """Read the dims the weights carry off a ``weighted`` call.
+    """Read the dims of the weights off a ``weighted`` call.
 
     Parameters
     ----------
     opener : ContextOpen
-        The ``weighted`` call, holding the weights in its verbatim header.
+        The ``weighted`` call, with the weights in its verbatim header.
 
     Returns
     -------
     frozenset of Hashable or None
-        The weights' dim names, or ``None`` if the weights aren't a shape this can read —
-        which the caller reads as a refusal to fuse.
+        The weights' dim names, or ``None`` if the weights aren't something this can
+        read (the caller treats that as a refusal to fuse).
 
     Notes
     -----
-    ``Dataset.weighted`` takes exactly one argument, so the weights are ``args[0]`` or the
-    ``weights=`` keyword. A 0-d weights array answers the empty set, which is honest: it
-    broadcasts nothing and aligns nothing, so such a node's dim effect really is a plain
-    reduce's.
+    ``Dataset.weighted`` takes exactly one argument, so the weights are ``args[0]`` or
+    the ``weights=`` keyword. 0-d weights give the empty set, which is correct: they
+    broadcast and align nothing, so the node behaves like a plain reduce.
     """
     weights = opener.args[0] if opener.args else opener.kwargs.get("weights")
     dims = getattr(weights, "dims", None)
@@ -466,46 +463,49 @@ def _grouper_dims(
     opener : ContextOpen
         The ``groupby``, ``groupby_bins`` or ``resample`` call.
     dim_names : frozenset of Hashable
-        The base dataset's dim names. Every reading below assumes the grouper names a
-        dim, so every one is checked against this — see the notes.
+        The base dataset's dim names. Every rule below assumes the grouper names a dim,
+        and this is what checks it.
 
     Returns
     -------
     tuple of Hashable or None
-        The dim grouped along and the dim minted, or ``None`` when neither is statically
-        known — which the caller reads as a refusal to fuse.
+        The dim grouped along and the dim created, or ``None`` if they can't be read off
+        the call (the caller treats that as a refusal to fuse).
 
     Notes
     -----
-    Read off the call, since only string groupers fuse:
+    Only string groupers fuse. The readings are:
 
-    - ``groupby("time.month")`` groups along ``time`` and mints ``month``;
-    - ``groupby("lat")`` mints the dim it grouped over, now holding the distinct values;
-    - ``groupby_bins("lat", 2)`` mints ``lat_bins`` — xarray's own naming convention;
-    - ``resample(time="2D")`` takes its dim from the (single) keyword, and mints it back.
+    - ``groupby("time.month")`` groups along ``time`` and creates ``month``;
+    - ``groupby("lat")`` creates the dim it grouped over, now holding the distinct
+      values;
+    - ``groupby_bins("lat", 2)`` creates ``lat_bins`` (xarray's naming);
+    - ``resample(time="2D")`` takes its dim from the single keyword and creates it
+      again.
 
-    **Every one of those reads assumes the name is a dim, so every one is checked against**
-    ``dim_names``. The name alone cannot tell them apart: ``groupby("region")`` where ``region``
-    is a coordinate *on* ``lat`` groups along ``lat`` and mints ``region``, so reading
-    ``group_dim`` off the call gives ``region`` — a dim the grouping never consumed, while
-    the one it did consume is reported as surviving, which would mislead both
-    ``dim_effect`` and the schema fold. Refusing puts these pairs on the opaque fallback
-    (``02-lowering.md`` §5.5).
+    **Each reading assumes the name is a dim, so each is checked against**
+    ``dim_names``. The name alone can't tell. If ``region`` is a coordinate *on*
+    ``lat``, then ``groupby("region")`` groups along ``lat`` and creates ``region``.
+    Reading ``group_dim`` off the call would give ``region``: a dim the grouping never
+    consumed, while ``lat``, which it did consume, would be reported as surviving. That
+    would mislead both ``dim_effect`` and the schema fold. Refusing sends these pairs to
+    the opaque fallback (``02-lowering.md`` §5.5).
 
-    Verified against xarray 2026.7.0 — all three kinds share the assumption:
+    Checked against xarray 2026.7.0. All three kinds share the assumption:
 
-    - ``resample`` accepts a non-dim coordinate too (``resample(t2="2D")`` with ``t2`` on
-      ``lat`` yields ``{t2: 2, time: 4}``), so the keyword is checked, not trusted;
-    - ``groupby_bins("time.month", 2)`` yields ``{lat: 3, month_bins: 2}`` — group dim
-      ``time``, minting ``month_bins``, where the naive reading is
-      ``("time.month", "time.month_bins")``, wrong twice. The dotted bins form is refused
-      rather than modelled.
-    - a multi-dim coordinate grouper stacks (``cell`` on ``(time, lat)`` yields
-      ``{cell: 3}``, consuming both), which is why modelling non-dim groupers properly
-      needs a ``group_dim`` that is a *set*.
+    - ``resample`` accepts a non-dim coordinate too (``resample(t2="2D")`` with ``t2``
+      on ``lat`` gives ``{t2: 2, time: 4}``), so the keyword is checked rather than
+      trusted.
+    - ``groupby_bins("time.month", 2)`` gives ``{lat: 3, month_bins: 2}``: group dim
+      ``time``, creating ``month_bins``. The naive reading, ``("time.month",
+      "time.month_bins")``, gets both wrong. The dotted bins form is refused rather than
+      modelled.
+    - A grouper that's a multi-dim coordinate stacks (``cell`` on ``(time, lat)`` gives
+      ``{cell: 3}``, consuming both). Modelling non-dim groupers properly would need
+      ``group_dim`` to be a *set*.
 
     A ``Grouper`` object or a keyword grouper (``groupby(x=UniqueGrouper())``) already
-    refuses by leaving ``args`` empty or non-``str``; the guard does not change that.
+    refuses, because ``args`` is empty or not a ``str``.
     """
     if opener.name == "resample":
         keys = [k for k in opener.kwargs if k not in _RESAMPLE_OPTION_KWARGS]
@@ -516,9 +516,10 @@ def _grouper_dims(
     if not opener.args or not isinstance(grouper := opener.args[0], str):
         return None
     if opener.name == "groupby_bins":
-        # Guarded on the whole grouper, not its head: the dotted form's real group dim
-        # *is* the head, but its minted name is not ``f"{grouper}_bins"``, so a head-only
-        # check would let the wrong ``new_dim`` through under a correct ``group_dim``.
+        # Check the whole grouper, not just the part before the dot. For the dotted form
+        # the real group dim *is* that head, but the created name isn't
+        # ``f"{grouper}_bins"``, so a head-only check would accept a wrong ``new_dim``
+        # alongside a correct ``group_dim``.
         return (grouper, f"{grouper}_bins") if grouper in dim_names else None
     group_dim, _, component = grouper.partition(".")
     if group_dim not in dim_names:
@@ -537,17 +538,15 @@ def emit(nodes: list[LoweredOp]) -> list[Call]:
     Returns
     -------
     list of Call
-        The calls to perform, in order — what
-        ``_replay`` invokes against the dataset.
+        The calls to perform, in order. This is what ``_replay`` runs against the
+        dataset.
 
     Notes
     -----
-    The inverse direction of :func:`to_lower_ir`: a node that stands for two calls emits
-    two. A pure function of the plan — no dataset in sight — so codegen is unit-testable
-    on its own, and ``_replay`` stays a short ``getattr`` loop instead of growing an arm
-    per variant. That is
-    what keeps per-call verbatim-ness a property of the whole pipeline rather than
-    something each node kind has to be trusted with.
+    The reverse of :func:`to_lower_ir`: a node that stands for two calls emits two. It's
+    a pure function of the plan (no dataset involved), so codegen can be unit-tested on
+    its own, and ``_replay`` stays a short ``getattr`` loop instead of needing a branch
+    per node kind.
     """
     return [call for node in nodes for call in _emit_node(node)]
 
@@ -558,16 +557,17 @@ def _canon_dims(dims: frozenset[Hashable]) -> Hashable | list[Hashable]:
     Parameters
     ----------
     dims : frozenset of Hashable
-        The dims the op names — never :data:`~xrexpr.ir.ALL_DIMS` (the caller handles that).
+        The dims the op names. Never :data:`~xrexpr.ir.ALL_DIMS` (the caller handles
+        that).
 
     Returns
     -------
     Hashable or list of Hashable
-        A single *string* dim bare (``"time"``), matching xarray's str-is-one-name
-        convention; anything else a list, ordered by ``repr`` for a deterministic
-        header. A single *non*-string dim is still wrapped in a list, because a
-        bare iterable dim name (eg. a tuple) would otherwise re-parse as several dims
-        through ``schema._as_dim_set``.
+        A single *string* dim on its own (``"time"``), following xarray's "a str is one
+        name" convention. Anything else as a list, sorted by ``repr`` so the header is
+        deterministic. A single *non*-string dim still goes in a list, because a bare
+        iterable dim name (e.g. a tuple) would otherwise be re-parsed as several dims by
+        ``schema._as_dim_set``.
     """
     ordered = sorted(dims, key=repr)
     if len(ordered) == 1 and isinstance(ordered[0], str):
@@ -576,7 +576,7 @@ def _canon_dims(dims: frozenset[Hashable]) -> Hashable | list[Hashable]:
 
 
 def _dim_arg(name: str) -> int:
-    """Where a reduction's dim spec sits among its positional args — 0, or 1 for ``reduce``.
+    """Where a reduction's dim sits among its positional args: 0, or 1 for ``reduce``.
 
     Parameters
     ----------
@@ -586,8 +586,9 @@ def _dim_arg(name: str) -> int:
     Returns
     -------
     int
-        The :attr:`~xrexpr.operations.ReduceSpec.dim_arg` position — 0 for every reduction
-        but ``reduce`` (``reduce(func, dim, ...)``), and 0 for a non-tabulated name.
+        The :attr:`~xrexpr.operations.ReduceSpec.dim_arg` position. 0 for every
+        reduction except ``reduce`` (``reduce(func, dim, ...)``), and 0 for an
+        untabulated name.
     """
     op = op_spec(name)
     return op.dim_arg if isinstance(op, ReduceSpec) else 0
@@ -600,14 +601,15 @@ def _dim_call(
     dims: DimSet,
     position: int,
 ) -> Call:
-    """Rebuild a reduce/scan call header from its parsed ``dims``, keeping every option.
+    """Rebuild a reduce/scan call from its parsed ``dims``, keeping every other argument.
 
-    The inverse of ``schema._dim_spec``: drop whatever spelled the dim (the positional at
-    ``position``, or a ``dim=`` kwarg), then re-emit the dim positionally from ``dims`` — or
-    emit no dim at all for :data:`~xrexpr.ir.ALL_DIMS`, the bare ``mean()``/``cumsum()`` case.
-    Every other positional (``reduce``'s function, ``diff``'s ``n``) and every option kwarg
-    (``skipna``, ``keepdims``, ...) rides along untouched, so a Rust-mutated ``dims`` flows
-    into the header while the options that live nowhere else are preserved.
+    The reverse of ``schema._dim_spec``. Remove whatever spelled the dim (the positional
+    at ``position``, or a ``dim=`` kwarg), then put the dim back positionally from
+    ``dims``. For :data:`~xrexpr.ir.ALL_DIMS` (the bare ``mean()``/``cumsum()`` case) no
+    dim is emitted. Every other positional (``reduce``'s function, ``diff``'s ``n``) and
+    option kwarg (``skipna``, ``keepdims``, ...) is kept as is. So a rewritten ``dims``
+    (from a rule or a Rust backend) ends up in the call, and the options, which live
+    nowhere else, are kept.
 
     Parameters
     ----------
@@ -618,12 +620,13 @@ def _dim_call(
     dims : DimSet
         The op's parsed dims, or :data:`~xrexpr.ir.ALL_DIMS`.
     position : int
-        Where the dim sits among the positionals — :func:`_dim_arg` for a reduce, 0 for a scan.
+        Where the dim sits among the positionals: :func:`_dim_arg` for a reduce, 0 for a
+        scan.
 
     Returns
     -------
     Call
-        The reconstructed call.
+        The rebuilt call.
     """
     positionals = list(args)
     if "dim" not in kwargs and len(positionals) > position:
@@ -635,7 +638,7 @@ def _dim_call(
 
 
 def _rechunk_args(rechunk: Rechunk) -> tuple[Any, ...]:
-    """Rebuild the positional header of a ``chunk`` call from its spec fields.
+    """Rebuild the positional arguments of a ``chunk`` call from the node's spec fields.
 
     Parameters
     ----------
@@ -645,10 +648,10 @@ def _rechunk_args(rechunk: Rechunk) -> tuple[Any, ...]:
     Returns
     -------
     tuple
-        The uniform form (``chunk("auto")``) when :attr:`~xrexpr.ir.Rechunk.uniform` is set,
-        the mapping form (``chunk({dim: spec})``) when :attr:`~xrexpr.ir.Rechunk.chunks` is,
-        and an empty header for a bare ``chunk()`` — the three cases ``schema._chunk_spec``
-        parses. Tuple because it is passed straight to args.
+        One of the three forms ``schema._chunk_spec`` parses: the uniform form
+        (``chunk("auto")``) when :attr:`~xrexpr.ir.Rechunk.uniform` is set, the per-dim
+        form (``chunk({dim: spec})``) when :attr:`~xrexpr.ir.Rechunk.chunks` is, or
+        empty for a bare ``chunk()``.
     """
     if rechunk.uniform is not None:
         return (rechunk.uniform.to_raw(),)
@@ -668,35 +671,41 @@ def _emit_node(node: LoweredOp) -> tuple[Call, ...]:
     Returns
     -------
     tuple of Call
-        One call for most kinds; two for a fused node, reassembled from the headers it
+        One call for most kinds; two for a fused node, rebuilt from the two calls it
         fused.
 
     Notes
     -----
-    The header is **derived from the node's semantic fields**, not copied from the recorded
-    ``args``/``kwargs`` — the inverse of ``schema.to_opnode``'s parse
-    (``planning/roadmap/02-lowering.md`` §7). A select's header is rebuilt from its
-    ``indexer`` (via each value's ``to_raw()``), a rechunk's from its ``chunks``/``uniform``,
-    a reduce's from its ``consumes``, and so on; the *option* kwargs a call carries
-    (``skipna``, ``drop``, ...) — which live nowhere else — are preserved verbatim. This is
-    what lets a rule (or a Rust optimiser) rewrite a *semantic field* and have the replayed
-    call follow, instead of each rule hand-rebuilding its own header. It also means the
-    emitted call is the **canonical** spelling of the selection, not necessarily the recorded
-    one: ``isel(time=0)`` re-emits as ``isel({"time": 0})``. The two replay identically —
-    equivalence, not byte-identity, is the contract (see ``test_lower.py``).
+    **The call is rebuilt from the node's semantic fields**, not copied from the
+    recorded ``args``/``kwargs``. This is the reverse of ``schema.to_opnode``'s parse
+    (``planning/roadmap/02-lowering.md`` §7):
 
-    Two families keep their recorded header instead. :class:`~xrexpr.ir.Elementwise` and
-    :class:`~xrexpr.ir.Opaque` carry no semantic spec — the header *is* the content — and
-    neither is ever reordered. And the fused nodes
-    (:class:`~xrexpr.ir.GroupedReduce`/:class:`~xrexpr.ir.WindowedReduce`/:class:`~xrexpr.ir.WeightedReduce`)
-    reassemble from the two headers they fused: deriving them would have to invent
-    ``groupby("time.month")`` back out of ``group_dim``/``new_dim``.
+    - a select's call comes from its ``indexer`` (each value's ``to_raw()``);
+    - a rechunk's from ``chunks``/``uniform``;
+    - a reduce's from ``consumes``; and so on.
 
-    ``assert_never`` closes the match: a new lowered variant fails type-check here until
-    someone says what it replays as, which is exactly the question a fused node exists to
-    answer. A :class:`~xrexpr.ir.ContextOpen` cannot reach this function at all — it is
-    not in :data:`~xrexpr.ir.LoweredOp` — so lowering's central invariant is enforced by
-    the type checker rather than by a runtime check here.
+    Option kwargs (``skipna``, ``drop``, ...) live nowhere else, so they're copied
+    verbatim. This is what lets a rule (or a Rust optimiser) change a semantic field and
+    have the replayed call follow, without each rule rebuilding calls itself.
+
+    It also means the emitted call is the *canonical* spelling, which may differ from
+    what was recorded: ``isel(time=0)`` comes back as ``isel({"time": 0})``. They replay
+    the same. The contract is equivalence, not byte-identical calls (see
+    ``test_lower.py``).
+
+    Two kinds keep their recorded call instead:
+
+    - :class:`~xrexpr.ir.Elementwise` and :class:`~xrexpr.ir.Opaque` have no semantic
+      fields (the call *is* the content), and neither is ever reordered.
+    - The fused nodes (:class:`~xrexpr.ir.GroupedReduce`,
+      :class:`~xrexpr.ir.WindowedReduce`, :class:`~xrexpr.ir.WeightedReduce`) replay the
+      two calls they fused. Rebuilding them would mean inventing
+      ``groupby("time.month")`` from ``group_dim``/``new_dim``.
+
+    The ``match`` is closed with ``assert_never``, so a new lowered kind fails
+    type-checking here until someone says how it replays. A
+    :class:`~xrexpr.ir.ContextOpen` can't reach this function: it isn't in
+    :data:`~xrexpr.ir.LoweredOp`, so the type checker enforces that lowering removed it.
     """
     match node:
         case GroupedReduce() as grouped:
@@ -728,9 +737,10 @@ def _emit_node(node: LoweredOp) -> tuple[Call, ...]:
             )
         case Reduce() as reduce:
             # Looks like args/kwargs are replayed verbatim and could drift out of sync,
-            # but _dim_call strips the dim out of the recorded header and rebuilds it from
-            # the node's semantic field (``consumes``); only the non-dim payload rides the
-            # header through, and that has no semantic twin to disagree with. So this is safe
+            # but _dim_call strips the dim out of the recorded header and rebuilds it
+            # from the node's semantic field (``consumes``); only the non-dim payload
+            # rides the header through, and that has no semantic twin to disagree with.
+            # So this is safe
             # - see https://github.com/charles-turner-1/xrexpr/pull/191 and
             # tests/test_lower.py::test_emit_follows_the_reduce_dim_not_a_stale_header.
             # Leans on the dim sitting at _dim_arg(name): test_operations pins the
@@ -791,8 +801,8 @@ def _emit_node(node: LoweredOp) -> tuple[Call, ...]:
         case Rename() as rename:
             return (Call(name=rename.name, args=(dict(rename.mapping),)),)
         case Elementwise() | Opaque():
-            # No semantic spec to derive from — the verbatim header *is* the content, and
-            # neither op is ever reordered or restructured, so it replays exactly as recorded.
+            # No semantic fields to rebuild from: the recorded call *is* the content,
+            # and neither kind is ever reordered, so it replays exactly as recorded.
             return (Call(name=node.name, args=node.args, kwargs=node.kwargs),)
         case _:
             assert_never(node)

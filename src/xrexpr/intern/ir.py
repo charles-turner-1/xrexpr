@@ -1,32 +1,31 @@
-"""The *interned* IR — every op's *names* relabeled to handles, its *structure* preserved.
+"""The *interned* IR records: every op's *names* replaced by handles, its structure kept.
 
-The optimiser reasons over the fluent/lowered IR (``ir.py``); this module is the last step
-before that plan crosses to a Rust backend that does the reasoning itself. Rust cannot hash
-or compare arbitrary Python objects, so dim and variable **names** are relabeled to
-:class:`~xrexpr.intern.interner.InternedVal` handles. But the reasoner needs the closed value
-sum-types — :data:`~xrexpr.indexers.Indexer`, :data:`~xrexpr.chunks.ChunkSpec` — as
-*structure* (they exist to map onto Rust enums), and it does arithmetic on the literal
-values inside them (slice bounds, positions, block sizes). So interning is **selective**:
+This is the form a plan takes when it's handed to a Rust backend. Rust can't hash or
+compare arbitrary Python objects, so dim and variable **names** are replaced by
+:class:`~xrexpr.intern.interner.InternedVal` handles. But the Rust side needs the value
+types (:data:`~xrexpr.indexers.Indexer`, :data:`~xrexpr.chunks.ChunkSpec`) as real
+structure, since they map onto Rust enums, and it does arithmetic on the numbers inside
+them. So interning is **selective**:
 
 - **Names** (dims, variables) become :class:`~xrexpr.intern.interner.InternedVal`.
 - **Values** (positions, bounds, sizes, labels, bools) and the ``Indexer``/``ChunkSpec``
-  wrappers are left exactly as they are. The one name buried inside a value is
-  ``Advanced.dims``, which :func:`_intern_indexer` relabels in place.
-- **Derived reasoning flags** the fluent node computes from its verbatim call header
-  (``keepdims``, ``single``, ``uniform``) are *materialized* onto the interned record as
-  typed fields, so the reasoner never parses ``args``/``kwargs``.
-- **``args``/``kwargs``** stay verbatim — the Python replay header (``lower._emit_node``
-  re-invokes them, and they carry options like ``skipna`` that live nowhere else). They are
-  the one loosely-typed slot, marked :data:`~xrexpr.payload.Payload`: the Rust reasoner
-  carries them but never reads or changes them.
+  wrappers are kept as they are. The one name inside a value is ``Advanced.dims``, which
+  :func:`~xrexpr.intern.converters._intern_indexer` interns.
+- **Derived flags** the fluent node computes from its verbatim call (``keepdims``,
+  ``single``, ``uniform``) are stored on the interned record as typed fields, so the Rust
+  side never parses ``args``/``kwargs``.
+- **``args``/``kwargs``** stay verbatim. They're the Python replay header
+  (``lower._emit_node`` reuses them, and they carry options like ``skipna`` that live
+  nowhere else). They're marked :data:`~xrexpr.payload.Payload`: Rust carries them but
+  never reads or changes them.
 
-Because a handle is a distinct *type* (``InternedVal``), it is never confused with a literal
-``int`` value: de-interning looks up an ``InternedVal`` and leaves a bare ``int`` alone.
-:class:`~xrexpr.ir.AllDims` is preserved as the sentinel it is.
+A handle is its own *type*, so it can't be confused with a plain ``int``: de-interning
+looks up each ``InternedVal`` and leaves a bare ``int`` alone. :class:`~xrexpr.ir.AllDims`
+is kept as the sentinel.
 
-Every ``FluentOp | LoweredOp`` has an interned counterpart by construction: :func:`intern`
-and :func:`deintern` close their ``match`` with ``assert_never``, so a new op variant is a
-type error here until both directions handle it.
+Every ``FluentOp | LoweredOp`` kind has a record here. :func:`~xrexpr.intern.intern` and
+:func:`~xrexpr.intern.deintern` close their ``match`` with ``assert_never``, so a new op
+kind is a type error until both directions handle it.
 """
 
 from dataclasses import dataclass, field
